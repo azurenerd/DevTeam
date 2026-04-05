@@ -15,6 +15,11 @@ out/
 ## User secrets
 secrets.json
 
+## App settings with real credentials
+**/appsettings.json
+**/appsettings.Development.json
+**/appsettings.Production.json
+
 ## NuGet
 *.nupkg
 *.snupkg
