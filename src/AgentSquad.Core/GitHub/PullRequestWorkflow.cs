@@ -86,6 +86,14 @@ public partial class PullRequestWorkflow
             return existing;
         }
 
+        // Commit a task tracking file so the branch differs from main (required for PR creation)
+        var taskSlug = Slugify(taskTitle);
+        var trackingPath = $".agentsquad/{taskSlug}.task";
+        var trackingContent = $"agent: {agentName}\ntask: {taskTitle}\ncomplexity: {complexity}\nstatus: in-progress\n";
+        _logger.LogInformation("Committing task marker to {Branch} for '{Title}'", branchName, taskTitle);
+        await _github.CreateOrUpdateFileAsync(
+            trackingPath, trackingContent, $"Start task: {taskTitle}", branchName, ct);
+
         var body = FormatPullRequestBody(agentName, complexity, branchName, taskDescription, architectureRef, specRef);
         var complexityLabel = GetComplexityLabel(complexity);
 
