@@ -26,6 +26,7 @@ public class PrincipalEngineerAgent : AgentBase
     private readonly AgentSquadConfig _config;
 
     private bool _planningComplete;
+    private bool _planningSignalReceived;
     private bool _resourceRequestPending;
     private readonly List<EngineeringTask> _taskBacklog = new();
     private readonly Dictionary<string, int> _agentAssignments = new(); // agentName → PR number
@@ -71,6 +72,9 @@ public class PrincipalEngineerAgent : AgentBase
 
         _subscriptions.Add(_messageBus.Subscribe<ChangesRequestedMessage>(
             Identity.Id, HandleChangesRequestedAsync));
+
+        _subscriptions.Add(_messageBus.Subscribe<PlanningCompleteMessage>(
+            Identity.Id, HandlePlanningCompleteAsync));
 
         Logger.LogInformation("Principal Engineer agent initialized, awaiting architecture document");
         return Task.CompletedTask;
@@ -137,6 +141,20 @@ public class PrincipalEngineerAgent : AgentBase
     {
         try
         {
+            // Primary trigger: PlanningCompleteMessage from PM
+            if (_planningSignalReceived)
+            {
+                // Verify architecture doc is also ready
+                var archDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+                if (!archDoc.Contains("No architecture document has been created yet", StringComparison.OrdinalIgnoreCase)
+                    && archDoc.Length > 200)
+                {
+                    Logger.LogInformation("Planning complete signal received and Architecture.md ready");
+                    return true;
+                }
+                Logger.LogInformation("Planning signal received but Architecture.md not ready yet, waiting...");
+            }
+
             // Check GitHub Issues targeted at "Principal Engineer"
             var issues = await _issueWorkflow.GetIssuesForAgentAsync("Principal Engineer", ct);
 
@@ -159,17 +177,30 @@ public class PrincipalEngineerAgent : AgentBase
                         "Acknowledged. Beginning engineering planning.",
                         ct);
 
-                    return true;
+                    // If we also have the planning signal (or enhancement issues exist), proceed
+                    var enhancements = await _github.GetIssuesByLabelAsync(
+                        IssueWorkflow.Labels.Enhancement, ct);
+                    if (_planningSignalReceived || enhancements.Count > 0)
+                        return true;
+
+                    Logger.LogInformation("Architecture ready but no enhancement issues yet, waiting for PM...");
                 }
             }
 
-            // Fallback: check if Architecture.md exists and has real content
+            // Fallback: check if both Architecture.md and enhancement issues exist
             var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
             if (!architectureDoc.Contains("No architecture document has been created yet", StringComparison.OrdinalIgnoreCase)
                 && architectureDoc.Length > 200)
             {
-                Logger.LogInformation("Architecture.md found with content, proceeding to planning");
-                return true;
+                var enhancementIssues = await _github.GetIssuesByLabelAsync(
+                    IssueWorkflow.Labels.Enhancement, ct);
+                if (enhancementIssues.Count > 0)
+                {
+                    Logger.LogInformation(
+                        "Architecture.md found with content and {Count} enhancement issues exist, proceeding",
+                        enhancementIssues.Count);
+                    return true;
+                }
             }
         }
         catch (Exception ex)
@@ -197,66 +228,65 @@ public class PrincipalEngineerAgent : AgentBase
             Logger.LogWarning("Existing EngineeringPlan.md has no tasks — regenerating");
         }
 
-        UpdateStatus(AgentStatus.Working, "Creating engineering plan");
-        Logger.LogInformation("Starting engineering plan creation");
+        UpdateStatus(AgentStatus.Working, "Creating engineering plan from Issues");
+        Logger.LogInformation("Starting engineering plan creation from Enhancement issues");
 
         var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
-        var researchDoc = await _projectFiles.GetResearchDocAsync(ct);
         var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+
+        // Read all Enhancement-labeled issues from GitHub
+        var enhancementIssues = await _github.GetIssuesByLabelAsync(
+            IssueWorkflow.Labels.Enhancement, ct);
+
+        if (enhancementIssues.Count == 0)
+        {
+            Logger.LogWarning("No enhancement issues found, cannot create engineering plan");
+            return;
+        }
+
+        // Build a summary of all issues for the AI
+        var issuesSummary = string.Join("\n\n", enhancementIssues.Select(i =>
+            $"### Issue #{i.Number}: {i.Title}\n{i.Body}"));
 
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var history = new ChatHistory();
         history.AddSystemMessage(
-            "You are a Principal Engineer creating an engineering plan from an architecture document " +
-            "and PM specification. The PM spec defines the business goals, user stories, and acceptance " +
-            "criteria. The architecture defines the technical design. " +
-            "Break down the architecture into concrete, actionable engineering tasks that fulfill " +
-            "the business requirements. " +
-            "Classify each task by complexity:\n" +
-            "- **High**: Complex tasks requiring deep expertise (assigned to Principal Engineer)\n" +
-            "- **Medium**: Moderate tasks requiring solid experience (assigned to Senior Engineers)\n" +
-            "- **Low**: Straightforward tasks suitable for guided work (assigned to Junior Engineers)\n\n" +
-            "Identify dependencies between tasks. Be specific and practical. " +
-            "Each task description must contain enough context for the assigned engineer to work independently.");
+            "You are a Principal Engineer creating an engineering plan from GitHub Issues (User Stories), " +
+            "an architecture document, and a PM specification. " +
+            "Each GitHub Issue represents a User Story or Feature from the PM Spec.\n\n" +
+            "Your job is to:\n" +
+            "1. Review each Issue and the architecture/PM spec\n" +
+            "2. Map each Issue to one or more engineering tasks\n" +
+            "3. Classify each task by complexity (High/Medium/Low)\n" +
+            "4. Identify dependencies between tasks\n" +
+            "5. Reference the source GitHub Issue number for each task\n\n" +
+            "Task complexity mapping:\n" +
+            "- **High**: Complex tasks requiring deep expertise → Principal Engineer\n" +
+            "- **Medium**: Moderate tasks → Senior Engineers\n" +
+            "- **Low**: Straightforward tasks → Junior Engineers");
 
-        // Turn 1: Analyze and identify tasks
         history.AddUserMessage(
-            $"## PM Specification (Business Requirements)\n{pmSpec}\n\n" +
+            $"## PM Specification\n{pmSpec}\n\n" +
             $"## Architecture Document\n{architectureDoc}\n\n" +
-            $"## Research Findings\n{researchDoc}\n\n" +
-            "Analyze the architecture and break it down into engineering tasks. " +
-            "For each task provide:\n" +
-            "1. A short unique ID (T1, T2, ...)\n" +
-            "2. Task name\n" +
-            "3. Detailed description of what needs to be built\n" +
-            "4. Complexity: High, Medium, or Low\n" +
-            "5. Dependencies on other tasks (by ID)\n" +
-            "6. Estimated effort (Small, Medium, Large)\n\n" +
-            "List them in dependency order (tasks with no dependencies first).");
-
-        var tasksResponse = await chat.GetChatMessageContentAsync(
-            history, cancellationToken: ct);
-        history.AddAssistantMessage(tasksResponse.Content ?? "");
-
-        Logger.LogDebug("Task breakdown identified");
-
-        // Turn 2: Produce structured output
-        history.AddUserMessage(
-            "Now produce the tasks in this exact structured format, one per line:\n" +
-            "TASK|<ID>|<Name>|<Description>|<Complexity>|<Dependencies comma-separated or NONE>|<Effort>\n\n" +
+            $"## GitHub Issues (User Stories)\n{issuesSummary}\n\n" +
+            "Create an engineering plan mapping these Issues to tasks. " +
+            "Output ONLY structured lines in this format:\n" +
+            "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>\n\n" +
             "Example:\n" +
-            "TASK|T1|Set up project structure|Create solution, projects, and folder layout|Low|NONE|Small\n" +
-            "TASK|T2|Implement auth module|Build JWT authentication with refresh tokens|High|T1|Large\n\n" +
+            "TASK|T1|42|Set up project structure|Create solution, projects, and folder layout|Low|NONE\n" +
+            "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|High|T1\n\n" +
             "Only output TASK lines, nothing else.");
 
-        var structuredResponse = await chat.GetChatMessageContentAsync(
+        var response = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
-        var structuredText = structuredResponse.Content ?? "";
+        var structuredText = response.Content ?? "";
 
         // Parse tasks from structured output
         _taskBacklog.Clear();
+        var issueMap = enhancementIssues.ToDictionary(i => i.Number);
+
         foreach (var line in structuredText.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             var trimmed = line.Trim();
@@ -267,33 +297,44 @@ public class PrincipalEngineerAgent : AgentBase
             if (parts.Length < 7)
                 continue;
 
-            var deps = parts[5].Trim().Equals("NONE", StringComparison.OrdinalIgnoreCase)
+            var deps = parts[6].Trim().Equals("NONE", StringComparison.OrdinalIgnoreCase)
                 ? new List<string>()
-                : parts[5].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+                : parts[6].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+            int.TryParse(parts[2].Trim().TrimStart('#'), out var issueNum);
+            var issueUrl = issueMap.TryGetValue(issueNum, out var iss) ? iss.Url : null;
 
             _taskBacklog.Add(new EngineeringTask
             {
                 Id = parts[1].Trim(),
-                Name = parts[2].Trim(),
-                Description = parts[3].Trim(),
-                Complexity = NormalizeComplexity(parts[4].Trim()),
-                Dependencies = deps
+                Name = parts[3].Trim(),
+                Description = parts[4].Trim(),
+                Complexity = NormalizeComplexity(parts[5].Trim()),
+                Dependencies = deps,
+                IssueNumber = issueNum > 0 ? issueNum : null,
+                IssueUrl = issueUrl
             });
         }
 
         if (_taskBacklog.Count == 0)
         {
-            Logger.LogWarning("No tasks parsed from AI response, creating a fallback task");
-            _taskBacklog.Add(new EngineeringTask
+            Logger.LogWarning("No tasks parsed from AI response, creating a fallback task per issue");
+            foreach (var issue in enhancementIssues)
             {
-                Id = "T1",
-                Name = "Review and plan implementation",
-                Description = "Review architecture document and create detailed implementation plan",
-                Complexity = "High"
-            });
+                _taskBacklog.Add(new EngineeringTask
+                {
+                    Id = $"T-{issue.Number}",
+                    Name = issue.Title,
+                    Description = issue.Body,
+                    Complexity = "Medium",
+                    IssueNumber = issue.Number,
+                    IssueUrl = issue.Url
+                });
+            }
         }
 
-        Logger.LogInformation("Engineering plan created with {Count} tasks", _taskBacklog.Count);
+        Logger.LogInformation("Engineering plan created with {Count} tasks from {IssueCount} issues",
+            _taskBacklog.Count, enhancementIssues.Count);
 
         // Save the engineering plan document
         var planDoc = BuildEngineeringPlanMarkdown();
@@ -331,16 +372,17 @@ public class PrincipalEngineerAgent : AgentBase
 
             foreach (var engineer in registeredEngineers)
             {
-                // Skip if this engineer already has an active PR assignment
+                // Skip if this engineer already has an active assignment
                 if (_agentAssignments.ContainsKey(engineer.Name))
                 {
-                    var assignedPr = await _github.GetPullRequestAsync(
-                        _agentAssignments[engineer.Name], ct);
-                    if (assignedPr is not null
-                        && string.Equals(assignedPr.State, "open", StringComparison.OrdinalIgnoreCase))
+                    // Check if the previously assigned issue's PR is still open
+                    var assignedIssueNum = _agentAssignments[engineer.Name];
+                    var assignedIssue = await _github.GetIssueAsync(assignedIssueNum, ct);
+                    if (assignedIssue is not null &&
+                        string.Equals(assignedIssue.State, "open", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    // PR is closed/merged, remove tracking
+                    // Issue is closed, remove tracking
                     _agentAssignments.Remove(engineer.Name);
                 }
 
@@ -359,53 +401,44 @@ public class PrincipalEngineerAgent : AgentBase
                 if (task is null)
                     continue;
 
-                // Generate rich PR description using AI + project documents
-                var enrichedDescription = await GenerateTaskDescriptionAsync(task, ct);
-
-                // Create branch and PR for the task
-                var branchName = await _prWorkflow.CreateTaskBranchAsync(
-                    engineer.Name, $"{task.Id}-{task.Name}", ct);
-
-                var pr = await _prWorkflow.CreateTaskPullRequestAsync(
-                    engineer.Name,
-                    task.Name,
-                    enrichedDescription,
-                    task.Complexity,
-                    "Architecture.md",
-                    "PMSpec.md",
-                    branchName,
-                    ct);
-
-                // Track the assignment
-                _agentAssignments[engineer.Name] = pr.Number;
-
-                var taskIndex = _taskBacklog.FindIndex(t => t.Id == task.Id);
-                if (taskIndex >= 0)
+                // Assign the Issue by updating its title to include the engineer name
+                if (task.IssueNumber.HasValue)
                 {
-                    _taskBacklog[taskIndex] = task with
+                    var newTitle = $"{engineer.Name}: {task.Name}";
+                    await _github.UpdateIssueTitleAsync(task.IssueNumber.Value, newTitle, ct);
+
+                    _agentAssignments[engineer.Name] = task.IssueNumber.Value;
+
+                    var taskIndex = _taskBacklog.FindIndex(t => t.Id == task.Id);
+                    if (taskIndex >= 0)
                     {
-                        Status = "Assigned",
-                        AssignedTo = engineer.Name,
-                        PullRequestNumber = pr.Number
-                    };
+                        _taskBacklog[taskIndex] = task with
+                        {
+                            Status = "Assigned",
+                            AssignedTo = engineer.Name
+                        };
+                    }
+
+                    Logger.LogInformation(
+                        "Assigned issue #{IssueNumber} ({TaskName}) to {Engineer}",
+                        task.IssueNumber, task.Name, engineer.Name);
+
+                    // Notify the engineer via message bus
+                    await _messageBus.PublishAsync(new IssueAssignmentMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = engineer.Name,
+                        MessageType = "IssueAssignment",
+                        IssueNumber = task.IssueNumber.Value,
+                        IssueTitle = task.Name,
+                        Complexity = task.Complexity,
+                        IssueUrl = task.IssueUrl
+                    }, ct);
                 }
-
-                Logger.LogInformation(
-                    "Assigned task {TaskId} ({TaskName}) to {Engineer} via PR #{PrNumber}",
-                    task.Id, task.Name, engineer.Name, pr.Number);
-
-                // Notify the engineer via message bus with enriched context
-                await _messageBus.PublishAsync(new TaskAssignmentMessage
+                else
                 {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = engineer.Name,
-                    MessageType = "TaskAssignment",
-                    TaskId = task.Id,
-                    Title = task.Name,
-                    Description = enrichedDescription,
-                    Complexity = task.Complexity,
-                    PullRequestUrl = pr.Url
-                }, ct);
+                    Logger.LogWarning("Task {TaskId} has no linked issue, cannot assign", task.Id);
+                }
             }
         }
         catch (Exception ex)
@@ -429,9 +462,22 @@ public class PrincipalEngineerAgent : AgentBase
             Logger.LogInformation("Principal Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
+            // Assign the Issue to self by updating its title
+            if (task.IssueNumber.HasValue)
+            {
+                await _github.UpdateIssueTitleAsync(
+                    task.IssueNumber.Value,
+                    $"{Identity.DisplayName}: {task.Name}",
+                    ct);
+            }
+
             // Generate rich PR description using AI + project documents
             UpdateStatus(AgentStatus.Working, $"Planning: {task.Name}");
             var prDescription = await GenerateTaskDescriptionAsync(task, ct);
+
+            // Add Issue link to PR description
+            if (task.IssueNumber.HasValue)
+                prDescription = $"Closes #{task.IssueNumber}\n\n{prDescription}";
 
             var branchName = await _prWorkflow.CreateTaskBranchAsync(
                 Identity.DisplayName,
@@ -472,20 +518,31 @@ public class PrincipalEngineerAgent : AgentBase
             var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
             var techStack = _config.Project.TechStack;
 
+            // Read Issue details for additional context
+            var issueContext = "";
+            if (task.IssueNumber.HasValue)
+            {
+                var issue = await _github.GetIssueAsync(task.IssueNumber.Value, ct);
+                if (issue is not null)
+                    issueContext = $"\n\n## GitHub Issue #{issue.Number}: {issue.Title}\n{issue.Body}";
+            }
+
             var history = new ChatHistory();
             history.AddSystemMessage(
                 $"You are a Principal Engineer implementing a high-complexity engineering task. " +
                 $"The project uses {techStack} as its technology stack. " +
                 "The PM Specification defines the business requirements, and the Architecture " +
-                "document defines the technical design. " +
+                "document defines the technical design. The GitHub Issue contains the User Story " +
+                "and acceptance criteria for this specific task. " +
                 "Produce detailed, production-quality code. " +
                 "Ensure the implementation fulfills the business goals from the PM spec. " +
                 "Be thorough — this is the most critical part of the system.");
 
             history.AddUserMessage(
                 $"## PM Specification\n{pmSpecDoc}\n\n" +
-                $"## Architecture\n{architectureDoc}\n\n" +
-                $"## Task: {task.Name}\n{task.Description}\n\n" +
+                $"## Architecture\n{architectureDoc}" +
+                issueContext +
+                $"\n\n## Task: {task.Name}\n{task.Description}\n\n" +
                 "Produce a complete implementation for this task. " +
                 "Output each file using this exact format:\n\n" +
                 "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
@@ -527,7 +584,7 @@ public class PrincipalEngineerAgent : AgentBase
             // Mark ready for review
             await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
 
-            // Notify PM and Architect to review this PR
+            // Notify PM and PE to review this PR
             await _messageBus.PublishAsync(new ReviewRequestMessage
             {
                 FromAgentId = Identity.Id,
@@ -915,6 +972,15 @@ public class PrincipalEngineerAgent : AgentBase
         return Task.CompletedTask;
     }
 
+    private Task HandlePlanningCompleteAsync(PlanningCompleteMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Planning complete signal received from {Agent}: {Count} issues created",
+            message.FromAgentId, message.IssueCount);
+        _planningSignalReceived = true;
+        return Task.CompletedTask;
+    }
+
     #endregion
 
     #region AI-Assisted Methods
@@ -1176,19 +1242,20 @@ public class PrincipalEngineerAgent : AgentBase
         // Task table
         sb.AppendLine("## Tasks");
         sb.AppendLine();
-        sb.AppendLine("| ID | Task | Complexity | Assigned To | PR | Status | Dependencies |");
-        sb.AppendLine("|----|------|-----------|-------------|-----|--------|-------------|");
+        sb.AppendLine("| ID | Task | Complexity | Assigned To | Issue | PR | Status | Dependencies |");
+        sb.AppendLine("|----|------|-----------|-------------|-------|-----|--------|-------------|");
 
         foreach (var task in _taskBacklog)
         {
             var assignedTo = task.AssignedTo ?? "—";
+            var issueLink = task.IssueNumber.HasValue ? $"#{task.IssueNumber}" : "—";
             var prLink = task.PullRequestNumber.HasValue ? $"#{task.PullRequestNumber}" : "—";
             var deps = task.Dependencies.Count > 0
                 ? string.Join(", ", task.Dependencies)
                 : "—";
 
             sb.AppendLine($"| {task.Id} | {task.Name} | {task.Complexity} | " +
-                          $"{assignedTo} | {prLink} | {task.Status} | {deps} |");
+                          $"{assignedTo} | {issueLink} | {prLink} | {task.Status} | {deps} |");
         }
 
         sb.AppendLine();
@@ -1207,6 +1274,8 @@ internal record EngineeringTask
     public string Status { get; init; } = "Pending";
     public string? AssignedTo { get; init; }
     public int? PullRequestNumber { get; init; }
+    public int? IssueNumber { get; init; }
+    public string? IssueUrl { get; init; }
     public List<string> Dependencies { get; init; } = new();
 }
 

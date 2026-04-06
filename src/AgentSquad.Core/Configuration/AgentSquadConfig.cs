@@ -26,6 +26,13 @@ public class ProjectConfig
     public string TechStack { get; set; } = "C# .NET 8 with Blazor Server";
 
     /// <summary>
+    /// GitHub username of the Executive stakeholder (human) for escalation.
+    /// The PM agent creates executive-request Issues assigned to this user when
+    /// it needs human clarification on requirements.
+    /// </summary>
+    public string ExecutiveGitHubUsername { get; set; } = "azurenerd";
+
+    /// <summary>
     /// Custom prompt that guides the Researcher agent on what to investigate.
     /// When empty, a comprehensive default prompt is generated from the project description.
     /// Use this to steer research toward specific areas, technologies, or concerns.
@@ -68,6 +75,12 @@ public class LimitsConfig
     public int GitHubPollIntervalSeconds { get; set; } = 30;
     public int AgentTimeoutMinutes { get; set; } = 15;
     public int MaxConcurrentAgents { get; set; } = 10;
+
+    /// <summary>
+    /// Maximum number of clarification round-trips between an engineer and the PM
+    /// on a single Issue before the engineer proceeds with best understanding.
+    /// </summary>
+    public int MaxClarificationRoundTrips { get; set; } = 5;
 
     /// <summary>
     /// If the Principal Engineer estimates all remaining tasks can be completed within

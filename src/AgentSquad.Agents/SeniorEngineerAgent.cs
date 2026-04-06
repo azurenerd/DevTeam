@@ -24,7 +24,11 @@ public class SeniorEngineerAgent : AgentBase
 
     private readonly HashSet<int> _processedIssueIds = new();
     private readonly ConcurrentQueue<ReworkItem> _reworkQueue = new();
+    private readonly ConcurrentQueue<IssueAssignmentMessage> _assignmentQueue = new();
+    private readonly ConcurrentQueue<ClarificationResponseMessage> _clarificationResponses = new();
     private readonly List<IDisposable> _subscriptions = new();
+    private int? _currentIssueNumber;
+    private int? _currentPrNumber;
 
     public SeniorEngineerAgent(
         AgentIdentity identity,
@@ -52,8 +56,14 @@ public class SeniorEngineerAgent : AgentBase
         _subscriptions.Add(_messageBus.Subscribe<TaskAssignmentMessage>(
             Identity.Id, HandleTaskAssignmentAsync));
 
+        _subscriptions.Add(_messageBus.Subscribe<IssueAssignmentMessage>(
+            Identity.Id, HandleIssueAssignmentAsync));
+
         _subscriptions.Add(_messageBus.Subscribe<ChangesRequestedMessage>(
             Identity.Id, HandleChangesRequestedAsync));
+
+        _subscriptions.Add(_messageBus.Subscribe<ClarificationResponseMessage>(
+            Identity.Id, HandleClarificationResponseAsync));
 
         Logger.LogInformation("Senior Engineer {Name} initialized, awaiting task assignments",
             Identity.DisplayName);
@@ -75,17 +85,28 @@ public class SeniorEngineerAgent : AgentBase
                     continue;
                 }
 
-                var myTasks = await _prWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
-                var activePR = myTasks.FirstOrDefault(pr =>
-                    string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase));
-
-                if (activePR != null && Identity.AssignedPullRequest != activePR.Number.ToString())
+                // Priority 2: Process new issue assignments from PE
+                if (_assignmentQueue.TryDequeue(out var assignment))
                 {
-                    await WorkOnTaskAsync(activePR, ct);
+                    await WorkOnIssueAsync(assignment, ct);
+                    continue;
                 }
-                else if (activePR == null)
+
+                // Priority 3: Check for existing PR work (recovery after restart)
+                if (_currentPrNumber is null)
                 {
-                    UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
+                    var myTasks = await _prWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
+                    var activePR = myTasks.FirstOrDefault(pr =>
+                        string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase));
+
+                    if (activePR != null && Identity.AssignedPullRequest != activePR.Number.ToString())
+                    {
+                        await WorkOnTaskAsync(activePR, ct);
+                    }
+                    else if (activePR == null)
+                    {
+                        UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
+                    }
                 }
 
                 await CheckForIssuesAsync(ct);
@@ -286,7 +307,278 @@ public class SeniorEngineerAgent : AgentBase
 
     #endregion
 
-    #region Issue Handling
+    #region Issue-Driven Work
+
+    /// <summary>
+    /// Processes a new Issue assignment from the PE. Reads the Issue, creates a PR linking to it,
+    /// and implements the solution. Supports clarification loop with the PM.
+    /// </summary>
+    private async Task WorkOnIssueAsync(IssueAssignmentMessage assignment, CancellationToken ct)
+    {
+        try
+        {
+            _currentIssueNumber = assignment.IssueNumber;
+            UpdateStatus(AgentStatus.Working, $"Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
+
+            var issue = await _github.GetIssueAsync(assignment.IssueNumber, ct);
+            if (issue is null)
+            {
+                Logger.LogWarning("Cannot find issue #{Number}", assignment.IssueNumber);
+                _currentIssueNumber = null;
+                return;
+            }
+
+            Logger.LogInformation("Senior Engineer {Name} starting work on issue #{Number}: {Title}",
+                Identity.DisplayName, issue.Number, issue.Title);
+
+            var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
+            var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+            var techStack = _config.Project.TechStack;
+
+            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            // Use AI to understand the Issue and plan approach
+            var planHistory = new ChatHistory();
+            planHistory.AddSystemMessage(
+                $"You are a Senior Engineer analyzing a GitHub Issue (User Story) before starting work. " +
+                $"The project uses {techStack}. " +
+                "Read the Issue carefully and produce:\n" +
+                "1. A summary of what you understand needs to be built\n" +
+                "2. The acceptance criteria extracted from the Issue\n" +
+                "3. A high-level task list of what you plan to do\n" +
+                "4. Any questions you have — if the requirements are UNCLEAR, list them. " +
+                "If you understand everything well enough to proceed, say 'NO_QUESTIONS'.");
+
+            planHistory.AddUserMessage(
+                $"## PM Specification\n{pmSpecDoc}\n\n" +
+                $"## Architecture\n{architectureDoc}\n\n" +
+                $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}");
+
+            var planResponse = await chat.GetChatMessageContentAsync(planHistory, cancellationToken: ct);
+            var planContent = planResponse.Content?.Trim() ?? "";
+
+            // Check if the engineer has questions
+            if (!planContent.Contains("NO_QUESTIONS", StringComparison.OrdinalIgnoreCase) &&
+                planContent.Contains("?"))
+            {
+                var maxRounds = _config.Limits.MaxClarificationRoundTrips;
+                var clarificationRounds = 0;
+
+                while (clarificationRounds < maxRounds)
+                {
+                    // Extract questions from the plan
+                    var questions = ExtractQuestions(planContent);
+                    if (string.IsNullOrWhiteSpace(questions))
+                        break;
+
+                    Logger.LogInformation(
+                        "Senior Engineer {Name} asking clarification on issue #{Number} (round {Round}/{Max})",
+                        Identity.DisplayName, issue.Number, clarificationRounds + 1, maxRounds);
+
+                    // Post question on the Issue
+                    await _github.AddIssueCommentAsync(issue.Number,
+                        $"**{Identity.DisplayName}** has questions before starting work:\n\n{questions}",
+                        ct);
+
+                    // Notify PM via message bus
+                    await _messageBus.PublishAsync(new ClarificationRequestMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "ClarificationRequest",
+                        IssueNumber = issue.Number,
+                        Question = questions
+                    }, ct);
+
+                    UpdateStatus(AgentStatus.Blocked, $"Waiting for clarification on issue #{issue.Number}");
+
+                    // Wait for response (poll the clarification response queue)
+                    var responseReceived = false;
+                    for (var i = 0; i < 60; i++) // Wait up to ~5 minutes
+                    {
+                        if (_clarificationResponses.TryDequeue(out var resp) &&
+                            resp.IssueNumber == issue.Number)
+                        {
+                            responseReceived = true;
+                            // Re-analyze with the response
+                            planHistory.AddAssistantMessage(planContent);
+                            planHistory.AddUserMessage(
+                                $"The PM has responded to your questions:\n\n{resp.Response}\n\n" +
+                                "Based on this clarification, update your understanding. " +
+                                "If you still have questions, list them. Otherwise say 'NO_QUESTIONS'.");
+
+                            var updatedPlan = await chat.GetChatMessageContentAsync(
+                                planHistory, cancellationToken: ct);
+                            planContent = updatedPlan.Content?.Trim() ?? "";
+                            break;
+                        }
+                        await Task.Delay(5000, ct);
+                    }
+
+                    if (!responseReceived)
+                    {
+                        Logger.LogWarning(
+                            "No clarification response received for issue #{Number}, proceeding anyway",
+                            issue.Number);
+                        break;
+                    }
+
+                    clarificationRounds++;
+
+                    if (planContent.Contains("NO_QUESTIONS", StringComparison.OrdinalIgnoreCase))
+                        break;
+                }
+            }
+
+            // Create PR linking to the Issue
+            var prDescription = $"Closes #{issue.Number}\n\n" +
+                $"## Understanding\n{ExtractSection(planContent, "summary", "understand")}\n\n" +
+                $"## Acceptance Criteria\n{ExtractSection(planContent, "acceptance", "criteria")}\n\n" +
+                $"## Planned Approach\n{ExtractSection(planContent, "task", "plan")}";
+
+            var branchName = await _prWorkflow.CreateTaskBranchAsync(
+                Identity.DisplayName,
+                $"issue-{issue.Number}-{Slugify(issue.Title)}",
+                ct);
+
+            var pr = await _prWorkflow.CreateTaskPullRequestAsync(
+                Identity.DisplayName,
+                issue.Title,
+                prDescription,
+                assignment.Complexity,
+                "Architecture.md",
+                "PMSpec.md",
+                branchName,
+                ct);
+
+            _currentPrNumber = pr.Number;
+            Identity.AssignedPullRequest = pr.Number.ToString();
+
+            Logger.LogInformation(
+                "Senior Engineer {Name} created PR #{PrNumber} for issue #{IssueNumber}",
+                Identity.DisplayName, pr.Number, issue.Number);
+
+            // Now do the implementation (reuse existing WorkOnTaskAsync logic for the AI work)
+            await ImplementAndCommitAsync(pr, issue, ct);
+
+            _currentIssueNumber = null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Senior Engineer {Name} failed on issue #{Number}",
+                Identity.DisplayName, assignment.IssueNumber);
+            RecordError($"Failed on issue #{assignment.IssueNumber}: {ex.Message}",
+                Microsoft.Extensions.Logging.LogLevel.Error, ex);
+            _currentIssueNumber = null;
+        }
+    }
+
+    /// <summary>
+    /// Core implementation logic: uses AI to produce code, commits it to the PR, marks ready for review.
+    /// </summary>
+    private async Task ImplementAndCommitAsync(AgentPullRequest pr, AgentIssue issue, CancellationToken ct)
+    {
+        var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+        var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
+        var techStack = _config.Project.TechStack;
+
+        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+        var history = new ChatHistory();
+        history.AddSystemMessage(
+            $"You are a Senior Engineer implementing a task from a GitHub Issue. " +
+            $"The project uses {techStack} as its technology stack. " +
+            "You produce clean, well-structured code that follows the project architecture " +
+            "and fulfills the business requirements from the PM specification. " +
+            "Include proper error handling, logging, and unit tests.");
+
+        history.AddUserMessage(
+            $"## PM Specification\n{pmSpecDoc}\n\n" +
+            $"## Architecture\n{architectureDoc}\n\n" +
+            $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n" +
+            $"## PR Description\n{pr.Body}\n\n" +
+            "Produce a complete implementation. Output each file using this format:\n\n" +
+            "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
+            $"Use the {techStack} technology stack. " +
+            "Include all source code files, configuration, and tests. " +
+            "Every file MUST use the FILE: marker format.");
+
+        var implResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        history.AddAssistantMessage(implResponse.Content ?? "");
+        var implementation = implResponse.Content?.Trim() ?? "";
+
+        // Self-review pass
+        history.AddUserMessage(
+            "Review your implementation critically. Check for missing error handling, " +
+            "architecture alignment issues, edge cases, and bugs. " +
+            "If you find issues, provide the COMPLETE corrected files using the same FILE: format. " +
+            "If it looks good, confirm with a brief summary.");
+
+        var reviewResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        var finalOutput = reviewResponse.Content?.Trim() ?? implementation;
+
+        // Parse code files and commit
+        var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(finalOutput);
+        if (codeFiles.Count == 0)
+            codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
+
+        if (codeFiles.Count > 0)
+        {
+            Logger.LogInformation(
+                "Senior Engineer {Name} parsed {Count} code files for PR #{Number}",
+                Identity.DisplayName, codeFiles.Count, pr.Number);
+
+            await _prWorkflow.CommitCodeFilesToPRAsync(
+                pr.Number, codeFiles, $"Implement issue #{issue.Number}: {issue.Title}", ct);
+        }
+        else
+        {
+            Logger.LogWarning(
+                "Senior Engineer {Name} could not parse structured files for PR #{Number}, committing raw",
+                Identity.DisplayName, pr.Number);
+
+            await _prWorkflow.CommitFixesToPRAsync(
+                pr.Number,
+                $"src/issue-{issue.Number}-implementation.md",
+                $"## Implementation\n\n{finalOutput}",
+                "Add implementation",
+                ct);
+        }
+
+        // Mark ready for review
+        await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+
+        // Notify PM and PE to review
+        await _messageBus.PublishAsync(new ReviewRequestMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = "*",
+            MessageType = "ReviewRequest",
+            PrNumber = pr.Number,
+            PrTitle = pr.Title,
+            ReviewType = "CodeReview"
+        }, ct);
+
+        await _messageBus.PublishAsync(new StatusUpdateMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = "*",
+            MessageType = "TaskComplete",
+            NewStatus = AgentStatus.Online,
+            CurrentTask = issue.Title,
+            Details = $"PR #{pr.Number} implementation complete and ready for review."
+        }, ct);
+
+        Logger.LogInformation(
+            "Senior Engineer {Name} completed PR #{Number}, marked ready for review",
+            Identity.DisplayName, pr.Number);
+
+        UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting next task");
+        Identity.AssignedPullRequest = null;
+        _currentPrNumber = null;
+    }
 
     private async Task CheckForIssuesAsync(CancellationToken ct)
     {
@@ -355,10 +647,20 @@ public class SeniorEngineerAgent : AgentBase
         return Task.CompletedTask;
     }
 
+    private Task HandleIssueAssignmentAsync(IssueAssignmentMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Senior Engineer {Name} received issue assignment: #{IssueNumber} {Title}",
+            Identity.DisplayName, message.IssueNumber, message.IssueTitle);
+        _assignmentQueue.Enqueue(message);
+        return Task.CompletedTask;
+    }
+
     private Task HandleChangesRequestedAsync(ChangesRequestedMessage message, CancellationToken ct)
     {
         // Only handle feedback for PRs assigned to this agent
-        if (Identity.AssignedPullRequest != message.PrNumber.ToString())
+        if (Identity.AssignedPullRequest != message.PrNumber.ToString() &&
+            _currentPrNumber != message.PrNumber)
             return Task.CompletedTask;
 
         Logger.LogInformation(
@@ -366,6 +668,15 @@ public class SeniorEngineerAgent : AgentBase
             Identity.DisplayName, message.ReviewerAgent, message.PrNumber);
 
         _reworkQueue.Enqueue(new ReworkItem(message.PrNumber, message.PrTitle, message.Feedback, message.ReviewerAgent));
+        return Task.CompletedTask;
+    }
+
+    private Task HandleClarificationResponseAsync(ClarificationResponseMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Senior Engineer {Name} received clarification response for issue #{IssueNumber}",
+            Identity.DisplayName, message.IssueNumber);
+        _clarificationResponses.Enqueue(message);
         return Task.CompletedTask;
     }
 
@@ -457,4 +768,58 @@ public class SeniorEngineerAgent : AgentBase
                 Identity.DisplayName, rework.PrNumber);
         }
     }
+
+    #region Helpers
+
+    /// <summary>Extract question lines from AI plan output.</summary>
+    private static string ExtractQuestions(string content)
+    {
+        var lines = content.Split('\n');
+        var questions = lines.Where(l => l.TrimStart().Contains('?')).ToList();
+        return questions.Count > 0 ? string.Join("\n", questions) : "";
+    }
+
+    /// <summary>Extract a rough section from plan content by keyword match.</summary>
+    private static string ExtractSection(string content, params string[] keywords)
+    {
+        var lines = content.Split('\n');
+        var collecting = false;
+        var result = new List<string>();
+
+        foreach (var line in lines)
+        {
+            var lower = line.ToLowerInvariant();
+            if (keywords.Any(k => lower.Contains(k)))
+            {
+                collecting = true;
+                result.Add(line);
+                continue;
+            }
+
+            if (collecting)
+            {
+                // Stop at next section header
+                if (line.TrimStart().StartsWith('#') || line.TrimStart().StartsWith("**"))
+                {
+                    if (result.Count > 1) break;
+                }
+                result.Add(line);
+            }
+        }
+
+        return result.Count > 0 ? string.Join('\n', result).Trim() : content[..Math.Min(500, content.Length)];
+    }
+
+    /// <summary>Create a URL-safe slug from a title.</summary>
+    private static string Slugify(string title)
+    {
+        var slug = title.ToLowerInvariant()
+            .Replace(' ', '-')
+            .Replace(':', '-');
+        // Remove non-alphanumeric except hyphens
+        slug = new string(slug.Where(c => char.IsLetterOrDigit(c) || c == '-').ToArray());
+        return slug.Length > 40 ? slug[..40] : slug;
+    }
+
+    #endregion
 }

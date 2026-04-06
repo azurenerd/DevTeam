@@ -21,6 +21,8 @@ public class IssueWorkflow
         public const string AgentQuestion = "agent-question";
         public const string AgentStuck = "agent-stuck";
         public const string Resolved = "resolved";
+        public const string Enhancement = "enhancement";
+        public const string Documentation = "documentation";
     }
 
     public IssueWorkflow(IGitHubService github, ILogger<IssueWorkflow> logger)

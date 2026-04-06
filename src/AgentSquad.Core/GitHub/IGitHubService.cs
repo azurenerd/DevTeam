@@ -20,7 +20,9 @@ public interface IGitHubService
     Task<AgentIssue?> GetIssueAsync(int number, CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetOpenIssuesAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetIssuesForAgentAsync(string agentName, CancellationToken ct = default);
+    Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default);
     Task AddIssueCommentAsync(int issueNumber, string comment, CancellationToken ct = default);
+    Task UpdateIssueTitleAsync(int issueNumber, string newTitle, CancellationToken ct = default);
     Task CloseIssueAsync(int issueNumber, CancellationToken ct = default);
 
     // File Management

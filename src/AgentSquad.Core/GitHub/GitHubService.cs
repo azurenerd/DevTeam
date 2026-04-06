@@ -330,6 +330,44 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default)
+    {
+        try
+        {
+            var request = new RepositoryIssueRequest
+            {
+                State = ItemStateFilter.Open,
+                Filter = IssueFilter.All
+            };
+            request.Labels.Add(label);
+
+            var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
+            return issues
+                .Where(i => i.PullRequest is null) // Exclude PRs from issue list
+                .Select(i => MapIssue(i))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get issues with label {Label}", label);
+            throw;
+        }
+    }
+
+    public async Task UpdateIssueTitleAsync(int issueNumber, string newTitle, CancellationToken ct = default)
+    {
+        try
+        {
+            await _client.Issue.Update(_owner, _repo, issueNumber, new IssueUpdate { Title = newTitle });
+            _logger.LogInformation("Updated issue #{Number} title to '{Title}'", issueNumber, newTitle);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update issue #{Number} title", issueNumber);
+            throw;
+        }
+    }
+
     // File Management
 
     public async Task<string?> GetFileContentAsync(string path, string? branch = null, CancellationToken ct = default)

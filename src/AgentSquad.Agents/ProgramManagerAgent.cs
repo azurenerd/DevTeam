@@ -29,9 +29,11 @@ public class ProgramManagerAgent : AgentBase
     private readonly HashSet<int> _processedIssueIds = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
+    private readonly ConcurrentQueue<ClarificationRequestMessage> _clarificationQueue = new();
     private int _additionalEngineersHired;
     private string? _currentPhase;
     private bool _pmSpecCreated;
+    private bool _userStoryIssuesCreated;
 
     private readonly List<IDisposable> _subscriptions = new();
 
@@ -74,6 +76,9 @@ public class ProgramManagerAgent : AgentBase
         _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
             Identity.Id, HandleReviewRequestAsync));
 
+        _subscriptions.Add(_messageBus.Subscribe<ClarificationRequestMessage>(
+            Identity.Id, HandleClarificationRequestAsync));
+
         _currentPhase = "Research";
         Logger.LogInformation("PM agent initialized, starting in {Phase} phase", _currentPhase);
         return Task.CompletedTask;
@@ -94,6 +99,7 @@ public class ProgramManagerAgent : AgentBase
                 await MonitorTeamStatusAsync(ct);
                 await HandleResourceRequestsAsync(ct);
                 await HandleBlockersAsync(ct);
+                await ProcessClarificationRequestsAsync(ct);
                 await ReviewPullRequestsAsync(ct);
                 await UpdateProjectTrackingAsync(ct);
 
@@ -914,6 +920,15 @@ public class ProgramManagerAgent : AgentBase
         return Task.CompletedTask;
     }
 
+    private Task HandleClarificationRequestAsync(ClarificationRequestMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Clarification request from {Agent} for issue #{IssueNumber}: {Question}",
+            message.FromAgentId, message.IssueNumber, message.Question);
+        _clarificationQueue.Enqueue(message);
+        return Task.CompletedTask;
+    }
+
     #endregion
 
     #region AI-Assisted Methods
@@ -942,6 +957,9 @@ public class ProgramManagerAgent : AgentBase
                     NewStatus = AgentStatus.Idle,
                     Details = "PM Specification document already exists"
                 }, ct);
+
+                // Create User Story Issues if not already done
+                await CreateUserStoryIssuesAsync(ct);
                 return;
             }
 
@@ -1046,12 +1064,243 @@ public class ProgramManagerAgent : AgentBase
 
             Logger.LogInformation("Triggered Architect to begin architecture design");
 
-            UpdateStatus(AgentStatus.Idle, "PMSpec complete, Architect triggered");
+            // After PMSpec is merged, create User Story Issues
+            await CreateUserStoryIssuesAsync(ct);
+
+            UpdateStatus(AgentStatus.Idle, "PMSpec complete, Issues created, Architect triggered");
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Failed to create PM Specification — Architect may need manual trigger");
             RecordError($"PMSpec creation failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
+        }
+    }
+
+    /// <summary>
+    /// After PMSpec is finalized, use AI to extract User Stories and create a GitHub Issue
+    /// for each one, labeled "enhancement". Once all issues are created, notify the PE
+    /// agent via PlanningCompleteMessage so it can begin building the engineering plan.
+    /// Idempotent: skips if enhancement issues already exist.
+    /// </summary>
+    private async Task CreateUserStoryIssuesAsync(CancellationToken ct)
+    {
+        if (_userStoryIssuesCreated) return;
+
+        try
+        {
+            // Idempotency: check if enhancement issues already exist
+            var existingEnhancements = await _github.GetIssuesByLabelAsync(
+                IssueWorkflow.Labels.Enhancement, ct);
+            if (existingEnhancements.Count > 0)
+            {
+                Logger.LogInformation(
+                    "Found {Count} existing enhancement issues, skipping creation",
+                    existingEnhancements.Count);
+                _userStoryIssuesCreated = true;
+
+                // Still notify PE in case it missed the signal
+                await _messageBus.PublishAsync(new PlanningCompleteMessage
+                {
+                    FromAgentId = Identity.Id,
+                    ToAgentId = "*",
+                    MessageType = "PlanningComplete",
+                    IssueCount = existingEnhancements.Count
+                }, ct);
+                return;
+            }
+
+            UpdateStatus(AgentStatus.Working, "Creating User Story Issues from PMSpec");
+
+            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            if (string.IsNullOrWhiteSpace(pmSpec) || pmSpec.Contains("No PM specification has been created yet"))
+            {
+                Logger.LogWarning("PMSpec.md has no content, cannot create User Story Issues");
+                return;
+            }
+
+            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            var history = new ChatHistory();
+            history.AddSystemMessage(
+                "You are a Program Manager extracting User Stories from a PM Specification document. " +
+                "For each User Story, produce a structured output that can be parsed into individual GitHub Issues.\n\n" +
+                "Output format — one block per User Story, separated by '---':\n" +
+                "TITLE: [concise story title]\n" +
+                "DESCRIPTION:\n[Full user story in 'As a [role], I want [capability], so that [benefit]' format]\n\n" +
+                "[Detailed description of what needs to be built, including technical context]\n\n" +
+                "ACCEPTANCE_CRITERIA:\n- [ ] [criterion 1]\n- [ ] [criterion 2]\n...\n---\n\n" +
+                "Be thorough — each Issue should have enough detail for an engineer to implement it " +
+                "without needing the full PMSpec. Include all relevant acceptance criteria from the spec.");
+
+            history.AddUserMessage(
+                $"Extract all User Stories from this PM Specification and format them as described.\n\n" +
+                $"## PM Specification\n{pmSpec}");
+
+            var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+            var content = response.Content?.Trim() ?? "";
+
+            // Parse the AI output into individual stories
+            var storyBlocks = content.Split("---", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var issueCount = 0;
+
+            foreach (var block in storyBlocks)
+            {
+                if (string.IsNullOrWhiteSpace(block)) continue;
+
+                var title = ExtractField(block, "TITLE:");
+                var description = ExtractField(block, "DESCRIPTION:");
+                var acceptanceCriteria = ExtractField(block, "ACCEPTANCE_CRITERIA:");
+
+                if (string.IsNullOrWhiteSpace(title))
+                    continue;
+
+                var issueBody = $"## User Story\n{description}\n\n" +
+                    $"## Acceptance Criteria\n{acceptanceCriteria}\n\n" +
+                    $"---\n_Created by {Identity.DisplayName} from PMSpec.md_";
+
+                // Check if an issue with similar title already exists
+                var existingIssue = await _issueWorkflow.FindExistingIssueAsync(title, ct);
+                if (existingIssue is not null)
+                {
+                    Logger.LogDebug("Issue '{Title}' already exists as #{Number}, skipping",
+                        title, existingIssue.Number);
+                    issueCount++;
+                    continue;
+                }
+
+                var issue = await _github.CreateIssueAsync(
+                    title, issueBody,
+                    [IssueWorkflow.Labels.Enhancement],
+                    ct);
+
+                Logger.LogInformation("Created User Story issue #{Number}: {Title}",
+                    issue.Number, title);
+                issueCount++;
+
+                // Brief delay to avoid GitHub rate limiting
+                await Task.Delay(500, ct);
+            }
+
+            _userStoryIssuesCreated = true;
+            Logger.LogInformation("Created {Count} User Story Issues from PMSpec", issueCount);
+
+            // Notify PE that planning issues are ready
+            await _messageBus.PublishAsync(new PlanningCompleteMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "PlanningComplete",
+                IssueCount = issueCount
+            }, ct);
+
+            UpdateStatus(AgentStatus.Idle, $"Created {issueCount} User Story Issues");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to create User Story Issues from PMSpec");
+            RecordError($"Issue creation failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
+        }
+    }
+
+    /// <summary>
+    /// Processes queued clarification requests from engineers. The PM reads the Issue,
+    /// uses AI to formulate a response, posts it on the Issue, and notifies the engineer.
+    /// If the PM is unsure, it escalates to the Executive stakeholder.
+    /// </summary>
+    private async Task ProcessClarificationRequestsAsync(CancellationToken ct)
+    {
+        while (_clarificationQueue.TryDequeue(out var request))
+        {
+            try
+            {
+                var issue = await _github.GetIssueAsync(request.IssueNumber, ct);
+                if (issue is null)
+                {
+                    Logger.LogWarning("Cannot find issue #{Number} for clarification", request.IssueNumber);
+                    continue;
+                }
+
+                UpdateStatus(AgentStatus.Working, $"Answering clarification on issue #{request.IssueNumber}");
+
+                var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+                var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+
+                var history = new ChatHistory();
+                history.AddSystemMessage(
+                    "You are a Program Manager answering a clarification question from an engineer " +
+                    "about a GitHub Issue (User Story). Use the PM Specification as your primary " +
+                    "reference to provide clear, actionable answers.\n\n" +
+                    "If you genuinely cannot answer the question based on the PM Spec and your " +
+                    "knowledge, respond with exactly 'ESCALATE' and nothing else. Otherwise, " +
+                    "provide a clear, detailed answer.");
+
+                var commentsContext = issue.Comments.Count > 0
+                    ? "\n\n## Previous Comments\n" + string.Join("\n\n",
+                        issue.Comments.Select(c => $"**{c.Author}** ({c.CreatedAt:g}):\n{c.Body}"))
+                    : "";
+
+                history.AddUserMessage(
+                    $"## PM Specification\n{pmSpec}\n\n" +
+                    $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}" +
+                    commentsContext +
+                    $"\n\n## Engineer's Question\n{request.Question}");
+
+                var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                var answer = response.Content?.Trim() ?? "";
+
+                if (string.IsNullOrWhiteSpace(answer) ||
+                    answer.Equals("ESCALATE", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Escalate to executive
+                    Logger.LogInformation(
+                        "Escalating clarification for issue #{Number} to Executive", request.IssueNumber);
+
+                    var executiveUsername = _config.Project.ExecutiveGitHubUsername;
+                    var escalationIssue = await _issueWorkflow.CreateExecutiveRequestAsync(
+                        Identity.DisplayName,
+                        $"Clarification needed for Issue #{request.IssueNumber}: {issue.Title}",
+                        $"An engineer asked a question about Issue #{request.IssueNumber} that I cannot " +
+                        $"confidently answer from the PM Specification.\n\n" +
+                        $"**Issue:** #{request.IssueNumber} — {issue.Title}\n" +
+                        $"**Question from {request.FromAgentId}:** {request.Question}\n\n" +
+                        $"Please provide guidance. @{executiveUsername}",
+                        ct);
+
+                    await _github.AddIssueCommentAsync(request.IssueNumber,
+                        $"**{Identity.DisplayName}**: I need to consult with the Executive stakeholder " +
+                        $"on this question. I've created issue #{escalationIssue.Number} for guidance. " +
+                        $"I'll follow up once I have an answer.",
+                        ct);
+                }
+                else
+                {
+                    // Post the answer on the issue
+                    await _github.AddIssueCommentAsync(request.IssueNumber,
+                        $"**{Identity.DisplayName}**: {answer}", ct);
+
+                    // Notify the engineer
+                    await _messageBus.PublishAsync(new ClarificationResponseMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = request.FromAgentId,
+                        MessageType = "ClarificationResponse",
+                        IssueNumber = request.IssueNumber,
+                        Response = answer
+                    }, ct);
+
+                    Logger.LogInformation(
+                        "Answered clarification from {Agent} on issue #{Number}",
+                        request.FromAgentId, request.IssueNumber);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to process clarification request for issue #{Number}",
+                    request.IssueNumber);
+            }
         }
     }
 
@@ -1153,6 +1402,45 @@ public class ProgramManagerAgent : AgentBase
         return _processedIssueIds.Contains(issueNumber)
             ? DateTime.UtcNow
             : DateTime.MinValue;
+    }
+
+    /// <summary>
+    /// Extract a field value from a structured text block.
+    /// e.g., ExtractField("TITLE: My Title\nDESCRIPTION:\nSome desc", "TITLE:") → "My Title"
+    /// </summary>
+    private static string ExtractField(string block, string fieldName)
+    {
+        var lines = block.Split('\n');
+        var collecting = false;
+        var result = new List<string>();
+        var nextFieldPrefixes = new[] { "TITLE:", "DESCRIPTION:", "ACCEPTANCE_CRITERIA:" };
+
+        foreach (var line in lines)
+        {
+            if (line.TrimStart().StartsWith(fieldName, StringComparison.OrdinalIgnoreCase))
+            {
+                var remainder = line[(line.IndexOf(fieldName, StringComparison.OrdinalIgnoreCase) + fieldName.Length)..].Trim();
+                if (!string.IsNullOrWhiteSpace(remainder))
+                    result.Add(remainder);
+                collecting = true;
+                continue;
+            }
+
+            if (collecting)
+            {
+                // Stop if we hit another field marker
+                var trimmed = line.TrimStart();
+                if (nextFieldPrefixes.Any(p =>
+                    !p.Equals(fieldName, StringComparison.OrdinalIgnoreCase) &&
+                    trimmed.StartsWith(p, StringComparison.OrdinalIgnoreCase)))
+                {
+                    break;
+                }
+                result.Add(line);
+            }
+        }
+
+        return string.Join('\n', result).Trim();
     }
 
     #endregion
