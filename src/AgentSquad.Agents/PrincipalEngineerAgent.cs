@@ -501,6 +501,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "Principal Engineer created PR #{PrNumber} for task {TaskId}, starting implementation",
                 pr.Number, task.Id);
 
+            // Use incremental step-by-step implementation (same pattern as EngineerAgentBase)
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -508,56 +509,121 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var pmSpecDoc = await ProjectFiles.GetPMSpecAsync(ct);
             var techStack = Config.Project.TechStack;
 
-            var issueContext = "";
+            // Build a synthetic issue for the step generation
+            AgentIssue? sourceIssue = null;
             if (task.IssueNumber.HasValue)
+                sourceIssue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct);
+
+            var syntheticIssue = sourceIssue ?? new AgentIssue
             {
-                var issue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct);
-                if (issue is not null)
-                    issueContext = $"\n\n## GitHub Issue #{issue.Number}: {issue.Title}\n{issue.Body}";
-            }
+                Number = task.IssueNumber ?? 0,
+                Title = task.Name,
+                Body = task.Description,
+                State = "open",
+                Labels = new List<string>()
+            };
 
-            var history = new ChatHistory();
-            history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
+            // Generate implementation steps
+            var steps = await GenerateImplementationStepsAsync(
+                chat, pr, syntheticIssue, pmSpecDoc, architectureDoc, techStack, ct);
 
-            history.AddUserMessage(
-                $"## PM Specification\n{pmSpecDoc}\n\n" +
-                $"## Architecture\n{architectureDoc}" +
-                issueContext +
-                $"\n\n## Task: {task.Name}\n{task.Description}\n\n" +
-                "Produce a complete implementation for this task. " +
-                "Output each file using this exact format:\n\n" +
-                "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
-                $"Use the {techStack} technology stack. " +
-                "Include all source code files, configuration, and tests. " +
-                "Every file MUST use the FILE: marker format so it can be parsed and committed.");
-
-            var response = await chat.GetChatMessageContentAsync(
-                history, cancellationToken: ct);
-            var implementation = response.Content?.Trim() ?? "";
-
-            var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
-
-            if (codeFiles.Count > 0)
+            if (steps.Count > 0)
             {
                 Logger.LogInformation(
-                    "Principal Engineer parsed {Count} code files for task {TaskId}",
-                    codeFiles.Count, task.Id);
+                    "Principal Engineer generated {Count} implementation steps for task {TaskId}",
+                    steps.Count, task.Id);
 
-                await PrWorkflow.CommitCodeFilesToPRAsync(
-                    pr.Number, codeFiles, $"Implement {task.Name}", ct);
+                var completedSteps = new List<string>();
+                for (var i = 0; i < steps.Count; i++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    var step = steps[i];
+                    var stepNumber = i + 1;
+
+                    UpdateStatus(AgentStatus.Working,
+                        $"PR #{pr.Number} step {stepNumber}/{steps.Count}: {Truncate(step, 60)}");
+                    Logger.LogInformation(
+                        "PE implementing step {Step}/{Total} for task {TaskId}: {Desc}",
+                        stepNumber, steps.Count, task.Id, Truncate(step, 100));
+
+                    var stepHistory = new ChatHistory();
+                    stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
+
+                    var ctx = new System.Text.StringBuilder();
+                    ctx.AppendLine($"## PM Specification\n{pmSpecDoc}\n");
+                    ctx.AppendLine($"## Architecture\n{architectureDoc}\n");
+                    if (sourceIssue is not null)
+                        ctx.AppendLine($"## Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}\n");
+                    ctx.AppendLine($"## Task: {task.Name}\n{task.Description}\n");
+                    ctx.AppendLine($"## PR Description\n{pr.Body}\n");
+
+                    if (completedSteps.Count > 0)
+                    {
+                        ctx.AppendLine("## Previously Completed Steps");
+                        for (var j = 0; j < completedSteps.Count; j++)
+                            ctx.AppendLine($"- Step {j + 1}: {completedSteps[j]}");
+                        ctx.AppendLine();
+                        var existingFiles = await GetPrFileListAsync(pr.Number, ct);
+                        if (!string.IsNullOrEmpty(existingFiles))
+                            ctx.AppendLine($"## Files already in this PR\n{existingFiles}\n");
+                    }
+
+                    ctx.AppendLine($"## Current Step ({stepNumber}/{steps.Count})");
+                    ctx.AppendLine(step);
+                    ctx.AppendLine();
+                    ctx.AppendLine("Implement ONLY this step. Output each file using this format:\n");
+                    ctx.AppendLine("FILE: path/to/file.ext\n```language\n<file content>\n```\n");
+                    ctx.AppendLine($"Use the {techStack} technology stack. Every file MUST use the FILE: marker format.");
+                    if (completedSteps.Count > 0)
+                        ctx.AppendLine("If updating a file from a previous step, include the COMPLETE updated file content.");
+
+                    stepHistory.AddUserMessage(ctx.ToString());
+
+                    var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
+                    var stepImpl = stepResponse.Content?.Trim() ?? "";
+
+                    var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(stepImpl);
+                    if (codeFiles.Count > 0)
+                    {
+                        await PrWorkflow.CommitCodeFilesToPRAsync(
+                            pr.Number, codeFiles, $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}", ct);
+                        Logger.LogInformation(
+                            "PE committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
+                            codeFiles.Count, stepNumber, steps.Count, pr.Number);
+                    }
+
+                    completedSteps.Add(step);
+                }
             }
             else
             {
-                Logger.LogWarning(
-                    "Principal Engineer could not parse structured files for task {TaskId}, committing raw",
-                    task.Id);
+                // Fallback: single-pass implementation
+                Logger.LogWarning("PE could not generate steps for task {TaskId}, using single-pass", task.Id);
 
-                await PrWorkflow.CommitFixesToPRAsync(
-                    pr.Number,
-                    $"src/{task.Id}-implementation.md",
-                    $"## Implementation: {task.Name}\n\n{implementation}",
-                    $"Add implementation for {task.Name}",
-                    ct);
+                var history = new ChatHistory();
+                history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
+                var issueContext = sourceIssue is not null
+                    ? $"\n\n## GitHub Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}"
+                    : "";
+
+                history.AddUserMessage(
+                    $"## PM Specification\n{pmSpecDoc}\n\n" +
+                    $"## Architecture\n{architectureDoc}" +
+                    issueContext +
+                    $"\n\n## Task: {task.Name}\n{task.Description}\n\n" +
+                    "Produce a complete implementation for this task. " +
+                    "Output each file using this exact format:\n\n" +
+                    "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
+                    $"Use the {techStack} technology stack. " +
+                    "Include all source code files, configuration, and tests. " +
+                    "Every file MUST use the FILE: marker format so it can be parsed and committed.");
+
+                var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                var implementation = response.Content?.Trim() ?? "";
+
+                var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
+                if (codeFiles.Count > 0)
+                    await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, $"Implement {task.Name}", ct);
             }
 
             await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
@@ -969,7 +1035,14 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             history.AddSystemMessage(
                 "You are a Principal Engineer writing a detailed PR description for an engineering task. " +
                 "The description should be clear enough for another engineer to implement the task. " +
-                "Include: summary, acceptance criteria, implementation notes, and testing approach.");
+                "Include:\n" +
+                "1. **Summary**: What this PR implements\n" +
+                "2. **Acceptance Criteria**: Specific, testable criteria\n" +
+                "3. **Implementation Steps**: An ordered, numbered list of discrete implementation steps. " +
+                "Step 1 MUST be scaffolding (folder structure, config, boilerplate). Each subsequent step " +
+                "builds on the previous. Each step should be a self-contained committable unit of work. " +
+                "3-6 steps total. Be specific about what each step produces.\n" +
+                "4. **Testing**: What tests should cover");
 
             history.AddUserMessage(
                 $"## PM Specification\n{pmSpec}\n\n" +
@@ -979,7 +1052,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "Write a detailed PR description with:\n" +
                 "1. **Summary**: What this PR implements\n" +
                 "2. **Acceptance Criteria**: Specific, testable criteria\n" +
-                "3. **Implementation Notes**: Key design decisions and approach\n" +
+                "3. **Implementation Steps**: Ordered, numbered list of discrete steps. " +
+                "Step 1 = scaffolding. Each step is a committable unit. 3-6 steps.\n" +
                 "4. **Testing**: What tests should cover");
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
