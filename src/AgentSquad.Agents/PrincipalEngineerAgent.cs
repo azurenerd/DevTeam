@@ -347,27 +347,8 @@ public class PrincipalEngineerAgent : AgentBase
                 if (task is null)
                     continue;
 
-                // Build enriched task description with full context for the engineer
-                var depsText = task.Dependencies.Count > 0
-                    ? string.Join(", ", task.Dependencies)
-                    : "None";
-                var enrichedDescription = $"""
-                    ## Task: {task.Name}
-                    **ID:** {task.Id} | **Complexity:** {task.Complexity} | **Dependencies:** {depsText}
-
-                    ## Description
-                    {task.Description}
-
-                    ## References
-                    - See **PMSpec.md** for business goals and acceptance criteria
-                    - See **Architecture.md** for system design and component boundaries
-                    - See **EngineeringPlan.md** for the full task breakdown and dependencies
-
-                    ## Deliverables
-                    - Complete implementation of the task as described
-                    - Unit tests covering the key functionality
-                    - Code that aligns with the architecture document
-                    """;
+                // Generate rich PR description using AI + project documents
+                var enrichedDescription = await GenerateTaskDescriptionAsync(task, ct);
 
                 // Create branch and PR for the task
                 var branchName = await _prWorkflow.CreateTaskBranchAsync(
@@ -436,16 +417,9 @@ public class PrincipalEngineerAgent : AgentBase
             Logger.LogInformation("Principal Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
-            // Create branch and PR FIRST (before AI work begins)
-            var depsText = task.Dependencies.Count > 0
-                ? string.Join(", ", task.Dependencies)
-                : "None";
-            var initialBody = $"## Task: {task.Name}\n\n" +
-                              $"**Task ID:** {task.Id}\n" +
-                              $"**Complexity:** {task.Complexity}\n" +
-                              $"**Dependencies:** {depsText}\n\n" +
-                              $"## Description\n{task.Description}\n\n" +
-                              "_Implementation in progress..._";
+            // Generate rich PR description using AI + project documents
+            UpdateStatus(AgentStatus.Working, $"Planning: {task.Name}");
+            var prDescription = await GenerateTaskDescriptionAsync(task, ct);
 
             var branchName = await _prWorkflow.CreateTaskBranchAsync(
                 Identity.DisplayName,
@@ -455,7 +429,7 @@ public class PrincipalEngineerAgent : AgentBase
             var pr = await _prWorkflow.CreateTaskPullRequestAsync(
                 Identity.DisplayName,
                 task.Name,
-                initialBody,
+                prDescription,
                 task.Complexity,
                 "Architecture.md",
                 "EngineeringPlan.md",
@@ -827,6 +801,54 @@ public class PrincipalEngineerAgent : AgentBase
                 string.Equals(t.Id, depId, StringComparison.OrdinalIgnoreCase));
             return dep is not null && dep.Status == "Complete";
         });
+    }
+
+    /// <summary>
+    /// Uses AI to generate a rich PR description with acceptance criteria from project docs.
+    /// </summary>
+    private async Task<string> GenerateTaskDescriptionAsync(
+        EngineeringTask task, CancellationToken ct)
+    {
+        var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+        var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
+        var planDoc = await _projectFiles.GetEngineeringPlanAsync(ct);
+
+        var depsText = task.Dependencies.Count > 0
+            ? string.Join(", ", task.Dependencies)
+            : "None";
+
+        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+        var history = new ChatHistory();
+        history.AddSystemMessage(
+            "You are a Principal Engineer writing a detailed pull request description for an engineering task. " +
+            "Your output will be used as the PR body on GitHub and must give an engineer everything they need " +
+            "to implement this task successfully without asking questions.");
+
+        history.AddUserMessage(
+            $"## Project Documents\n\n" +
+            $"### PM Specification (business goals, user stories, acceptance criteria)\n{pmSpecDoc}\n\n" +
+            $"### Architecture Document (technical design, component boundaries)\n{architectureDoc}\n\n" +
+            $"### Engineering Plan (full task breakdown)\n{planDoc}\n\n" +
+            $"---\n\n" +
+            $"## Task to describe\n" +
+            $"**ID:** {task.Id}\n" +
+            $"**Name:** {task.Name}\n" +
+            $"**Complexity:** {task.Complexity}\n" +
+            $"**Dependencies:** {depsText}\n\n" +
+            "Write a PR description with the following sections:\n\n" +
+            "## Overview\nA clear 2-3 sentence summary of what this PR delivers and why it matters.\n\n" +
+            "## Detailed Requirements\nSpecific, actionable requirements derived from the PM Spec and Architecture. " +
+            "Reference the relevant user stories and architectural components.\n\n" +
+            "## Technical Approach\nHow this should be implemented — key files, components, patterns, and integration points.\n\n" +
+            "## Acceptance Criteria\nA numbered checklist of specific, testable criteria that must pass for this PR to be complete. " +
+            "Each criterion should be clear enough that a reviewer can verify it.\n\n" +
+            "## Out of Scope\nExplicitly call out what is NOT part of this task to prevent scope creep.\n\n" +
+            "Output ONLY the PR description markdown. Do not wrap in code fences.");
+
+        var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        return response.Content?.Trim() ?? $"## {task.Name}\n\n{task.Description}";
     }
 
     private static List<EngineerInfo> ParseAvailableEngineers(string teamDoc)
