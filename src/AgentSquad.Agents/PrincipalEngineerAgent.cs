@@ -117,6 +117,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 {
                     // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
                     await RecoverReadyForReviewPRsAsync(ct);
+                    // Check if our tracked PR has been merged/closed
+                    await CheckOwnPrStatusAsync(ct);
                     // Priority 1: Process rework feedback on our own PRs
                     await ProcessOwnReworkAsync(ct);
                     // Priority 2: Assign issues to available engineers
@@ -802,6 +804,48 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to recover ready-for-review PRs");
+        }
+    }
+
+    /// <summary>
+    /// Check if our currently tracked PR has been merged or closed, and clear state so
+    /// the PE can move on to the next task.
+    /// </summary>
+    private async Task CheckOwnPrStatusAsync(CancellationToken ct)
+    {
+        if (CurrentPrNumber is null)
+            return;
+
+        try
+        {
+            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                var wasMerged = pr?.State?.Equals("closed", StringComparison.OrdinalIgnoreCase) == true;
+                Logger.LogInformation("PE own PR #{PrNumber} is no longer open ({State}), clearing tracking",
+                    CurrentPrNumber.Value, pr?.State ?? "unknown");
+
+                // Mark the backlog task as Done if it was merged
+                if (wasMerged)
+                {
+                    var taskIdx = _taskBacklog.FindIndex(t => t.PullRequestNumber == CurrentPrNumber.Value);
+                    if (taskIdx >= 0)
+                    {
+                        _taskBacklog[taskIdx] = _taskBacklog[taskIdx] with { Status = "Done" };
+                        Logger.LogInformation("PE task {TaskId} marked Done (PR #{PrNumber} merged)",
+                            _taskBacklog[taskIdx].Id, CurrentPrNumber.Value);
+                        LogActivity("task", $"✅ Task {_taskBacklog[taskIdx].Id}: {_taskBacklog[taskIdx].Name} completed (PR #{CurrentPrNumber.Value} merged)");
+                    }
+                }
+
+                CurrentPrNumber = null;
+                Identity.AssignedPullRequest = null;
+                UpdateStatus(AgentStatus.Idle, "Ready for next task");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to check own PR #{PrNumber} status", CurrentPrNumber.Value);
         }
     }
 
