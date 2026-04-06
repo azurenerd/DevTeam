@@ -25,6 +25,7 @@ public class PrincipalEngineerAgent : AgentBase
     private readonly AgentSquadConfig _config;
 
     private bool _planningComplete;
+    private bool _resourceRequestPending;
     private readonly List<EngineeringTask> _taskBacklog = new();
     private readonly Dictionary<string, int> _agentAssignments = new(); // agentName → PR number
     private readonly HashSet<int> _processedIssueIds = new();
@@ -435,18 +436,49 @@ public class PrincipalEngineerAgent : AgentBase
             Logger.LogInformation("Principal Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
-            // Mark as in-progress
+            // Create branch and PR FIRST (before AI work begins)
+            var depsText = task.Dependencies.Count > 0
+                ? string.Join(", ", task.Dependencies)
+                : "None";
+            var initialBody = $"## Task: {task.Name}\n\n" +
+                              $"**Task ID:** {task.Id}\n" +
+                              $"**Complexity:** {task.Complexity}\n" +
+                              $"**Dependencies:** {depsText}\n\n" +
+                              $"## Description\n{task.Description}\n\n" +
+                              "_Implementation in progress..._";
+
+            var branchName = await _prWorkflow.CreateTaskBranchAsync(
+                Identity.DisplayName,
+                $"{task.Id}-{task.Name}",
+                ct);
+
+            var pr = await _prWorkflow.CreateTaskPullRequestAsync(
+                Identity.DisplayName,
+                task.Name,
+                initialBody,
+                task.Complexity,
+                "Architecture.md",
+                "EngineeringPlan.md",
+                branchName,
+                ct);
+
+            // Mark as in-progress with PR number
             var taskIndex = _taskBacklog.FindIndex(t => t.Id == task.Id);
             if (taskIndex >= 0)
             {
                 _taskBacklog[taskIndex] = task with
                 {
                     Status = "InProgress",
-                    AssignedTo = Identity.DisplayName
+                    AssignedTo = Identity.DisplayName,
+                    PullRequestNumber = pr.Number
                 };
             }
 
-            // Use Semantic Kernel to produce the implementation
+            Logger.LogInformation(
+                "Principal Engineer created PR #{PrNumber} for task {TaskId}, starting implementation",
+                pr.Number, task.Id);
+
+            // Now do the AI work
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -474,42 +506,25 @@ public class PrincipalEngineerAgent : AgentBase
                 history, cancellationToken: ct);
             var implementation = response.Content?.Trim() ?? "";
 
-            // Create branch and PR for own work
-            var branchName = await _prWorkflow.CreateTaskBranchAsync(
-                Identity.DisplayName,
-                $"{task.Id}-{task.Name}",
+            // Commit the implementation to the PR branch
+            var finalBody = $"## Implementation: {task.Name}\n\n" +
+                            $"**Task ID:** {task.Id}\n" +
+                            $"**Complexity:** {task.Complexity}\n\n" +
+                            $"## Details\n{implementation}";
+
+            await _prWorkflow.CommitFixesToPRAsync(
+                pr.Number,
+                $"docs/{task.Id}-implementation.md",
+                finalBody,
+                $"Add implementation for {task.Name}",
                 ct);
 
-            var prBody = $"## Implementation: {task.Name}\n\n" +
-                         $"**Task ID:** {task.Id}\n" +
-                         $"**Complexity:** {task.Complexity}\n\n" +
-                         $"## Details\n{implementation}";
-
-            var pr = await _prWorkflow.CreateTaskPullRequestAsync(
-                Identity.DisplayName,
-                task.Name,
-                prBody,
-                task.Complexity,
-                "Architecture.md",
-                "EngineeringPlan.md",
-                branchName,
-                ct);
-
-            // Mark ready for review immediately (Principal Engineer self-review goes to Architect)
+            // Mark ready for review
             await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
 
-            // Update task tracking
-            if (taskIndex >= 0)
-            {
-                _taskBacklog[taskIndex] = _taskBacklog[taskIndex] with
-                {
-                    Status = "InProgress",
-                    PullRequestNumber = pr.Number
-                };
-            }
-
             Logger.LogInformation(
-                "Principal Engineer created PR #{PrNumber} for task {TaskId}", pr.Number, task.Id);
+                "Principal Engineer completed implementation for PR #{PrNumber} (task {TaskId})",
+                pr.Number, task.Id);
         }
         catch (Exception ex)
         {
@@ -585,23 +600,31 @@ public class PrincipalEngineerAgent : AgentBase
     {
         try
         {
+            // Don't re-request if we already have a pending request
+            if (_resourceRequestPending)
+            {
+                // Check if engineers have appeared since last request
+                var currentEngineers = _registry.GetAgentsByRole(AgentRole.SeniorEngineer).Count
+                                     + _registry.GetAgentsByRole(AgentRole.JuniorEngineer).Count;
+                if (currentEngineers > 0)
+                    _resourceRequestPending = false;
+                return;
+            }
+
             var parallelizableTasks = _taskBacklog
                 .Where(t => t.Status == "Pending" && AreDependenciesMet(t) && t.Complexity != "High")
                 .ToList();
 
             var unassignedCount = parallelizableTasks.Count;
 
-            // Don't request engineers if below the minimum parallelizable threshold
-            if (unassignedCount < _config.Limits.MinParallelizableTasksForNewEngineer)
-                return;
-
+            // Request engineers if there are any non-High pending tasks and no engineers exist
             var engineerCount = _registry.GetAgentsByRole(AgentRole.SeniorEngineer).Count
                              + _registry.GetAgentsByRole(AgentRole.JuniorEngineer).Count;
             var busyEngineers = _agentAssignments.Count;
             var freeEngineers = engineerCount - busyEngineers;
 
-            // Only request if there are meaningfully more tasks than free engineers
-            if (unassignedCount <= freeEngineers + 1)
+            // Need engineers if there are pending tasks and not enough free engineers
+            if (unassignedCount == 0 || unassignedCount <= freeEngineers)
                 return;
 
             // Determine which role to request based on predominant complexity
@@ -617,18 +640,27 @@ public class PrincipalEngineerAgent : AgentBase
                 neededRole, unassignedCount,
                 _config.Limits.MinParallelizableTasksForNewEngineer, freeEngineers);
 
+            // Create a GitHub issue so PM can discover and act on it
+            var justification = $"There are {unassignedCount} parallelizable tasks " +
+                                $"({pendingMedium} Medium, {pendingLow} Low) ready for assignment " +
+                                $"but only {freeEngineers} available engineers. " +
+                                $"Requesting a {neededRole} to increase throughput.";
+
+            await _issueWorkflow.RequestResourceAsync(
+                Identity.DisplayName, neededRole, justification, ct);
+
+            // Also broadcast via message bus for immediate notification
             await _messageBus.PublishAsync(new ResourceRequestMessage
             {
                 FromAgentId = Identity.Id,
-                ToAgentId = "ProgramManager",
+                ToAgentId = "*",
                 MessageType = "ResourceRequest",
                 RequestedRole = neededRole,
-                Justification = $"There are {unassignedCount} parallelizable tasks " +
-                                $"({pendingMedium} Medium, {pendingLow} Low) ready for assignment " +
-                                $"but only {freeEngineers} available engineers. " +
-                                $"Requesting a {neededRole} to increase throughput.",
+                Justification = justification,
                 CurrentTeamSize = engineerCount
             }, ct);
+
+            _resourceRequestPending = true;
         }
         catch (Exception ex)
         {

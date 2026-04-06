@@ -4,6 +4,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -19,6 +20,7 @@ public class ProgramManagerAgent : AgentBase
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
+    private readonly AgentSpawnManager _spawnManager;
     private readonly AgentSquadConfig _config;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
@@ -37,6 +39,7 @@ public class ProgramManagerAgent : AgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentSpawnManager spawnManager,
         IOptions<AgentSquadConfig> config,
         ILogger<ProgramManagerAgent> logger)
         : base(identity, logger)
@@ -47,6 +50,7 @@ public class ProgramManagerAgent : AgentBase
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
+        _spawnManager = spawnManager ?? throw new ArgumentNullException(nameof(spawnManager));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
 
@@ -407,15 +411,45 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
+                    // Parse which role is requested from the issue body
+                    var requestedRole = issue.Body?.Contains("SeniorEngineer", StringComparison.OrdinalIgnoreCase) == true
+                        ? AgentRole.SeniorEngineer
+                        : AgentRole.JuniorEngineer;
+
                     _additionalEngineersHired++;
                     Logger.LogInformation(
-                        "Resource request #{Number} approved. Additional engineers: {Count}/{Max}",
-                        issue.Number, _additionalEngineersHired,
+                        "Resource request #{Number} approved. Spawning {Role}. Additional engineers: {Count}/{Max}",
+                        issue.Number, requestedRole, _additionalEngineersHired,
                         _config.Limits.MaxAdditionalEngineers);
 
                     await _github.AddIssueCommentAsync(issue.Number,
-                        $"✅ **Resource request approved.** Additional engineer #{_additionalEngineersHired} " +
-                        $"of {_config.Limits.MaxAdditionalEngineers} maximum approved.", ct);
+                        $"✅ **Resource request approved.** Spawning {requestedRole} " +
+                        $"(additional engineer #{_additionalEngineersHired} " +
+                        $"of {_config.Limits.MaxAdditionalEngineers} maximum).", ct);
+
+                    // Actually spawn the engineer
+                    var spawnedIdentity = await _spawnManager.SpawnAgentAsync(requestedRole, ct);
+                    if (spawnedIdentity is not null)
+                    {
+                        Logger.LogInformation(
+                            "Spawned {Role} '{Name}' for resource request #{Number}",
+                            requestedRole, spawnedIdentity.DisplayName, issue.Number);
+
+                        await _github.AddIssueCommentAsync(issue.Number,
+                            $"🚀 **{requestedRole} '{spawnedIdentity.DisplayName}' is now online** " +
+                            "and ready for task assignment.", ct);
+
+                        await _github.CloseIssueAsync(issue.Number, ct);
+                    }
+                    else
+                    {
+                        Logger.LogWarning(
+                            "Failed to spawn {Role} for resource request #{Number} — spawn manager returned null",
+                            requestedRole, issue.Number);
+
+                        await _github.AddIssueCommentAsync(issue.Number,
+                            $"⚠️ Failed to spawn {requestedRole} — capacity limit may have been reached.", ct);
+                    }
                 }
             }
         }
@@ -557,9 +591,24 @@ public class ProgramManagerAgent : AgentBase
         {
             _additionalEngineersHired++;
             Logger.LogInformation(
-                "Resource request from {Agent} approved via message bus ({Count}/{Max})",
-                message.FromAgentId, _additionalEngineersHired,
+                "Resource request from {Agent} approved via message bus. Spawning {Role} ({Count}/{Max})",
+                message.FromAgentId, message.RequestedRole, _additionalEngineersHired,
                 _config.Limits.MaxAdditionalEngineers);
+
+            // Actually spawn the engineer
+            var spawnedIdentity = await _spawnManager.SpawnAgentAsync(message.RequestedRole, ct);
+            if (spawnedIdentity is not null)
+            {
+                Logger.LogInformation(
+                    "Spawned {Role} '{Name}' for bus resource request from {Agent}",
+                    message.RequestedRole, spawnedIdentity.DisplayName, message.FromAgentId);
+            }
+            else
+            {
+                Logger.LogWarning(
+                    "Failed to spawn {Role} for bus resource request from {Agent}",
+                    message.RequestedRole, message.FromAgentId);
+            }
 
             await _messageBus.PublishAsync(new StatusUpdateMessage
             {
@@ -567,7 +616,8 @@ public class ProgramManagerAgent : AgentBase
                 ToAgentId = message.FromAgentId,
                 MessageType = "ResourceApproval",
                 NewStatus = AgentStatus.Online,
-                Details = $"Resource request approved: {message.RequestedRole}"
+                Details = $"Resource request approved: {message.RequestedRole}" +
+                    (spawnedIdentity is not null ? $" — spawned {spawnedIdentity.DisplayName}" : " — spawn failed")
             }, ct);
         }
     }

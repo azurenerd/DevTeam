@@ -83,6 +83,20 @@ public class AgentSpawnManager
             await _registry.RegisterAsync(agent, ct);
             await agent.InitializeAsync(ct);
 
+            // Start the agent's main loop as a background task
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await agent.StartAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (Exception loopEx)
+                {
+                    _logger.LogError(loopEx, "Agent '{AgentId}' loop crashed.", identity.Id);
+                }
+            }, ct);
+
             _logger.LogInformation(
                 "Agent '{AgentId}' ({DisplayName}) spawned and initialized.",
                 identity.Id, identity.DisplayName);
