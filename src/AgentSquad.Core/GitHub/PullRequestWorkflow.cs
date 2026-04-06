@@ -401,6 +401,7 @@ public partial class PullRequestWorkflow
             await _github.MergePullRequestAsync(pr.Number,
                 $"Merge {documentPath} — auto-approved by {agentName}", ct);
             _logger.LogInformation("Auto-merged document PR #{Number}", pr.Number);
+            await _github.DeleteBranchAsync(pr.HeadBranch, ct);
         }
         catch (Exception ex)
         {
@@ -522,6 +523,11 @@ public partial class PullRequestWorkflow
 
             await _github.MergePullRequestAsync(prNumber,
                 $"Merged by {approverAgent} after dual approval from {string.Join(" and ", approvedReviewers)}", ct);
+
+            // Clean up the head branch after squash merge
+            if (pr is not null && !string.IsNullOrEmpty(pr.HeadBranch))
+                await _github.DeleteBranchAsync(pr.HeadBranch, ct);
+
             return true;
         }
 
@@ -581,6 +587,10 @@ public partial class PullRequestWorkflow
             if (!pr.Labels.Contains(Labels.ReadyForReview, StringComparer.OrdinalIgnoreCase))
                 continue;
 
+            // Skip PRs still marked in-progress (not yet ready)
+            if (pr.Labels.Contains(Labels.InProgress, StringComparer.OrdinalIgnoreCase))
+                continue;
+
             // Skip doc PRs (they have both ready-for-review AND approved)
             if (pr.Labels.Contains(Labels.Approved, StringComparer.OrdinalIgnoreCase))
                 continue;
@@ -597,7 +607,29 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<bool> NeedsReviewFromAsync(int prNumber, string agentName, CancellationToken ct = default)
     {
-        return !await HasAgentApprovedAsync(prNumber, agentName, ct);
+        return !await HasAgentReviewedAsync(prNumber, agentName, ct);
+    }
+
+    /// <summary>
+    /// Check whether a specific agent has posted ANY review comment (approved or changes-requested).
+    /// Returns true if the agent has reviewed, false if they have never commented.
+    /// </summary>
+    public async Task<bool> HasAgentReviewedAsync(int prNumber, string agentName, CancellationToken ct = default)
+    {
+        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        foreach (var comment in comments.OrderByDescending(c => c.CreatedAt))
+        {
+            var approvalMatch = ApprovalPattern.Match(comment.Body);
+            if (approvalMatch.Success &&
+                string.Equals(approvalMatch.Groups[1].Value.Trim(), agentName, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            var changesMatch = ChangesRequestedPattern.Match(comment.Body);
+            if (changesMatch.Success &&
+                string.Equals(changesMatch.Groups[1].Value.Trim(), agentName, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
     }
 
     // ── End Code PR Review Workflow ─────────────────────────────────────

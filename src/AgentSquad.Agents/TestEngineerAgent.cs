@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
@@ -23,6 +24,8 @@ public class TestEngineerAgent : AgentBase
     private readonly AgentSquadConfig _config;
 
     private readonly HashSet<int> _testedPRs = new();
+    private readonly ConcurrentQueue<int> _reviewQueue = new();
+    private readonly List<IDisposable> _subscriptions = new();
 
     public TestEngineerAgent(
         AgentIdentity identity,
@@ -39,6 +42,21 @@ public class TestEngineerAgent : AgentBase
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
+    }
+
+    protected override Task OnInitializeAsync(CancellationToken ct)
+    {
+        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+            Identity.Id, HandleReviewRequestAsync));
+        return Task.CompletedTask;
+    }
+
+    protected override Task OnStopAsync(CancellationToken ct)
+    {
+        foreach (var sub in _subscriptions)
+            sub.Dispose();
+        _subscriptions.Clear();
+        return Task.CompletedTask;
     }
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
@@ -72,19 +90,28 @@ public class TestEngineerAgent : AgentBase
 
     private async Task ScanForUntestedPRsAsync(CancellationToken ct)
     {
-        var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+        // Drain the review queue — only test PRs we've been notified about
+        var prNumbersToTest = new HashSet<int>();
+        while (_reviewQueue.TryDequeue(out var prNumber))
+            prNumbersToTest.Add(prNumber);
 
-        foreach (var pr in openPRs)
+        if (prNumbersToTest.Count == 0)
+            return;
+
+        foreach (var prNumber in prNumbersToTest)
         {
             if (ct.IsCancellationRequested)
                 break;
 
-            if (_testedPRs.Contains(pr.Number))
+            if (_testedPRs.Contains(prNumber))
+                continue;
+
+            var pr = await _github.GetPullRequestAsync(prNumber, ct);
+            if (pr is null)
                 continue;
 
             if (pr.Labels.Contains(TestedLabel, StringComparer.OrdinalIgnoreCase))
             {
-                // Already tested externally; track so we don't re-check
                 _testedPRs.Add(pr.Number);
                 continue;
             }
@@ -95,10 +122,6 @@ public class TestEngineerAgent : AgentBase
             {
                 continue;
             }
-
-            // Only test PRs that are ready for review
-            if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ReadyForReview, StringComparer.OrdinalIgnoreCase))
-                continue;
 
             Logger.LogInformation("Found untested PR #{Number}: {Title}", pr.Number, pr.Title);
 
@@ -262,5 +285,14 @@ public class TestEngineerAgent : AgentBase
         Logger.LogInformation(
             "Created test PR for source PR #{SourcePR} on branch {Branch}",
             sourcePR.Number, branchName);
+    }
+
+    private Task HandleReviewRequestAsync(ReviewRequestMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Review request from {Agent} for PR #{PrNumber}: {Title}",
+            message.FromAgentId, message.PrNumber, message.PrTitle);
+        _reviewQueue.Enqueue(message.PrNumber);
+        return Task.CompletedTask;
     }
 }

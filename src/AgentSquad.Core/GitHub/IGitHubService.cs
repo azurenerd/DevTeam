@@ -31,6 +31,7 @@ public interface IGitHubService
     // Branches
     Task CreateBranchAsync(string branchName, string fromBranch = "main", CancellationToken ct = default);
     Task<bool> BranchExistsAsync(string branchName, CancellationToken ct = default);
+    Task DeleteBranchAsync(string branchName, CancellationToken ct = default);
 
     // Rate Limiting
     Task<GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default);

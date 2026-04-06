@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
@@ -24,6 +25,7 @@ public class ArchitectAgent : AgentBase
 
     private readonly Queue<ArchitectureDirective> _taskQueue = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
+    private readonly ConcurrentQueue<int> _reviewQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
 
     private bool _architectureComplete;
@@ -56,6 +58,9 @@ public class ArchitectAgent : AgentBase
         // but we gate on StatusUpdateMessage to avoid starting before PMSpec exists.
         _subscriptions.Add(_messageBus.Subscribe<StatusUpdateMessage>(
             Identity.Id, HandleStatusUpdateAsync));
+
+        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+            Identity.Id, HandleReviewRequestAsync));
 
         Logger.LogInformation("Architect agent initialized, awaiting PMSpec completion");
         return Task.CompletedTask;
@@ -139,6 +144,15 @@ public class ArchitectAgent : AgentBase
             Description = message.Details ?? "PMSpec and Research are ready. Design the architecture."
         });
 
+        return Task.CompletedTask;
+    }
+
+    private Task HandleReviewRequestAsync(ReviewRequestMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Review request from {Agent} for PR #{PrNumber}: {Title}",
+            message.FromAgentId, message.PrNumber, message.PrTitle);
+        _reviewQueue.Enqueue(message.PrNumber);
         return Task.CompletedTask;
     }
 
@@ -369,17 +383,23 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var prs = await _github.GetOpenPullRequestsAsync(ct);
+            // Drain the review queue — only review PRs we've been notified about
+            var prNumbersToReview = new HashSet<int>();
+            while (_reviewQueue.TryDequeue(out var prNumber))
+                prNumbersToReview.Add(prNumber);
 
-            var readyForReview = prs.Where(pr =>
-                pr.Labels.Contains(PullRequestWorkflow.Labels.ReadyForReview,
-                    StringComparer.OrdinalIgnoreCase)
-                && !pr.Labels.Contains(PullRequestWorkflow.Labels.Approved,
-                    StringComparer.OrdinalIgnoreCase)
-                && !_reviewedPrNumbers.Contains(pr.Number)).ToList();
+            if (prNumbersToReview.Count == 0)
+                return;
 
-            foreach (var pr in readyForReview)
+            foreach (var prNumber in prNumbersToReview)
             {
+                if (_reviewedPrNumbers.Contains(prNumber))
+                    continue;
+
+                var pr = await _github.GetPullRequestAsync(prNumber, ct);
+                if (pr is null)
+                    continue;
+
                 Logger.LogInformation("Reviewing PR #{Number} for architectural alignment: {Title}",
                     pr.Number, pr.Title);
 

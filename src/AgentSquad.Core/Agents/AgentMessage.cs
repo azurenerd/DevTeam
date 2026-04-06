@@ -41,6 +41,7 @@ public record ResourceRequestMessage : AgentMessage
 
 public record ReviewRequestMessage : AgentMessage
 {
-    public required string PullRequestUrl { get; init; }
+    public required int PrNumber { get; init; }
+    public required string PrTitle { get; init; }
     public required string ReviewType { get; init; }
 }

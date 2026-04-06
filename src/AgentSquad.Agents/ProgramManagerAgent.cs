@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
@@ -25,6 +26,8 @@ public class ProgramManagerAgent : AgentBase
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
+    private readonly HashSet<int> _reviewedPrNumbers = new();
+    private readonly ConcurrentQueue<int> _reviewQueue = new();
     private int _additionalEngineersHired;
     private string? _currentPhase;
     private bool _pmSpecCreated;
@@ -64,6 +67,9 @@ public class ProgramManagerAgent : AgentBase
 
         _subscriptions.Add(_messageBus.Subscribe<HelpRequestMessage>(
             Identity.Id, HandleHelpRequestAsync));
+
+        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+            Identity.Id, HandleReviewRequestAsync));
 
         _currentPhase = "Research";
         Logger.LogInformation("PM agent initialized, starting in {Phase} phase", _currentPhase);
@@ -509,12 +515,29 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var pendingPRs = await _prWorkflow.GetCodePRsPendingReviewAsync(ct);
+            // Drain the review queue — only review PRs we've been notified about
+            var prNumbersToReview = new HashSet<int>();
+            while (_reviewQueue.TryDequeue(out var prNumber))
+                prNumbersToReview.Add(prNumber);
 
-            foreach (var pr in pendingPRs)
+            if (prNumbersToReview.Count == 0)
+                return;
+
+            foreach (var prNumber in prNumbersToReview)
             {
-                // Skip if we've already approved this PR
-                if (!await _prWorkflow.NeedsReviewFromAsync(pr.Number, "ProgramManager", ct))
+                // Skip if we've already reviewed this PR in this session
+                if (_reviewedPrNumbers.Contains(prNumber))
+                    continue;
+
+                // Skip if we've already posted a review comment (GitHub check)
+                if (!await _prWorkflow.NeedsReviewFromAsync(prNumber, "ProgramManager", ct))
+                {
+                    _reviewedPrNumbers.Add(prNumber);
+                    continue;
+                }
+
+                var pr = await _github.GetPullRequestAsync(prNumber, ct);
+                if (pr is null)
                     continue;
 
                 Logger.LogInformation("PM reviewing PR #{Number}: {Title}", pr.Number, pr.Title);
@@ -536,10 +559,11 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
-                    // Request changes — PM can make fixes directly on premium model
                     await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
                 }
+
+                _reviewedPrNumbers.Add(pr.Number);
             }
         }
         catch (Exception ex)
@@ -667,6 +691,15 @@ public class ProgramManagerAgent : AgentBase
             await _issueWorkflow.AskAgentAsync(
                 message.FromAgentId, Identity.DisplayName, message.IssueBody, ct);
         }
+    }
+
+    private Task HandleReviewRequestAsync(ReviewRequestMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Review request from {Agent} for PR #{PrNumber}: {Title}",
+            message.FromAgentId, message.PrNumber, message.PrTitle);
+        _reviewQueue.Enqueue(message.PrNumber);
+        return Task.CompletedTask;
     }
 
     #endregion

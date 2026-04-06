@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
@@ -29,6 +30,8 @@ public class PrincipalEngineerAgent : AgentBase
     private readonly List<EngineeringTask> _taskBacklog = new();
     private readonly Dictionary<string, int> _agentAssignments = new(); // agentName → PR number
     private readonly HashSet<int> _processedIssueIds = new();
+    private readonly HashSet<int> _reviewedPrNumbers = new();
+    private readonly ConcurrentQueue<int> _reviewQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
 
     public PrincipalEngineerAgent(
@@ -61,6 +64,9 @@ public class PrincipalEngineerAgent : AgentBase
 
         _subscriptions.Add(_messageBus.Subscribe<TaskAssignmentMessage>(
             Identity.Id, HandleTaskAssignmentAsync));
+
+        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+            Identity.Id, HandleReviewRequestAsync));
 
         Logger.LogInformation("Principal Engineer agent initialized, awaiting architecture document");
         return Task.CompletedTask;
@@ -496,6 +502,17 @@ public class PrincipalEngineerAgent : AgentBase
             // Mark ready for review
             await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
 
+            // Notify PM and Architect to review this PR
+            await _messageBus.PublishAsync(new ReviewRequestMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "ReviewRequest",
+                PrNumber = pr.Number,
+                PrTitle = pr.Title,
+                ReviewType = "CodeReview"
+            }, ct);
+
             Logger.LogInformation(
                 "Principal Engineer completed implementation for PR #{PrNumber} (task {TaskId})",
                 pr.Number, task.Id);
@@ -510,15 +527,31 @@ public class PrincipalEngineerAgent : AgentBase
     {
         try
         {
-            var pendingPRs = await _prWorkflow.GetCodePRsPendingReviewAsync(ct);
+            // Drain the review queue — only review PRs we've been notified about
+            var prNumbersToReview = new HashSet<int>();
+            while (_reviewQueue.TryDequeue(out var prNumber))
+                prNumbersToReview.Add(prNumber);
 
-            foreach (var pr in pendingPRs)
+            if (prNumbersToReview.Count == 0)
+                return;
+
+            foreach (var prNumber in prNumbersToReview)
             {
-                // Skip if we've already approved this PR
-                if (!await _prWorkflow.NeedsReviewFromAsync(pr.Number, "PrincipalEngineer", ct))
+                if (_reviewedPrNumbers.Contains(prNumber))
                     continue;
 
-                // Skip our own PRs
+                // Skip if we've already posted a review comment (GitHub check)
+                if (!await _prWorkflow.NeedsReviewFromAsync(prNumber, "PrincipalEngineer", ct))
+                {
+                    _reviewedPrNumbers.Add(prNumber);
+                    continue;
+                }
+
+                var pr = await _github.GetPullRequestAsync(prNumber, ct);
+                if (pr is null)
+                    continue;
+
+                // Skip our own PRs — PE self-approves via MarkReadyForReviewAsync
                 var prAgent = PullRequestWorkflow.ParseAgentNameFromTitle(pr.Title);
                 if (string.Equals(prAgent, Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
                     continue;
@@ -558,10 +591,11 @@ public class PrincipalEngineerAgent : AgentBase
                 }
                 else
                 {
-                    // Request changes — PE can make fixes directly on premium model
                     await _prWorkflow.RequestChangesAsync(pr.Number, "PrincipalEngineer", reviewBody, ct);
                     Logger.LogInformation("PE requested changes on PR #{Number}", pr.Number);
                 }
+
+                _reviewedPrNumbers.Add(prNumber);
             }
         }
         catch (Exception ex)
@@ -719,6 +753,15 @@ public class PrincipalEngineerAgent : AgentBase
             Logger.LogInformation("Added externally-assigned task to backlog: {Title}", message.Title);
         }
 
+        return Task.CompletedTask;
+    }
+
+    private Task HandleReviewRequestAsync(ReviewRequestMessage message, CancellationToken ct)
+    {
+        Logger.LogInformation(
+            "Review request from {Agent} for PR #{PrNumber}: {Title}",
+            message.FromAgentId, message.PrNumber, message.PrTitle);
+        _reviewQueue.Enqueue(message.PrNumber);
         return Task.CompletedTask;
     }
 

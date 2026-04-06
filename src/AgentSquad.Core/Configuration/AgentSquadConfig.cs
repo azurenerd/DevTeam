@@ -19,6 +19,13 @@ public class ProjectConfig
     public string DefaultBranch { get; set; } = "main";
 
     /// <summary>
+    /// The primary tech stack for the project. Agents use this in all prompts
+    /// to ensure generated code, architecture, and plans target the correct language/framework.
+    /// Examples: "C# .NET 8 with Blazor Server", "TypeScript with Next.js and React", "Python with FastAPI"
+    /// </summary>
+    public string TechStack { get; set; } = "C# .NET 8 with Blazor Server";
+
+    /// <summary>
     /// Custom prompt that guides the Researcher agent on what to investigate.
     /// When empty, a comprehensive default prompt is generated from the project description.
     /// Use this to steer research toward specific areas, technologies, or concerns.

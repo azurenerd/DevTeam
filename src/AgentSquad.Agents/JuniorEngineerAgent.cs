@@ -226,11 +226,22 @@ public class JuniorEngineerAgent : AgentBase
             // Step 5: Mark ready for review
             await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
 
-            // Notify Principal Engineer
+            // Notify PM and PE to review this PR
+            await _messageBus.PublishAsync(new ReviewRequestMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "ReviewRequest",
+                PrNumber = pr.Number,
+                PrTitle = pr.Title,
+                ReviewType = "CodeReview"
+            }, ct);
+
+            // Notify Principal Engineer that the task is complete
             await _messageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
-                ToAgentId = "PrincipalEngineer",
+                ToAgentId = "*",
                 MessageType = "TaskComplete",
                 NewStatus = AgentStatus.Online,
                 CurrentTask = taskTitle,

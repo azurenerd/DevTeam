@@ -462,6 +462,23 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task DeleteBranchAsync(string branchName, CancellationToken ct = default)
+    {
+        try
+        {
+            await _client.Git.Reference.Delete(_owner, _repo, $"heads/{branchName}");
+            _logger.LogInformation("Deleted branch {Branch}", branchName);
+        }
+        catch (NotFoundException)
+        {
+            _logger.LogDebug("Branch {Branch} already deleted or not found", branchName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete branch {Branch}", branchName);
+        }
+    }
+
     // Rate Limiting
 
     public async Task<Models.GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default)
