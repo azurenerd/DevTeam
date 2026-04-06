@@ -174,9 +174,14 @@ public class PrincipalEngineerAgent : AgentBase
         if (!string.IsNullOrWhiteSpace(existingPlan) &&
             !existingPlan.Contains("No engineering plan has been created yet"))
         {
-            Logger.LogInformation("EngineeringPlan.md already exists with content, skipping creation");
-            _planningComplete = true;
-            return;
+            RestoreTaskBacklogFromPlan(existingPlan);
+            if (_taskBacklog.Count > 0)
+            {
+                Logger.LogInformation("Restored {Count} tasks from existing engineering plan", _taskBacklog.Count);
+                _planningComplete = true;
+                return;
+            }
+            Logger.LogWarning("Existing EngineeringPlan.md has no tasks — regenerating");
         }
 
         UpdateStatus(AgentStatus.Working, "Creating engineering plan");
@@ -635,6 +640,9 @@ public class PrincipalEngineerAgent : AgentBase
     {
         try
         {
+            if (_taskBacklog.Count == 0)
+                return;
+
             var planDoc = BuildEngineeringPlanMarkdown();
             await _projectFiles.UpdateEngineeringPlanAsync(planDoc, ct);
         }
@@ -837,6 +845,62 @@ public class PrincipalEngineerAgent : AgentBase
             "low" => "Low",
             _ => "Medium"
         };
+    }
+
+    private void RestoreTaskBacklogFromPlan(string planMarkdown)
+    {
+        _taskBacklog.Clear();
+        var lines = planMarkdown.Split('\n');
+        var inTaskTable = false;
+
+        foreach (var line in lines)
+        {
+            var trimmed = line.Trim();
+
+            // Detect the task table header row
+            if (trimmed.StartsWith("| ID") && trimmed.Contains("Task") && trimmed.Contains("Complexity"))
+            {
+                inTaskTable = true;
+                continue;
+            }
+
+            // Skip separator row
+            if (inTaskTable && trimmed.StartsWith("|--"))
+                continue;
+
+            // Parse task rows
+            if (inTaskTable && trimmed.StartsWith('|'))
+            {
+                var cells = trimmed.Split('|', StringSplitOptions.TrimEntries)
+                    .Where(c => c.Length > 0).ToArray();
+
+                if (cells.Length >= 7)
+                {
+                    var deps = cells[6] == "—" || string.IsNullOrWhiteSpace(cells[6])
+                        ? new List<string>()
+                        : cells[6].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+                    var prNum = cells[4].StartsWith('#') && int.TryParse(cells[4][1..], out var pr) ? (int?)pr : null;
+                    var assignedTo = cells[3] == "—" ? null : cells[3];
+
+                    _taskBacklog.Add(new EngineeringTask
+                    {
+                        Id = cells[0],
+                        Name = cells[1],
+                        Complexity = NormalizeComplexity(cells[2]),
+                        AssignedTo = assignedTo,
+                        PullRequestNumber = prNum,
+                        Status = cells[5],
+                        Dependencies = deps
+                    });
+                }
+            }
+            else if (inTaskTable && !trimmed.StartsWith('|'))
+            {
+                break; // End of table
+            }
+        }
+
     }
 
     private string BuildEngineeringPlanMarkdown()
