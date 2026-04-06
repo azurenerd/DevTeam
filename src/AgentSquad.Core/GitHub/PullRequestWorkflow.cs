@@ -95,8 +95,20 @@ public partial class PullRequestWorkflow
 
         _logger.LogInformation("Creating task PR '{Title}' on branch {Branch}", prTitle, branchName);
 
-        var pr = await _github.CreatePullRequestAsync(
-            prTitle, body, branchName, _defaultBranch, [.. labels], ct);
+        AgentPullRequest pr;
+        try
+        {
+            pr = await _github.CreatePullRequestAsync(
+                prTitle, body, branchName, _defaultBranch, [.. labels], ct);
+        }
+        catch (Octokit.ApiValidationException)
+        {
+            _logger.LogWarning("Task PR creation returned Validation Failed — looking for existing PR");
+            var fallback = await FindExistingPullRequestAsync(prTitle, ct);
+            if (fallback is not null)
+                return fallback;
+            throw;
+        }
 
         _logger.LogInformation("Created PR #{Number} for agent {Agent}", pr.Number, agentName);
         return pr;
@@ -314,11 +326,27 @@ public partial class PullRequestWorkflow
             {prDescription}{issueRef}
             """;
 
-        // 5. Create PR with in-progress label
+        // 5. Create PR with in-progress label (handle race condition with existing PR)
         _logger.LogInformation("Creating document PR '{Title}'", fullPrTitle);
-        var pr = await _github.CreatePullRequestAsync(
-            fullPrTitle, prBody, branchName, _defaultBranch,
-            [Labels.InProgress], ct);
+        AgentPullRequest pr;
+        try
+        {
+            pr = await _github.CreatePullRequestAsync(
+                fullPrTitle, prBody, branchName, _defaultBranch,
+                [Labels.InProgress], ct);
+        }
+        catch (Octokit.ApiValidationException)
+        {
+            // A PR already exists for this head→base (API caching race).
+            // Fall back to finding the existing open PR.
+            _logger.LogWarning("PR creation returned Validation Failed — looking for existing PR");
+            var fallback = await FindExistingPullRequestAsync(fullPrTitle, ct);
+            if (fallback is not null)
+                return fallback;
+
+            // If we still can't find it, re-throw
+            throw;
+        }
 
         _logger.LogInformation("Created document PR #{Number}: {Title}", pr.Number, fullPrTitle);
         return pr;
