@@ -17,6 +17,7 @@ public class ArchitectAgent : AgentBase
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
     private readonly IssueWorkflow _issueWorkflow;
+    private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentSquadConfig _config;
@@ -32,6 +33,7 @@ public class ArchitectAgent : AgentBase
         IMessageBus messageBus,
         IGitHubService github,
         IssueWorkflow issueWorkflow,
+        PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
         IOptions<AgentSquadConfig> config,
@@ -41,6 +43,7 @@ public class ArchitectAgent : AgentBase
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
         _issueWorkflow = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
+        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
@@ -48,25 +51,31 @@ public class ArchitectAgent : AgentBase
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(_messageBus.Subscribe<TaskAssignmentMessage>(
-            Identity.Id, HandleTaskAssignmentAsync));
+        // Only listen for PMSpecReady — NOT generic TaskAssignments.
+        // The PM sends a dedicated TaskAssignment after PMSpec is created,
+        // but we gate on StatusUpdateMessage to avoid starting before PMSpec exists.
+        _subscriptions.Add(_messageBus.Subscribe<StatusUpdateMessage>(
+            Identity.Id, HandleStatusUpdateAsync));
 
-        Logger.LogInformation("Architect agent initialized, awaiting architecture directives");
+        Logger.LogInformation("Architect agent initialized, awaiting PMSpec completion");
         return Task.CompletedTask;
     }
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
     {
-        UpdateStatus(AgentStatus.Online, "Waiting for research completion signal");
+        UpdateStatus(AgentStatus.Idle, "Waiting for PMSpec to be ready");
 
         while (!ct.IsCancellationRequested)
         {
+            ArchitectureDirective? currentDirective = null;
             try
             {
                 if (!_architectureComplete && _taskQueue.TryDequeue(out var directive))
                 {
+                    currentDirective = directive;
                     await DesignArchitectureAsync(directive, ct);
                     _architectureComplete = true;
+                    currentDirective = null; // Don't re-enqueue on success
                 }
 
                 if (_architectureComplete)
@@ -75,7 +84,7 @@ public class ArchitectAgent : AgentBase
                 }
                 else
                 {
-                    UpdateStatus(AgentStatus.Online, "Waiting for research completion signal");
+                    UpdateStatus(AgentStatus.Idle, "Waiting for PMSpec to be ready");
                 }
 
                 await Task.Delay(
@@ -87,9 +96,15 @@ public class ArchitectAgent : AgentBase
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "Architect loop error, continuing after brief delay");
-                UpdateStatus(AgentStatus.Working, "Recovering from error");
-                try { await Task.Delay(5000, ct); }
+                Logger.LogError(ex, "Architect loop error, will retry after delay");
+                RecordError($"Architect error: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
+                if (currentDirective is not null)
+                {
+                    Logger.LogInformation("Re-enqueueing failed architecture directive");
+                    _taskQueue.Enqueue(currentDirective);
+                }
+                UpdateStatus(AgentStatus.Working, "Recovering from error, will retry");
+                try { await Task.Delay(15000, ct); }
                 catch (OperationCanceledException) { break; }
             }
         }
@@ -107,17 +122,21 @@ public class ArchitectAgent : AgentBase
 
     #region Message Handlers
 
-    private Task HandleTaskAssignmentAsync(TaskAssignmentMessage message, CancellationToken ct)
+    private Task HandleStatusUpdateAsync(StatusUpdateMessage message, CancellationToken ct)
     {
+        // Only react to PMSpecReady — this means Research is done AND PMSpec exists
+        if (!string.Equals(message.MessageType, "PMSpecReady", StringComparison.OrdinalIgnoreCase))
+            return Task.CompletedTask;
+
         Logger.LogInformation(
-            "Received task assignment from {From}: {Title}",
-            message.FromAgentId, message.Title);
+            "PMSpec ready signal received from {From}, queuing architecture design",
+            message.FromAgentId);
 
         _taskQueue.Enqueue(new ArchitectureDirective
         {
-            TaskId = message.TaskId,
-            Title = message.Title,
-            Description = message.Description
+            TaskId = $"architecture-design-{Guid.NewGuid():N}",
+            Title = "Design system architecture",
+            Description = message.Details ?? "PMSpec and Research are ready. Design the architecture."
         });
 
         return Task.CompletedTask;
@@ -129,13 +148,57 @@ public class ArchitectAgent : AgentBase
 
     private async Task DesignArchitectureAsync(ArchitectureDirective directive, CancellationToken ct)
     {
-        UpdateStatus(AgentStatus.Working, "Designing system architecture");
+        // Idempotency: check if Architecture.md already has real content
+        var existingArch = await _projectFiles.GetArchitectureDocAsync(ct);
+        if (!string.IsNullOrWhiteSpace(existingArch) &&
+            !existingArch.Contains("No architecture document has been created yet"))
+        {
+            Logger.LogInformation("Architecture.md already exists with content, skipping design");
+            // Still signal downstream so PE isn't stuck
+            await _messageBus.PublishAsync(new StatusUpdateMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "ArchitectureComplete",
+                NewStatus = AgentStatus.Idle,
+                Details = "Architecture design already complete. Architecture.md is ready for review."
+            }, ct);
+            return;
+        }
+
+        // Find any related architecture issue to link
+        int? relatedIssue = null;
+        try
+        {
+            var issues = await _github.GetOpenIssuesAsync(ct);
+            var archIssue = issues.FirstOrDefault(i =>
+                i.Title.Contains("Architecture", StringComparison.OrdinalIgnoreCase) ||
+                i.Title.Contains("architecture", StringComparison.OrdinalIgnoreCase));
+            relatedIssue = archIssue?.Number;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not find related issue for architecture");
+        }
+
+        // Create the PR upfront so it's visible immediately
+        UpdateStatus(AgentStatus.Working, "Creating PR for Architecture.md");
+        var pr = await _prWorkflow.OpenDocumentPRAsync(
+            Identity.DisplayName,
+            "Architecture.md",
+            $"System Architecture for {directive.Title}",
+            "Complete system architecture document covering components, data model, " +
+            "API contracts, infrastructure, security, and scaling strategy.",
+            relatedIssue,
+            ct);
+
+        UpdateStatus(AgentStatus.Working, "Designing (1/5): Key architectural decisions");
         Logger.LogInformation("Starting architecture design for task {TaskId}: {Title}",
             directive.TaskId, directive.Title);
 
         // 1. Read PM specs and Research.md
+        var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
         var research = await _projectFiles.GetResearchDocAsync(ct);
-        var engineeringPlan = await _projectFiles.GetEngineeringPlanAsync(ct);
 
         // 2. Use Semantic Kernel multi-turn conversation to design architecture
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
@@ -145,7 +208,9 @@ public class ArchitectAgent : AgentBase
         history.AddSystemMessage(
             "You are a senior software architect on a development team. " +
             "Your job is to design a complete, well-structured system architecture based on " +
-            "research findings and project specifications. Be thorough, specific, and practical. " +
+            "the PM specification (business requirements) and research findings. " +
+            "Ensure the architecture supports all business goals, user stories, and " +
+            "non-functional requirements from the PM spec. Be thorough, specific, and practical. " +
             "Focus on producing actionable architecture that engineers can implement directly.");
 
         // Turn 1: Identify key architectural decisions
@@ -153,10 +218,11 @@ public class ArchitectAgent : AgentBase
             $"I need you to design the system architecture for our project.\n\n" +
             $"**Task:** {directive.Title}\n\n" +
             $"**Description:** {directive.Description}\n\n" +
-            $"## Engineering Plan\n{engineeringPlan}\n\n" +
+            $"## PM Specification (Business Requirements)\n{pmSpec}\n\n" +
             $"## Research Findings\n{research}\n\n" +
             "First, identify the key architectural decisions we need to make. " +
             "For each decision, explain the options, trade-offs, and your recommendation. " +
+            "Ensure the architecture supports all business goals and user stories from the PM Spec. " +
             "List them clearly.");
 
         var decisionsResponse = await chat.GetChatMessageContentAsync(
@@ -166,6 +232,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("Architectural decisions identified for {TaskId}", directive.TaskId);
 
         // Turn 2: Design system components and interactions
+        UpdateStatus(AgentStatus.Working, "Designing (2/5): Components & interactions");
         history.AddUserMessage(
             "Now design the system components based on those decisions. For each component, cover:\n" +
             "- Name and responsibility (single responsibility principle)\n" +
@@ -181,6 +248,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("System components designed for {TaskId}", directive.TaskId);
 
         // Turn 3: Data model, API contracts, and infrastructure
+        UpdateStatus(AgentStatus.Working, "Designing (3/5): Data model & APIs");
         history.AddUserMessage(
             "Now define:\n" +
             "1. **Data Model** — key entities, their relationships, and storage strategy.\n" +
@@ -195,6 +263,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("Data model and contracts defined for {TaskId}", directive.TaskId);
 
         // Turn 4: Security, scaling, and risk mitigation
+        UpdateStatus(AgentStatus.Working, "Designing (4/5): Security & scaling");
         history.AddUserMessage(
             "Now address cross-cutting concerns:\n" +
             "1. **Security Considerations** — authentication, authorization, data protection, input validation.\n" +
@@ -209,6 +278,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("Cross-cutting concerns addressed for {TaskId}", directive.TaskId);
 
         // Turn 5: Compile into structured Architecture.md
+        UpdateStatus(AgentStatus.Working, "Designing (5/5): Compiling Architecture.md");
         history.AddUserMessage(
             "Now compile everything into a single, structured Architecture.md document with these exact sections:\n\n" +
             "# Architecture\n\n" +
@@ -241,9 +311,17 @@ public class ArchitectAgent : AgentBase
 
         Logger.LogDebug("Architecture document compiled for {TaskId}", directive.TaskId);
 
-        // 3. Save Architecture.md
-        await _projectFiles.UpdateArchitectureDocAsync(architectureDoc, ct);
-        Logger.LogInformation("Architecture.md saved for task {TaskId}", directive.TaskId);
+        // Commit final content and auto-merge
+        UpdateStatus(AgentStatus.Working, "Committing Architecture.md and merging PR");
+        await _prWorkflow.CommitAndMergeDocumentPRAsync(
+            pr,
+            Identity.DisplayName,
+            "Architecture.md",
+            architectureDoc,
+            $"Add system architecture for {directive.Title}",
+            ct);
+
+        Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);
 
         // 4. Create Issue for Principal Engineer
         await _issueWorkflow.AskAgentAsync(
@@ -266,7 +344,7 @@ public class ArchitectAgent : AgentBase
             Details = "Architecture design complete. Architecture.md is ready for review."
         }, ct);
 
-        UpdateStatus(AgentStatus.Online, "Architecture complete, monitoring PRs for alignment");
+        UpdateStatus(AgentStatus.Idle, "Architecture complete, monitoring PRs for alignment");
     }
 
     #endregion

@@ -68,7 +68,15 @@ public class GitHubService : IGitHubService
             var pr = await _client.PullRequest.Get(_owner, _repo, number);
             var labels = pr.Labels.Select(l => l.Name).ToList();
             var reviewComments = await GetReviewCommentsAsync(number);
-            return MapPullRequest(pr, labels, reviewComments);
+            var comments = await _client.Issue.Comment.GetAllForIssue(_owner, _repo, number);
+            var mappedComments = comments.Select(c => new Models.IssueComment
+            {
+                Id = c.Id,
+                Author = c.User.Login,
+                Body = c.Body,
+                CreatedAt = c.CreatedAt.UtcDateTime
+            }).ToList();
+            return MapPullRequest(pr, labels, reviewComments, mappedComments);
         }
         catch (NotFoundException)
         {
@@ -110,6 +118,26 @@ public class GitHubService : IGitHubService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to get PRs for agent {Agent}", agentName);
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<Models.IssueComment>> GetPullRequestCommentsAsync(int prNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            var comments = await _client.Issue.Comment.GetAllForIssue(_owner, _repo, prNumber);
+            return comments.Select(c => new Models.IssueComment
+            {
+                Id = c.Id,
+                Author = c.User.Login,
+                Body = c.Body,
+                CreatedAt = c.CreatedAt.UtcDateTime
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get comments for PR #{Number}", prNumber);
             throw;
         }
     }
@@ -444,7 +472,8 @@ public class GitHubService : IGitHubService
     }
 
     private static AgentPullRequest MapPullRequest(
-        PullRequest pr, List<string>? labels = null, List<string>? reviewComments = null)
+        PullRequest pr, List<string>? labels = null, List<string>? reviewComments = null,
+        List<Models.IssueComment>? comments = null)
     {
         var agentName = ExtractAgentName(pr.Title);
         return new AgentPullRequest
@@ -460,7 +489,8 @@ public class GitHubService : IGitHubService
             CreatedAt = pr.CreatedAt.UtcDateTime,
             UpdatedAt = pr.UpdatedAt.UtcDateTime,
             Labels = labels ?? pr.Labels.Select(l => l.Name).ToList(),
-            ReviewComments = reviewComments ?? new List<string>()
+            ReviewComments = reviewComments ?? new List<string>(),
+            Comments = comments ?? new List<Models.IssueComment>()
         };
     }
 

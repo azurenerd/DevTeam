@@ -5,6 +5,7 @@ public enum AgentStatus
     Requested,
     Initializing,
     Online,
+    Idle,
     Working,
     Blocked,
     Paused,

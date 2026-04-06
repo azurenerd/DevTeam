@@ -59,7 +59,7 @@ public class JuniorEngineerAgent : AgentBase
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
     {
-        UpdateStatus(AgentStatus.Online, "Ready for task assignments");
+        UpdateStatus(AgentStatus.Idle, "Ready for task assignments");
 
         while (!ct.IsCancellationRequested)
         {
@@ -75,7 +75,7 @@ public class JuniorEngineerAgent : AgentBase
                 }
                 else if (activePR == null)
                 {
-                    UpdateStatus(AgentStatus.Online, "Waiting for task assignment");
+                    UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
                 }
 
                 await CheckForIssuesAsync(ct);
@@ -90,10 +90,11 @@ public class JuniorEngineerAgent : AgentBase
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Junior Engineer {Name} loop error", Identity.DisplayName);
+                RecordError($"Loop error: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
                 UpdateStatus(AgentStatus.Error, ex.Message);
                 try { await Task.Delay(10_000, ct); }
                 catch (OperationCanceledException) { break; }
-                UpdateStatus(AgentStatus.Online, "Recovered from error");
+                UpdateStatus(AgentStatus.Idle, "Recovered from error");
             }
         }
 
@@ -122,6 +123,7 @@ public class JuniorEngineerAgent : AgentBase
         {
             // Keep context smaller for local/budget models
             var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+            var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
             var taskTitle = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title) ?? pr.Title;
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
@@ -132,10 +134,12 @@ public class JuniorEngineerAgent : AgentBase
             history.AddSystemMessage(
                 "You are a Junior Engineer working on a low-complexity task. " +
                 "Focus on producing correct, simple, and readable code. " +
-                "Follow the established patterns in the project architecture. " +
+                "Follow the established patterns in the project architecture " +
+                "and ensure your work aligns with the business requirements. " +
                 "If the task seems too complex, say so clearly.");
 
             history.AddUserMessage(
+                $"## Business Context (key points)\n{TruncateForContext(pmSpecDoc)}\n\n" +
                 $"## Architecture (key sections)\n{TruncateForContext(architectureDoc)}\n\n" +
                 $"## Task: {taskTitle}\n{pr.Body}\n\n" +
                 "Break this task into small, concrete implementation steps. " +
@@ -239,13 +243,14 @@ public class JuniorEngineerAgent : AgentBase
                 "(self-validation: {Valid})",
                 Identity.DisplayName, pr.Number, isValid);
 
-            UpdateStatus(AgentStatus.Online, $"Completed PR #{pr.Number}, awaiting next task");
+            UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting next task");
             Identity.AssignedPullRequest = null;
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Junior Engineer {Name} failed working on PR #{Number}",
                 Identity.DisplayName, pr.Number);
+            RecordError($"Failed on PR #{pr.Number}: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
 
             await ReportBlockerAsync(
                 $"Implementation failure on PR #{pr.Number}",
@@ -341,6 +346,7 @@ public class JuniorEngineerAgent : AgentBase
         {
             Logger.LogError(ex, "Junior Engineer {Name} failed to escalate complexity",
                 Identity.DisplayName);
+            RecordError($"Escalation failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Warning, ex);
         }
     }
 
@@ -397,6 +403,7 @@ public class JuniorEngineerAgent : AgentBase
         {
             Logger.LogError(ex, "Junior Engineer {Name} failed to report blocker",
                 Identity.DisplayName);
+            RecordError($"Blocker report failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Warning, ex);
         }
     }
 

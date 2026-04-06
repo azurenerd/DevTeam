@@ -954,3 +954,780 @@ Each phase page requires:
 | **Image Strategy** | Curated Unsplash/Pexels placeholders, replaced with originals later | Medium ✅ |
 | **CMS** | Defer — add headless CMS only if content editors need it | Medium ✅ |
 | **Analytics** | Defer decision to stakeholder input | Low ❓ |
+
+---
+
+## 9. Deep-Dive Analysis: Detailed Sub-Question Investigation
+
+> **Purpose:** This section provides the in-depth, evidence-backed analysis for each of the 8 prioritized sub-questions. Each includes specific tools, version numbers, trade-offs, and concrete recommendations with reasoning.
+
+---
+
+### 9.1 Technology Stack Deep Dive: Astro 6.x as the Foundation
+
+#### Key Findings (Verified April 2026)
+
+| Dependency | Exact Version | Source |
+|-----------|--------------|--------|
+| **Astro** | 6.1.3 (latest stable) | GitHub releases, April 4 2026 |
+| **Vite** | ^7.3.1 | Astro 6 package.json |
+| **Zod** | ^4.3.6 | Astro 6 package.json |
+| **Node.js** | >=22.12.0 | Astro 6 engines field |
+| **TypeScript** | ^5.9.3 | Astro 6 package.json |
+| **Shiki** | ^4.0.2 (syntax highlighting) | Astro 6 package.json |
+| **Sharp** | ^0.34.x (image optimization) | Built-in image service |
+
+**Community Health (April 2026):**
+- GitHub Stars: **58,176** ⭐
+- Forks: 3,309
+- Open Issues: 289 (healthy signal — issues are triaged, not abandoned)
+- Ownership: Acquired by Cloudflare (January 2026), full team joined, MIT license preserved
+- Release cadence: Patch releases every 1–2 weeks
+
+#### Astro 6.0 Key Features (What Changed from Astro 5)
+
+1. **Built-in Fonts API** — Auto-downloads, caches, and self-hosts Google Fonts. Eliminates render-blocking `<link>` tags to `fonts.googleapis.com`. The existing site loads Playfair Display, Raleway, and Cormorant Garamond via external CDN — Astro 6 will self-host these automatically, improving LCP by 200–400ms.
+
+2. **Content Security Policy (CSP) API** — Production-ready `context.csp` for automatic script/style hashing. Most-upvoted Astro feature request. Adds security headers with zero manual configuration.
+
+3. **Live Content Collections** — Access externally-hosted content in real-time without rebuilds. Not needed for initial launch (all content is local Markdown), but enables future CMS integration without refactoring.
+
+4. **Redesigned Dev Server** — Uses Vite 7's Environment API so dev runs the exact same runtime as production. Eliminates "works in dev, breaks in prod" bugs that plagued earlier versions.
+
+5. **Content Layer with `glob()` loader** — Up to 5× faster Markdown builds, 25–50% less memory. Critical for a site with 15+ content-heavy pages.
+
+6. **Server Islands (stabilized)** — Can add dynamic components (contact form, analytics) to otherwise static pages. New `security.serverIslandBodySizeLimit` config (defaults to 1 MB).
+
+7. **Experimental Rust Compiler** — Future compilation speed improvements. Not production-ready yet but signals long-term performance investment.
+
+#### Alternatives Evaluated and Rejected
+
+| SSG | Build Speed | Frontend Perf | Component Model | Why Rejected |
+|-----|------------|--------------|----------------|-------------|
+| **Hugo** | ⚡ Fastest (1–5ms/page) | Standard static | Go templates only | No component reuse; Go template syntax steep learning curve; no islands architecture for interactive sections; can't share React/Vue/Svelte components |
+| **Eleventy (11ty)** | Fast (~45ms/page) | Standard static | 12+ template languages | No built-in component model; progressive disclosure requires custom JS; no image optimization pipeline built-in; smaller ecosystem |
+| **Next.js 15 (static export)** | Moderate | Ships React runtime (~40KB+) | React only | Overkill for content site; React runtime adds unnecessary JS weight; design system diverges from vanilla CSS approach; harder to merge with existing vanilla site |
+| **Nuxt 4 (static)** | Moderate | Ships Vue runtime | Vue only | Same issues as Next.js — unnecessary framework runtime for a content site |
+
+**Why Astro wins specifically for THIS project:**
+1. **Output format matches existing site** — Astro outputs plain HTML/CSS/JS, identical to the vanilla HumphreyPools site. Hugo and Eleventy also do this, but lack the component model.
+2. **Islands architecture** — Only the expand/collapse sections get JavaScript. Hugo/Eleventy would require custom JS solutions with no framework support.
+3. **Content Collections** — Built for exactly this use case: typed Markdown files with Zod schema validation. Hugo has a similar concept but with Go template syntax.
+4. **Shared design tokens** — Can import the existing `styles.css` custom properties directly. No Tailwind migration, no CSS-in-JS overhead.
+5. **Cloudflare backing** — Financial stability and engineering investment ensure long-term viability. MIT license preserved; platform-agnostic deployment confirmed.
+
+#### Concrete Recommendation
+
+```bash
+# Initialize project
+npm create astro@latest humphrey-pool-guide -- --template minimal
+cd humphrey-pool-guide
+npm install @astrojs/mdx @astrojs/sitemap
+```
+
+**Lock versions in package.json:**
+```json
+{
+  "dependencies": {
+    "astro": "^6.1.3",
+    "@astrojs/mdx": "^4.x",
+    "@astrojs/sitemap": "^3.x"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}
+```
+
+---
+
+### 9.2 Construction Phases: Expert-Level Quality Differentiation
+
+#### Key Findings
+
+Research across luxury pool builder sites (Atlantis Luxury Pools, Morales Outdoor Living, Reinhard Pool, Backyard Vacation Oasis, Element Pools) and industry sources confirms the 10-phase model with these critical quality differentiators that website content must cover.
+
+#### Equipment & Automation: Brand-Specific Comparison
+
+The site should name specific products — this builds trust with informed buyers who recognize premium brands.
+
+**Pool Automation Systems (control everything via app):**
+
+| Feature | Pentair IntelliCenter | Jandy iAquaLink | Hayward OmniLogic |
+|---------|----------------------|-----------------|-------------------|
+| **Best With** | All-Pentair equipment | Jandy (+ some Pentair pumps) | All-Hayward equipment |
+| **Mobile App** | Pentair Home | iAquaLink (iOS/Android/Web) | OmniLogic |
+| **Smart Home** | Alexa, Apple HomeKit | Alexa, Google Home | Alexa, Google, IFTTT |
+| **Chemistry Auto** | Via IntelliChem | Add-on options | Sense & Dispense (best) |
+| **Lighting Scenes** | IntelliBrite colors | WaterColors | ColorLogic (best) |
+| **Scalability** | Highly scalable | Needs expansion modules | 4–20 relays, multi-zone |
+| **Firmware Updates** | Cloud OTA | Requires PCB swap | Cloud OTA |
+| **Luxury Recommendation** | ⭐ Best for new all-Pentair builds | Best for retrofits | Best for smart home + chemistry |
+
+**Site content recommendation:** Feature Pentair IntelliCenter as primary (most common in luxury new builds) but explain all three — educated buyers appreciate the comparison.
+
+**Interior Finishes: PebbleTec Product Line Comparison:**
+
+| Finish | Texture | Lifespan | Cost/sq.ft. | Look | Luxury Rating |
+|--------|---------|----------|-------------|------|--------------|
+| **PebbleTec (Original)** | Textured, larger pebbles | 20+ years | $8–$12 | Natural lagoon | ⭐⭐⭐ |
+| **PebbleSheen** | Smoother, ground pebbles | 20+ years | $10–$14 | Refined shimmer | ⭐⭐⭐⭐ |
+| **PebbleBrilliance** | Smooth, glass beads + pebbles | 20+ years | $14–$24+ | Sparkling, luminous | ⭐⭐⭐⭐⭐ |
+| **White Plaster (Marcite)** | Very smooth | 7–10 years | $4–$6 | Basic, classic | ⭐ |
+| **Quartz Aggregate** | Smooth-textured | 12–18 years | $7–$10 | Shimmering, vibrant | ⭐⭐⭐ |
+
+**Site content recommendation:** Frame as a progression from budget (marcite) through luxury (PebbleBrilliance). Include the feel-underfoot comparison — PebbleTec can feel rough on sensitive feet, PebbleSheen is the sweet spot for comfort + durability, PebbleBrilliance is the showpiece choice.
+
+#### Variable-Speed Pumps (the single biggest energy-cost differentiator):
+
+| Model | Type | Energy Savings | Flow Rate | Noise | Smart Integration |
+|-------|------|---------------|-----------|-------|-------------------|
+| **Pentair IntelliFlo 3 VSF** | Variable Speed + Flow | Up to 90% vs single-speed | 160 GPM max | Ultra-quiet | Pentair Home app |
+| **Jandy VS FloPro 2.7** | Variable Speed | Up to 80% | 148 GPM max | Quiet | iAquaLink |
+| **Hayward Super Pump VS** | Variable Speed | Up to 80% | 115 GPM max | Moderate | OmniLogic |
+
+**Key content point:** A $250K pool running a single-speed pump wastes $1,500–$2,500/year in electricity. VS pumps pay for themselves in 1–2 years. This is one of the most impactful "budget builder cuts corners" examples.
+
+---
+
+### 9.3 Progressive Disclosure UX: Component Architecture
+
+#### Key Findings
+
+The progressive disclosure pattern must work at three levels:
+1. **Home page** — Visual timeline showing all 10 phases + 6 specialty features as cards
+2. **Phase page** — Executive summary → comparison table → expandable deep-dive sections
+3. **Expandable sections** — Click to reveal 200–400 word deep dives on specific topics
+
+#### CSS-only `<details>`/`<summary>` vs JavaScript Accordion
+
+| Approach | Pros | Cons | Recommendation |
+|----------|------|------|---------------|
+| **`<details>`/`<summary>` (HTML native)** | Zero JS; accessible by default; keyboard-navigable; works with SSG; no hydration needed | Limited animation control; can't "close others when one opens"; basic styling | ⭐ **Use this** for deep-dive sections |
+| **JavaScript Accordion (Astro Island)** | Full animation control; "only one open" behavior; custom transitions | Requires client JS; needs ARIA implementation; adds bundle size | Use only if design requires coordinated open/close |
+| **CSS-only with `:has()` selector** | No JS; modern CSS animation | Limited browser support history; complex selectors | Not recommended yet |
+
+**Concrete recommendation:** Use native `<details>`/`<summary>` elements styled with CSS. This is zero-JS, fully accessible, and SEO-friendly (Google indexes content inside closed `<details>` elements). Astro's zero-JS-by-default philosophy aligns perfectly.
+
+```astro
+<!-- ExpandableSection.astro -->
+---
+interface Props {
+  title: string;
+  icon?: string;
+}
+const { title, icon = '▸' } = Astro.props;
+---
+<details class="deep-dive-section">
+  <summary class="deep-dive-trigger">
+    <span class="deep-dive-icon">{icon}</span>
+    <span class="deep-dive-title">{title}</span>
+  </summary>
+  <div class="deep-dive-content">
+    <slot />
+  </div>
+</details>
+
+<style>
+  .deep-dive-section {
+    border-bottom: 1px solid var(--color-cream);
+    padding: 0;
+  }
+  .deep-dive-trigger {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 20px 0;
+    cursor: pointer;
+    font-family: var(--font-heading);
+    font-size: 1.25rem;
+    color: var(--color-primary);
+    list-style: none; /* Remove default marker */
+  }
+  .deep-dive-trigger::-webkit-details-marker { display: none; }
+  .deep-dive-icon {
+    transition: transform 0.3s ease;
+    color: var(--color-accent);
+  }
+  details[open] .deep-dive-icon {
+    transform: rotate(90deg);
+  }
+  .deep-dive-content {
+    padding: 0 0 24px 32px;
+    color: var(--color-text);
+    line-height: 1.8;
+  }
+</style>
+```
+
+#### Mobile-Responsive Comparison Tables
+
+Comparison tables are the core content element but tables notoriously break on mobile. Research shows three viable approaches:
+
+| Approach | Mobile Experience | Implementation Complexity | Recommendation |
+|----------|------------------|--------------------------|---------------|
+| **Horizontal scroll with shadow hints** | Swipe left/right; shadow on edges indicates more content | Low | ⭐ **Use this** — simplest, preserves table structure |
+| **Card stack (table → cards on mobile)** | Each row becomes a card with label-value pairs | Medium | Good alternative for simpler tables |
+| **Responsive header pinning** | First column stays fixed, others scroll | Medium | Best for wide tables (5+ columns) |
+
+**Implementation:** Wrap tables in a scrollable container with CSS gradient shadows:
+
+```css
+.comparison-table-wrapper {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  background:
+    linear-gradient(to right, var(--color-white) 30%, transparent),
+    linear-gradient(to left, var(--color-white) 30%, transparent),
+    linear-gradient(to right, rgba(0,0,0,0.1), transparent),
+    linear-gradient(to left, rgba(0,0,0,0.1), transparent);
+  background-position: left, right, left, right;
+  background-size: 40px 100%, 40px 100%, 14px 100%, 14px 100%;
+  background-repeat: no-repeat;
+  background-attachment: local, local, scroll, scroll;
+}
+```
+
+#### Accessibility Requirements (WCAG 2.1 AA)
+
+- `<details>`/`<summary>` provides native keyboard support (Enter/Space to toggle)
+- Comparison tables need `<th scope="col">` and `<th scope="row">` for screen readers
+- Color contrast: Gold (#c9a84c) on white (#fff) **fails** AA contrast — use on dark backgrounds only, or darken to #a08930 for light backgrounds
+- Focus indicators: Ensure `:focus-visible` styles on all interactive elements
+- Skip navigation: Add a "Skip to content" link for keyboard users
+
+---
+
+### 9.4 North Texas Regional Authority: DFW Soil & Permit Deep Dive
+
+#### Key Findings (Verified via Geotechnical Sources)
+
+**DFW Expansive Clay Soil — The #1 Content Differentiator:**
+
+| Metric | DFW Reality | Content Implication |
+|--------|------------|-------------------|
+| **Dominant Soil Type** | Eagle Ford Shale, Austin Chalk Group clay formations | Name these specifically — builds geological authority |
+| **Plasticity Index (PI)** | Commonly **30–60+** across North Dallas suburbs | PI > 30 = "highly expansive" — requires engineered pool design per 2021 IRC |
+| **Potential Vertical Rise (PVR)** | 2–6 inches of seasonal ground movement | This is the key stat to communicate: your pool shell must handle 6" of differential movement |
+| **Active Zone Depth** | 7–15 feet below surface | Soil stabilization injections must reach this depth to be effective |
+| **Geotechnical Report Cost** | $500–$1,500 per site | Emphasize: this $1K investment prevents $30K–$50K+ in structural failure |
+
+**Soil Stabilization Methods (specific to DFW pool construction):**
+
+| Method | How It Works | Cost Range | When Required |
+|--------|-------------|-----------|---------------|
+| **SWIMSOIL chemical injection** | Proprietary chemical injected 7–10' deep, permanently alters expansive clay | $3,000–$8,000 | PI > 30, moderate PVR |
+| **EcSS 3000 / ProChem injection** | Similar chemical stabilization, different chemistry | $3,000–$8,000 | PI > 30, moderate PVR |
+| **Helical piers** | Screw-like steel piles driven to stable strata below active clay | $8,000–$20,000+ | Extreme PI/PVR, raised features, acrylic windows |
+| **Drilled piers** | Concrete piers drilled to bedrock or stable soil | $10,000–$25,000+ | Extreme conditions, large structures |
+| **Post-tensioned slab** | Steel cables in concrete shell tensioned after curing | Included in engineering | Standard for DFW gunite pools |
+| **Lime treatment** | Quicklime mixed into excavated soil | $2,000–$5,000 | Moderate expansion, deck areas |
+
+**Site content angle:** Budget builders skip soil stabilization ($3K–$8K savings) — this causes shell cracks, deck separation, plumbing leaks. The repair cost is $30K–$50K+. This is the most powerful "quality difference" example on the entire site.
+
+#### Municipal Permit Requirements (North Dallas)
+
+| Municipality | Geotech Required? | Stamped Engineer Plans? | Key Differences |
+|-------------|-------------------|------------------------|----------------|
+| **Frisco** | Yes — mandatory for pool permits | Yes — PE-stamped pool/foundation plan referencing geotech | Strict inspection schedule; will not issue CO without engineer's as-built letter |
+| **Prosper** | Yes | Yes | Growing rapidly; permit timelines can stretch 4–6 weeks |
+| **McKinney** | Yes | Yes | Requires soil boring analysis; multiple inspections |
+| **Celina** | Yes | Yes | Newer city infrastructure; HOA ARC approvals common |
+| **Allen** | Yes | Yes | Established inspection process; moderate timelines |
+| **Plano** | Yes | Yes | Most established process; efficient permit office |
+
+**Content opportunity:** "Your builder should handle 100% of permitting. If they ask you to pull the permit yourself, that's a red flag." This positions Humphrey Pools as the builder who handles the complexity.
+
+#### 2021 IRC Code Requirements (applicable in all DFW municipalities)
+
+- Foundations (including pools) must be designed to accommodate measured soil movement
+- Geotechnical report must include: borehole logs (minimum 2, 15–20' deep), PI, soil strata, groundwater levels, PVR
+- PE-stamped structural plans required referencing the geotech report
+- As-built documentation required before final approval (engineer's letter certifying construction matches plans)
+
+---
+
+### 9.5 Specialty Features: Product-Level Detail for Content Authority
+
+#### Acrylic Pool Windows — Deep Technical Specifications
+
+**Primary Manufacturer:** Reynolds Polymer Technology (RPT) — Makers of R-Cast™ acrylic, the industry standard for luxury pool, aquarium, and architectural glazing.
+
+| Specification | Details |
+|--------------|---------|
+| **Material** | R-Cast™ cell-cast acrylic (not extruded) |
+| **Optical Clarity** | 92% light transmittance |
+| **Impact Strength** | Up to 17× stronger than glass, 4× stronger than concrete |
+| **Panel Thickness** | 40mm–300mm+ (1.5"–12"+), calculated per FEA analysis |
+| **Max Single Panel Size** | 3m × 9m (10' × 30') in one piece |
+| **Engineering** | Finite Element Analysis (FEA) for deflection, load, and safety factor |
+| **Certification** | PE-stamped engineering drawings included |
+| **Lead Time** | 6–12 weeks for custom panels |
+| **Installation** | Dedicated acrylic glazing specialists (not standard pool crew) |
+| **Maintenance** | Scratch-repairable without draining; gentle cleaning with non-abrasive products |
+| **Seal Replacement** | Every 5–10 years |
+| **Warranty** | 20–30 year panel warranty from manufacturer |
+
+**Cost Ranges (verified from industry sources):**
+
+| Window Size | Approximate Cost (Supply + Install) |
+|------------|-------------------------------------|
+| Small (2' × 3') | $15,000–$25,000 |
+| Medium (3' × 5') | $25,000–$50,000 |
+| Large (4' × 8') | $50,000–$80,000 |
+| Panoramic (8' × 12'+) | $80,000–$150,000+ |
+
+**Wall construction for acrylic windows:**
+- Standard pool wall: 8"–10" thick
+- Acrylic window wall: **15"–18" thick** minimum
+- Requires U-channel construction larger than the panel
+- UV-resistant, non-corrosive waterproof sealant system
+- Structural engineering must be integrated from **day one** of design — cannot be added after the fact
+
+**Content angle:** "If your builder says they can add a window later, they don't understand acrylic pool windows. The structural engineering starts at the design phase."
+
+#### Outdoor Kitchen: Premium Brand Comparison
+
+**Grill Brands for $250K+ Projects:**
+
+| Brand | Main Burner BTU (42") | Stainless Grade | Signature Feature | Price Range (42" built-in) |
+|-------|----------------------|-----------------|-------------------|--------------------------|
+| **Lynx** | 75,000+ (ceramic) | 304 SS | Trident infrared sear burner, hot surface ignition | $6,000–$9,000 |
+| **Alfresco** | 82,500+ (U-shaped SS) | 304 SS | AccuFire sear zone (1,500°F), internal rotisserie motor | $5,500–$8,500 |
+| **Twin Eagles** | 75,000+ (U-shaped SS) | 304 SS | 3/8" hexagonal grates for superior sear marks | $5,500–$8,000 |
+| **Hestan** | 75,000+ (Trellis) | 304 SS (316 marine option) | Custom color finishes, marine-grade upgrade | $7,000–$11,000 |
+| **Kalamazoo** | 100,000+ (hybrid) | Heavy-gauge SS | Charcoal + gas hybrid, hand-built in USA | $15,000–$25,000 |
+
+**Cabinetry Brands:**
+- **Danver** — 304 stainless steel cabinetry, powder-coated finish options, lifetime warranty
+- **NatureKast** — Marine-grade polymer (weatherproof), realistic wood-grain textures, 0% moisture absorption
+- **Challenger Designs** — Modular stainless frames, quick-assemble island systems
+
+**Countertop Recommendations for DFW Climate:**
+
+| Material | Heat Resistance | Weather Durability | Maintenance | Luxury Rating |
+|----------|----------------|-------------------|-------------|--------------|
+| **Quartzite** | Excellent | Excellent (natural stone) | Seal annually | ⭐⭐⭐⭐⭐ |
+| **Soapstone** | Excellent (won't crack from heat) | Excellent | Oil periodically | ⭐⭐⭐⭐⭐ |
+| **Premium Granite (3cm)** | Good | Good | Seal annually | ⭐⭐⭐⭐ |
+| **Porcelain (sintered stone)** | Excellent | Excellent | Zero maintenance | ⭐⭐⭐⭐ |
+| **Marble** | Poor (etches/stains) | Poor (porous) | High maintenance | ❌ Avoid outdoors |
+| **Engineered Quartz** | Poor (UV damage, resin melts) | Poor (UV discolors) | N/A | ❌ Avoid outdoors |
+
+#### Patio Covers: StruXure vs Azenco Head-to-Head
+
+| Feature | StruXure Pivot 6 | Azenco R-BLADE |
+|---------|------------------|----------------|
+| **Material** | Extruded powder-coated aluminum | Dual-wall powder-coated aluminum |
+| **Louver Rotation** | 170° | 90° (gapless design) |
+| **Watertight** | Yes (when closed) | Yes (concealed integrated gutters) |
+| **Wind Rating** | Up to hurricane-rated (model dependent) | Miami-Dade approved (190 mph) |
+| **Snow Load** | Model dependent | Up to 100 lb/sq.ft. |
+| **Smart Controls** | Remote, app, weather sensors | Remote, app, wall switch, rain sensor |
+| **Integrated Features** | LED lighting, heaters, fans, screens, audio | LED lighting, heaters, fans, misting, privacy screens, audio |
+| **Cost per sq.ft. (installed)** | $150–$200 | $65–$180 (varies by configuration) |
+| **Typical 12'×20' installed** | $36,000–$48,000 | $25,000–$50,000+ |
+| **Colors** | 6 standard + custom | Multiple standard + custom |
+| **Warranty** | Limited lifetime (structural) | 10–25 year structural |
+
+**Recommendation for site content:** Present both brands as premium options. StruXure has better brand recognition in DFW residential. Azenco has superior wind ratings (relevant for North Texas storms).
+
+#### Artificial Turf: Technology Comparison for Pool Areas
+
+| Feature | SYNLawn | ForeverLawn |
+|---------|---------|-------------|
+| **Heat Reduction Tech** | HeatBlock™, COOLplus®, DualChill™ (TiO₂ + IR-reflective pigments) — up to 20% cooler | Advanced yarn formulas + cooling infill options |
+| **Drainage Rate** | 30–90+ inches/hour/sq.yd. | 100% edge-to-edge drainage (K9Grass backing system) |
+| **UV Resistance** | Plant-based fibers (sugar cane), PFAS-free | UV-stabilized nylon/polyethylene |
+| **Fire Rating** | ASTM Class A fire rated | Standard fire resistance |
+| **Cooling Infill** | TCool® sand infill (reduces surface temp by up to 50°F vs standard) | Compatible with TCool® |
+| **Pile Height** | 1.5"–2.25" (Premium/Select LX lines) | 1.5"–2.25" (Fusion Elite line) |
+| **Best For Pool Areas** | ⭐ Best documented heat reduction; ideal for Texas | Best drainage system; ideal for pet households |
+
+**Critical Texas consideration:** Standard turf can reach **140°F+** in direct Texas sun. TiO₂-coated fibers + TCool® infill bring this down to ~100–110°F — still warm but safe for bare feet. Content should address this head-on: "No turf is 'cool' in July. But cool-technology turf is the difference between uncomfortable and dangerous."
+
+---
+
+### 9.6 Luxury Image Strategy: Technical Implementation
+
+#### Key Findings
+
+Images are the #1 factor in conveying luxury. Research shows the current approach needs precision:
+
+#### Astro Built-in Image Optimization Pipeline
+
+```astro
+---
+// Phase hero image example
+import { Image } from 'astro:assets';
+import heroImage from '../assets/phases/excavation-hero.jpg';
+---
+<Image
+  src={heroImage}
+  alt="Precision excavation of a luxury freeform pool in North Texas clay soil"
+  width={1920}
+  height={1080}
+  format="webp"
+  quality={80}
+  loading="eager"  /* Hero images: eager. All others: lazy (default) */
+/>
+```
+
+**Format Strategy:**
+
+| Format | Use Case | Size Reduction | Browser Support |
+|--------|----------|---------------|----------------|
+| **WebP** | Default output for all images | 25–35% smaller than JPEG | 97%+ browsers |
+| **AVIF** | Hero images (via `<Picture>` component) | 50%+ smaller than JPEG | 93%+ browsers |
+| **JPEG** | Fallback for older browsers | Baseline | Universal |
+
+**Use `<Picture>` for hero images (serves AVIF → WebP → JPEG):**
+```astro
+---
+import { Picture } from 'astro:assets';
+import hero from '../assets/hero.jpg';
+---
+<Picture
+  src={hero}
+  formats={['avif', 'webp']}
+  alt="Infinity edge pool overlooking a North Texas sunset"
+  width={1920}
+  height={1080}
+  loading="eager"
+/>
+```
+
+#### Image Sizing Standards
+
+| Image Type | Dimensions | File Size Target | Loading Strategy |
+|-----------|-----------|-----------------|-----------------|
+| **Phase Hero** | 1920×1080 | < 200KB (WebP) | `loading="eager"` |
+| **Gallery Thumbnails** | 600×400 | < 50KB (WebP) | `loading="lazy"` |
+| **Comparison Illustrations** | 800×600 | < 80KB (WebP) | `loading="lazy"` |
+| **Inline Content Images** | 1200×800 | < 120KB (WebP) | `loading="lazy"` |
+| **OG/Social Sharing** | 1200×630 | < 100KB (JPEG) | Build-time generation |
+
+#### Placeholder Image Strategy
+
+**Phase 1 (Launch):** Curated stock photography from royalty-free sources
+
+| Source | License | Quality for Luxury Pool Content | API/Bulk Access |
+|--------|---------|-------------------------------|----------------|
+| **Unsplash** | Unsplash License (free, commercial use, no attribution required) | Good — 50+ high-quality luxury pool images | API: 50 req/hour (free) |
+| **Pexels** | Pexels License (free, commercial use, no attribution required) | Good — strong outdoor living content | API: 200 req/hour (free) |
+| **Adobe Stock** | Paid license ($30–$80/image or subscription) | Excellent — largest luxury pool library | Direct download |
+
+**Recommendation:** Start with Unsplash/Pexels for speed and cost. Budget $500–$1,000 for 15–20 Adobe Stock images for hero shots where free sources don't have sufficient luxury quality. All images should be:
+- Shot at eye level or slightly above (architectural perspective)
+- Showing water features active (cascading water, lit at dusk)
+- Dusk/golden hour lighting preferred (conveys luxury)
+- Include lifestyle elements (outdoor furniture, fire features lit, landscaping)
+- Minimum 3000×2000 source resolution (downsampled by Astro)
+
+**Phase 2 (Post-Launch):** Replace with original Humphrey Pools project photography
+- Professional photographer for 2–3 completed projects
+- Drone aerial shots (dramatic for large projects)
+- Dusk/twilight shoots (most impactful for luxury)
+- Before/during/after sequences for construction phases
+
+#### Blur-Up Placeholder Strategy
+
+Store images in `/src/assets/` (NOT `/public/`) so Astro processes them at build time. Astro's Sharp integration generates optimized output automatically. For perceived performance:
+
+1. **Dominant color placeholder** — Extract dominant color at build time, show colored rectangle while image loads
+2. **LQIP (Low Quality Image Placeholder)** — 20px wide version of the image, CSS blur-filtered, transitions to full image on load
+3. **For this project:** Use `loading="eager"` on hero images (above the fold) and `loading="lazy"` on everything else. The Astro `<Image>` component handles width/height to prevent CLS (Cumulative Layout Shift).
+
+---
+
+### 9.7 Future Integration with Main HumphreyPools Site
+
+#### Key Finding: Subdirectory Wins Over Subdomain for SEO
+
+**Google's 2025–2026 guidance:** While Google claims both are treated equally, real-world data consistently shows subdirectories outperform subdomains:
+
+| Strategy | SEO Impact | Technical Complexity | Recommendation |
+|----------|-----------|---------------------|---------------|
+| **Subdirectory** (`humphreyluxurypools.com/guide/`) | ⭐ Inherits all root domain authority; link equity flows naturally; 8–25% traffic increase documented in migrations | Moderate — requires reverse proxy or build integration | ⭐ **Recommended long-term** |
+| **Subdomain** (`guide.humphreyluxurypools.com`) | Authority is split; must build backlinks separately; Google treats as separate property | Low — separate deployment, separate DNS | Acceptable for Phase 1 launch |
+
+**Industry evidence:**
+- Monster.com saw **100%+ visibility increase** migrating localized content from subdomains to subdirectories
+- Multiple case studies show 20–200% traffic jumps from subdomain→subdirectory migrations
+- Google's Helpful Content Update (2023–2025) rewards tightly interlinked site structures — subdomains dilute topical signals
+
+#### Phased Integration Strategy
+
+**Phase 1 (Launch):** Deploy as subdomain `guide.humphreyluxurypools.com`
+- Fastest path to launch
+- Separate GitHub Pages deployment
+- Shared visual design (CSS custom properties, fonts, layout patterns)
+- Cross-linking: Main site hero/nav links to guide; guide links back to main site CTA
+
+**Phase 2 (Integration):** Migrate to subdirectory `humphreyluxurypools.com/guide/`
+- Option A: Combine both sites into one Astro project (Astro handles the existing vanilla pages as `src/pages/` and guide content as `src/pages/guide/`)
+- Option B: Use Cloudflare Workers or nginx reverse proxy to serve the guide site at `/guide/` path
+- Set up 301 redirects from subdomain to subdirectory
+- Update all internal links and sitemap
+
+#### Design Token Sharing Strategy
+
+The existing site's CSS custom properties become the shared design system:
+
+```
+humphrey-pools/
+├── shared/
+│   ├── tokens.css          ← Extracted from existing styles.css :root block
+│   ├── typography.css      ← .section-overline, .section-title, .section-subtitle
+│   ├── buttons.css         ← .btn, .btn-primary, .btn-outline
+│   └── layout.css          ← .container, .reveal
+├── main-site/              ← Existing vanilla HTML site
+│   └── css/styles.css      ← @import '../shared/tokens.css' + site-specific styles
+└── guide-site/             ← New Astro project
+    └── src/styles/
+        ├── global.css      ← @import '../../shared/tokens.css'
+        └── guide.css       ← Guide-specific component styles
+```
+
+**Existing design tokens to extract (verified from repo):**
+
+```css
+/* Verified from azurenerd/HumphreyPools css/styles.css */
+:root {
+  /* Colors */
+  --color-primary: #0a1628;
+  --color-primary-light: #142440;
+  --color-accent: #c9a84c;
+  --color-accent-light: #e0c97f;
+  --color-white: #ffffff;
+  --color-offwhite: #f7f5f0;
+  --color-cream: #ede8dd;
+  --color-text: #2c2c2c;
+  --color-text-light: #6b6b6b;
+  --color-overlay: rgba(10, 22, 40, 0.65);
+
+  /* Typography */
+  --font-heading: 'Playfair Display', Georgia, serif;
+  --font-body: 'Raleway', 'Segoe UI', sans-serif;
+  --font-accent: 'Cormorant Garamond', Georgia, serif;
+
+  /* Layout */
+  --container-max: 1280px;
+  --section-padding: 100px 0;
+  --transition: 0.3s ease;
+}
+```
+
+**Font loading in Astro 6 (replaces external Google Fonts CDN):**
+
+```js
+// astro.config.mjs
+import { defineConfig } from 'astro/config';
+
+export default defineConfig({
+  fonts: {
+    families: [
+      {
+        name: 'Playfair Display',
+        provider: 'google',
+        weights: [400, 500, 600],
+        styles: ['normal', 'italic'],
+      },
+      {
+        name: 'Raleway',
+        provider: 'google',
+        weights: [300, 400, 500, 600, 700],
+      },
+      {
+        name: 'Cormorant Garamond',
+        provider: 'google',
+        weights: [400, 500],
+        styles: ['normal', 'italic'],
+      },
+    ],
+  },
+});
+```
+
+This eliminates the render-blocking `<link>` tags to `fonts.googleapis.com` in the existing site's `<head>`, self-hosting the fonts for better LCP scores.
+
+#### Shared Navigation Pattern
+
+The guide site header should visually match the existing site but add a "← Back to Main Site" link and guide-specific navigation:
+
+```
+EXISTING SITE NAV:  Our Story | Showcase | Process | Services | Portfolio | [Start Your Project]
+GUIDE SITE NAV:     ← HumphreyPools.com | Overview | Phases | Features | [Start Your Project]
+```
+
+Both share the same logo SVG, font stack, and gold-on-navy color scheme.
+
+---
+
+### 9.8 Content Pipeline: Producing 30K–40K Words of Expert Content
+
+#### Key Findings
+
+The site requires approximately **30,000–40,000 words** across 10 phases + 6 specialty features = **16 major content pages**. This is a substantial editorial investment equivalent to a short book.
+
+#### Content Per Page Breakdown
+
+| Section | Count | Words/Page | Total Words |
+|---------|-------|-----------|-------------|
+| Phase pages (1–10) | 10 | 2,500–3,500 | 25,000–35,000 |
+| Specialty feature pages | 6 | 1,500–2,500 | 9,000–15,000 |
+| Home/overview page | 1 | 1,000–1,500 | 1,000–1,500 |
+| **Total** | **17** | — | **35,000–51,500** |
+
+#### Each Page Content Template (Markdown/MDX)
+
+```markdown
+---
+# Frontmatter (validated by Zod schema)
+title: "Phase 3: Steel & Rebar"
+phaseNumber: 3
+duration: "1–2 weeks"
+heroImage: "./images/steel-rebar-hero.jpg"
+executiveSummary: "The skeleton of your pool. This is where the most corners are cut..."
+comparisonRows:
+  - aspect: "Rebar Gauge"
+    budget: "#3 (3/8\") minimum"
+    luxury: "#4 (1/2\") standard, #5 for walls"
+  - aspect: "Grid Spacing"
+    budget: "12\" on-center"
+    luxury: "6\"–8\" on-center"
+---
+
+import ComparisonTable from '../../components/ComparisonTable.astro';
+import ExpandableSection from '../../components/ExpandableSection.astro';
+import QualityCallout from '../../components/QualityCallout.astro';
+
+<QualityCallout items={[
+  "Quality rebar costs $3K–$5K more but prevents $30K+ in structural failure",
+  "Luxury builders use #4–#5 rebar at 6\"–8\" spacing vs #3 at 12\"",
+  "Independent structural inspection before gunite is non-negotiable",
+]} />
+
+<ComparisonTable rows={frontmatter.comparisonRows} />
+
+<ExpandableSection title="What Happens In This Phase">
+  Content here — 200–400 words of expert detail...
+</ExpandableSection>
+
+<ExpandableSection title="Materials & Specifications">
+  Content here...
+</ExpandableSection>
+
+<ExpandableSection title="Common Pitfalls & Red Flags">
+  Content here...
+</ExpandableSection>
+
+<ExpandableSection title="Questions to Ask Your Builder">
+  Content here...
+</ExpandableSection>
+
+<ExpandableSection title="What We Do Differently">
+  Content here — Humphrey-specific quality differentiators...
+</ExpandableSection>
+```
+
+#### SEO Structured Data (JSON-LD)
+
+Each phase page should include HowTo and FAQ structured data for Google featured snippets:
+
+```json
+{
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  "name": "Pool Construction Phase 3: Steel & Rebar Installation",
+  "description": "Expert guide to steel and rebar installation in luxury pool construction...",
+  "step": [
+    {
+      "@type": "HowToStep",
+      "name": "Rebar Layout",
+      "text": "Position #4 rebar at 6-8 inch on-center grid spacing per engineer specifications..."
+    }
+  ]
+}
+```
+
+**FAQ schema** for the expandable sections (Google indexes `<details>` content and can display as FAQ rich results):
+
+```json
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What questions should I ask my pool builder about steel and rebar?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Ask about rebar gauge (#3 vs #4), grid spacing, overlap standards..."
+      }
+    }
+  ]
+}
+```
+
+#### Content Quality Assurance Pipeline
+
+| Tool | Purpose | Integration Point |
+|------|---------|------------------|
+| **markdownlint** (`markdownlint-cli2`) | Markdown syntax consistency | Pre-commit hook + CI |
+| **Hemingway App / Readable.com** | Readability scoring (target: Grade 8–10 reading level) | Manual review during writing |
+| **Astro Check** (`astro check`) | TypeScript + content schema validation | CI build step |
+| **Lighthouse CI** | Performance, accessibility, SEO auditing | CI post-build |
+| **Schema.org Validator** | Verify structured data markup | Manual check per page |
+
+#### Editorial Workflow (Without CMS)
+
+1. **Write** content in Markdown/MDX files in `src/content/phases/` and `src/content/features/`
+2. **Validate** with `astro check` (ensures Zod schema compliance — missing frontmatter fields will error)
+3. **Preview** with `npm run dev` (Astro dev server with hot reload)
+4. **Review** via Pull Request (GitHub PR review for content accuracy)
+5. **Deploy** automatically on merge to `main` (GitHub Actions → GitHub Pages)
+
+**Content production estimate:** At 500–800 words/hour for expert technical content (with research), expect **50–80 hours of writing** for the full site. This is the primary bottleneck — recommend starting content writing in parallel with development, not after.
+
+---
+
+## 10. Revised Implementation Timeline (with Deep-Dive Findings)
+
+Based on the deep analysis above, the revised timeline accounts for content production as the critical path:
+
+| Week | Development | Content Writing | Deliverable |
+|------|------------|----------------|-------------|
+| **1–2** | Astro project setup, design token extraction, layout components, CI/CD | Phase 1–3 content drafts | Working site skeleton on GitHub Pages |
+| **3–4** | PhaseCard, ComparisonTable, ExpandableSection components; home page timeline | Phase 4–7 content drafts | Functional home page + Phase 1 complete page |
+| **5–6** | Phase page template, image optimization pipeline, navigation | Phase 8–10 content drafts | First 5 phase pages live |
+| **7–8** | Specialty feature pages, cross-linking, mobile polish | Specialty feature content (6 pages) | All 10 phases + 3 features live |
+| **9** | SEO (JSON-LD, meta tags, OG images), accessibility audit | Remaining specialty features + revisions | All 16 pages complete |
+| **10** | Performance audit (Lighthouse 95+), analytics integration, stakeholder review | Final content review, image replacements | **Production launch** |
+
+**Critical path:** Content writing (50–80 hours) is the bottleneck, not development. Start writing Phase 1–3 immediately while scaffolding the Astro project.
+
+---
+
+## Appendix B: Reference Sources
+
+| Topic | Key Sources |
+|-------|------------|
+| Astro 6.0 Release | astro.build/blog/astro-6, GitHub withastro/astro releases |
+| Astro 6 Migration | byteiota.com/astro-6-migration-guide |
+| Cloudflare Acquisition | blog.cloudflare.com/astro-joins-cloudflare |
+| SSG Comparison | thesoftwarescout.com/best-static-site-generators-2026 |
+| DFW Soil Engineering | ultimus.engineering/swimming-pool-engineering, swimsoil.com |
+| DFW Soil Stabilization | dfwpoolandpatio.com, prochemtx.com, texasoutdooroasis.com |
+| Helical Piers (DFW) | hubbell.com/chancefoundationsolutions (Chance Helical Pile case study) |
+| Reynolds Polymer (Acrylic) | reynoldspolymer.com/capabilities/design-engineering |
+| Pool Automation | poolburg.com/pool-automation-systems, superiorpoolservice.com |
+| PebbleTec Finishes | pebbletec.com, troublefreepool.com |
+| StruXure Pergolas | struxure.com, homeguide.com/costs/struxure-pergola-cost |
+| Azenco R-BLADE | azenco-outdoor.com/r-blade |
+| Outdoor Grills | thebbqdepot.com, bestofbackyard.com |
+| SYNLawn Turf | synlawn.com, texasartificiallawns.com/heatblock-technology |
+| ForeverLawn Turf | foreverlawntexas.com/specifications |
+| Subdomain vs Subdirectory | backlinko.com/subdirectory-vs-subdomain, semrush.com |
+| Astro Image Optimization | docs.astro.build/en/guides/images |
+| Luxury Pool Process | backyardvacationoasis.com, atlantisluxurypools.com, moralesoutdoorliving.com |

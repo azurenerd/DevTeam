@@ -38,6 +38,21 @@ public class IssueWorkflow
     }
 
     /// <summary>
+    /// Find an existing open issue by title prefix match. Returns null if none found.
+    /// Use this before creating issues to prevent duplicates on restart.
+    /// </summary>
+    public async Task<AgentIssue?> FindExistingIssueAsync(
+        string titlePrefix,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(titlePrefix);
+
+        var allIssues = await _github.GetOpenIssuesAsync(ct);
+        return allIssues.FirstOrDefault(i =>
+            i.Title.StartsWith(titlePrefix, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
     /// Create an issue requesting additional resources from the PM.
     /// </summary>
     public async Task<AgentIssue> RequestResourceAsync(
@@ -50,6 +65,15 @@ public class IssueWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(justification);
 
         var title = $"Executive Request: Resource Request from {requestingAgent}";
+
+        // Idempotency: check for existing issue
+        var existing = await FindExistingIssueAsync(title, ct);
+        if (existing is not null)
+        {
+            _logger.LogInformation("Resource request issue already exists as #{Number}, skipping", existing.Number);
+            return existing;
+        }
+
         var body = $"""
             ## Resource Request
             **From:** {requestingAgent}
@@ -80,6 +104,15 @@ public class IssueWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(title);
 
         var issueTitle = $"Executive Request: {title}";
+
+        // Idempotency: check for existing issue
+        var existing = await FindExistingIssueAsync(issueTitle, ct);
+        if (existing is not null)
+        {
+            _logger.LogInformation("Executive request already exists as #{Number}, skipping", existing.Number);
+            return existing;
+        }
+
         var issueBody = $"""
             ## Executive Request
             **From:** {fromAgent}
@@ -109,6 +142,15 @@ public class IssueWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(title);
 
         var issueTitle = $"{agentName}: 🚫 {title}";
+
+        // Idempotency: check for existing blocker
+        var existing = await FindExistingIssueAsync(issueTitle, ct);
+        if (existing is not null)
+        {
+            _logger.LogInformation("Blocker issue already exists as #{Number}, skipping", existing.Number);
+            return existing;
+        }
+
         var issueBody = $"""
             ## Blocker Report
             **Agent:** {agentName}
@@ -142,6 +184,15 @@ public class IssueWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(question);
 
         var title = $"{toAgent}: Question from {fromAgent}";
+
+        // Idempotency: check for existing question
+        var existing = await FindExistingIssueAsync(title, ct);
+        if (existing is not null)
+        {
+            _logger.LogInformation("Question issue already exists as #{Number}, skipping", existing.Number);
+            return existing;
+        }
+
         var body = $"""
             ## Agent Question
             **From:** {fromAgent}

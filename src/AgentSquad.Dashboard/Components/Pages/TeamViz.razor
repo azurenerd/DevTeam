@@ -27,7 +27,7 @@ else
 {
     <div class="team-office">
         @* Connection lines drawn via CSS pseudo-elements *@
-        <svg class="team-connections" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <svg class="team-connections" viewBox="0 0 100 100" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
             @foreach (var conn in _connections)
             {
                 <line x1="@conn.X1" y1="@conn.Y1" x2="@conn.X2" y2="@conn.Y2"
@@ -130,16 +130,33 @@ else
 
         if (_agents.Count < 2) return;
 
-        // Compute grid positions (percentage-based) for connections
-        var positions = new Dictionary<string, (double X, double Y)>();
+        // We need to compute the center of each grid cell as it appears in the CSS grid.
+        // The SVG viewBox is "0 0 1000 600" (arbitrary units that map to the .team-office box).
+        // The CSS grid has: padding ~40px 32px, gap ~24px, and repeat(4, 1fr) columns.
+        // We approximate with proportional units.
+
         int cols = Math.Min(_agents.Count, 4);
+        int rows = (_agents.Count + cols - 1) / cols;
+
+        // Approximate padding as percentage of total
+        const double padX = 3.5; // % horizontal padding
+        const double padY = 8.0; // % vertical padding (top/bottom)
+        const double gapX = 2.5; // % gap between columns
+        const double gapY = 5.0; // % gap between rows
+
+        double usableW = 100.0 - 2 * padX - (cols - 1) * gapX;
+        double usableH = 100.0 - 2 * padY - Math.Max(0, rows - 1) * gapY;
+        double cellW = usableW / cols;
+        double cellH = usableH / rows;
+
+        var positions = new Dictionary<string, (double X, double Y)>();
 
         for (int i = 0; i < _agents.Count; i++)
         {
             int row = i / cols;
             int col = i % cols;
-            double x = (col + 0.5) * (100.0 / cols);
-            double y = (row + 0.5) * (100.0 / Math.Max(1, (_agents.Count + cols - 1) / cols));
+            double x = padX + col * (cellW + gapX) + cellW / 2.0;
+            double y = padY + row * (cellH + gapY) + cellH / 2.0;
             positions[_agents[i].Id] = (x, y);
         }
 
@@ -158,8 +175,8 @@ else
                 {
                     _connections.Add(new ConnectionLine
                     {
-                        X1 = $"{pmPos.X:F1}%", Y1 = $"{pmPos.Y:F1}%",
-                        X2 = $"{agentPos.X:F1}%", Y2 = $"{agentPos.Y:F1}%",
+                        X1 = $"{pmPos.X:F1}", Y1 = $"{pmPos.Y:F1}",
+                        X2 = $"{agentPos.X:F1}", Y2 = $"{agentPos.Y:F1}",
                         CssClass = "connection-pm"
                     });
                 }
@@ -176,8 +193,8 @@ else
                 {
                     _connections.Add(new ConnectionLine
                     {
-                        X1 = $"{pePos.X:F1}%", Y1 = $"{pePos.Y:F1}%",
-                        X2 = $"{engPos.X:F1}%", Y2 = $"{engPos.Y:F1}%",
+                        X1 = $"{pePos.X:F1}", Y1 = $"{pePos.Y:F1}",
+                        X2 = $"{engPos.X:F1}", Y2 = $"{engPos.Y:F1}",
                         CssClass = "connection-pe"
                     });
                 }

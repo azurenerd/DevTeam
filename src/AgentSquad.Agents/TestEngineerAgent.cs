@@ -43,7 +43,7 @@ public class TestEngineerAgent : AgentBase
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
     {
-        UpdateStatus(AgentStatus.Working, "Monitoring PRs for test coverage");
+        UpdateStatus(AgentStatus.Idle, "Monitoring PRs for test coverage");
 
         while (!ct.IsCancellationRequested)
         {
@@ -62,9 +62,10 @@ public class TestEngineerAgent : AgentBase
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Test engineer loop error");
+                RecordError($"Test loop error: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
                 UpdateStatus(AgentStatus.Error, ex.Message);
                 await Task.Delay(5000, ct);
-                UpdateStatus(AgentStatus.Working, "Resuming after error");
+                UpdateStatus(AgentStatus.Idle, "Resuming after error");
             }
         }
     }

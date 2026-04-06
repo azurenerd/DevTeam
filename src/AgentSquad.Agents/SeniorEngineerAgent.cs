@@ -57,7 +57,7 @@ public class SeniorEngineerAgent : AgentBase
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
     {
-        UpdateStatus(AgentStatus.Online, "Ready for task assignments");
+        UpdateStatus(AgentStatus.Idle, "Ready for task assignments");
 
         while (!ct.IsCancellationRequested)
         {
@@ -73,7 +73,7 @@ public class SeniorEngineerAgent : AgentBase
                 }
                 else if (activePR == null)
                 {
-                    UpdateStatus(AgentStatus.Online, "Waiting for task assignment");
+                    UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
                 }
 
                 await CheckForIssuesAsync(ct);
@@ -88,10 +88,11 @@ public class SeniorEngineerAgent : AgentBase
             catch (Exception ex)
             {
                 Logger.LogError(ex, "Senior Engineer {Name} loop error", Identity.DisplayName);
+                RecordError($"Loop error: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
                 UpdateStatus(AgentStatus.Error, ex.Message);
                 try { await Task.Delay(10_000, ct); }
                 catch (OperationCanceledException) { break; }
-                UpdateStatus(AgentStatus.Online, "Recovered from error");
+                UpdateStatus(AgentStatus.Idle, "Recovered from error");
             }
         }
 
@@ -120,6 +121,7 @@ public class SeniorEngineerAgent : AgentBase
         {
             var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
             var researchDoc = await _projectFiles.GetResearchDocAsync(ct);
+            var pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct);
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
@@ -128,11 +130,13 @@ public class SeniorEngineerAgent : AgentBase
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a Senior Engineer implementing a medium-complexity engineering task. " +
-                "You produce clean, well-structured code that follows the project architecture. " +
+                "You produce clean, well-structured code that follows the project architecture " +
+                "and fulfills the business requirements from the PM specification. " +
                 "Include proper error handling, logging, and unit tests. " +
                 "Be thorough and practical.");
 
             history.AddUserMessage(
+                $"## PM Specification (Business Requirements)\n{pmSpecDoc}\n\n" +
                 $"## Architecture\n{architectureDoc}\n\n" +
                 $"## Research Context\n{researchDoc}\n\n" +
                 $"## Task: {PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title)}\n{pr.Body}\n\n" +
@@ -199,13 +203,14 @@ public class SeniorEngineerAgent : AgentBase
                 "Senior Engineer {Name} completed PR #{Number}, marked ready for review",
                 Identity.DisplayName, pr.Number);
 
-            UpdateStatus(AgentStatus.Online, $"Completed PR #{pr.Number}, awaiting next task");
+            UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting next task");
             Identity.AssignedPullRequest = null;
         }
         catch (Exception ex)
         {
             Logger.LogError(ex, "Senior Engineer {Name} failed working on PR #{Number}",
                 Identity.DisplayName, pr.Number);
+            RecordError($"Failed on PR #{pr.Number}: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
 
             await ReportBlockerAsync(
                 $"Implementation failure on PR #{pr.Number}",
@@ -268,6 +273,7 @@ public class SeniorEngineerAgent : AgentBase
         {
             Logger.LogError(ex, "Senior Engineer {Name} failed to report blocker",
                 Identity.DisplayName);
+            RecordError($"Blocker report failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Warning, ex);
         }
     }
 

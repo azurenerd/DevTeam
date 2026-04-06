@@ -1,6 +1,7 @@
 @page "/"
 @using AgentSquad.Core.Agents
 @using AgentSquad.Dashboard.Services
+@using Microsoft.Extensions.Logging
 @implements IDisposable
 @inject DashboardDataService DataService
 @inject NavigationManager Navigation
@@ -34,8 +35,8 @@
         <div class="stat-value">@_agents.Count</div>
     </div>
     <div class="stat-card">
-        <div class="stat-label">Online</div>
-        <div class="stat-value green">@CountByStatus(AgentStatus.Online)</div>
+        <div class="stat-label">Idle</div>
+        <div class="stat-value green">@CountByStatus(AgentStatus.Idle)</div>
     </div>
     <div class="stat-card">
         <div class="stat-label">Working</div>
@@ -83,7 +84,11 @@ else
                         <span class="detail-label">Task</span>
                         @if (agent.AssignedPullRequest is not null)
                         {
-                            <span class="detail-value task-active">@agent.AssignedPullRequest</span>
+                            <span class="detail-value task-active" title="@agent.AssignedPullRequest">@agent.AssignedPullRequest</span>
+                        }
+                        else if (!string.IsNullOrEmpty(agent.StatusReason))
+                        {
+                            <span class="detail-value task-active" title="@agent.StatusReason">@TruncateTask(agent.StatusReason)</span>
                         }
                         else
                         {
@@ -101,9 +106,56 @@ else
                             <span class="detail-value task-active">@FormatDuration(DateTime.UtcNow - agent.LastStatusChange)</span>
                         </div>
                     }
+                    @if (agent.ErrorCount > 0)
+                    {
+                        <div class="agent-detail error-badge-row" @onclick:stopPropagation="true" @onclick="() => ShowErrors(agent.Id)">
+                            <span class="error-badge">⚠ @agent.ErrorCount error@(agent.ErrorCount != 1 ? "s" : "")</span>
+                        </div>
+                    }
                 </div>
             </div>
         }
+    </div>
+}
+
+@if (_showErrorModal && _errorModalAgentId is not null)
+{
+    <div class="modal-overlay" @onclick="CloseErrorModal">
+        <div class="error-modal" @onclick:stopPropagation="true">
+            <div class="error-modal-header">
+                <h3>Errors — @_errorModalAgentName</h3>
+                <button class="modal-close" @onclick="CloseErrorModal">✕</button>
+            </div>
+            <div class="error-modal-body">
+                @if (_errorEntries.Count == 0)
+                {
+                    <div class="empty-errors">No errors recorded</div>
+                }
+                else
+                {
+                    @foreach (var err in _errorEntries)
+                    {
+                        <div class="error-entry @(err.Level == Microsoft.Extensions.Logging.LogLevel.Warning ? "warn" : "err")">
+                            <div class="error-entry-header">
+                                <span class="error-level">@(err.Level == Microsoft.Extensions.Logging.LogLevel.Warning ? "⚠ WARN" : "❌ ERROR")</span>
+                                <span class="error-time">@err.Timestamp.ToString("HH:mm:ss")</span>
+                            </div>
+                            <div class="error-message">@err.Message</div>
+                            @if (err.ExceptionDetails is not null)
+                            {
+                                <details class="error-details">
+                                    <summary>Stack trace</summary>
+                                    <pre>@err.ExceptionDetails</pre>
+                                </details>
+                            }
+                        </div>
+                    }
+                }
+            </div>
+            <div class="error-modal-footer">
+                <button class="btn-reset" @onclick="ResetErrors">Clear All Errors</button>
+            </div>
+        </div>
     </div>
 }
 
@@ -112,6 +164,12 @@ else
     private string? _selectedAgentId;
     private bool _hasDeadlock;
     private List<string>? _deadlockCycle;
+
+    // Error modal state
+    private bool _showErrorModal;
+    private string? _errorModalAgentId;
+    private string? _errorModalAgentName;
+    private List<AgentLogEntry> _errorEntries = [];
 
     protected override void OnInitialized()
     {
@@ -179,6 +237,38 @@ else
         : ts.TotalMinutes >= 1
             ? $"{ts.Minutes}m {ts.Seconds}s"
             : $"{ts.Seconds}s";
+
+    private static string TruncateTask(string text) =>
+        text.Length <= 40 ? text : string.Concat(text.AsSpan(0, 37), "...");
+
+    private void ShowErrors(string agentId)
+    {
+        var agent = _agents.FirstOrDefault(a => a.Id == agentId);
+        if (agent is null) return;
+
+        _errorModalAgentId = agentId;
+        _errorModalAgentName = agent.DisplayName;
+        _errorEntries = DataService.GetAgentErrors(agentId).ToList();
+        _showErrorModal = true;
+    }
+
+    private void CloseErrorModal()
+    {
+        _showErrorModal = false;
+        _errorModalAgentId = null;
+        _errorEntries = [];
+    }
+
+    private void ResetErrors()
+    {
+        if (_errorModalAgentId is not null)
+        {
+            DataService.ClearAgentErrors(_errorModalAgentId);
+            _errorEntries = [];
+            _showErrorModal = false;
+            _errorModalAgentId = null;
+        }
+    }
 
     public void Dispose()
     {

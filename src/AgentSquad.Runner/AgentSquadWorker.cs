@@ -8,17 +8,21 @@ namespace AgentSquad.Runner;
 public class AgentSquadWorker : BackgroundService
 {
     private readonly AgentSpawnManager _spawnManager;
+    private readonly AgentRegistry _registry;
     private readonly WorkflowStateMachine _workflow;
     private readonly ILogger<AgentSquadWorker> _logger;
     private readonly AgentSquadConfig _config;
+    private readonly List<Task> _agentTasks = new();
 
     public AgentSquadWorker(
         AgentSpawnManager spawnManager,
+        AgentRegistry registry,
         WorkflowStateMachine workflow,
         ILogger<AgentSquadWorker> logger,
         IOptions<AgentSquadConfig> config)
     {
         _spawnManager = spawnManager ?? throw new ArgumentNullException(nameof(spawnManager));
+        _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
@@ -41,34 +45,63 @@ public class AgentSquadWorker : BackgroundService
         Console.WriteLine($"  Max additional engineers: {_config.Limits.MaxAdditionalEngineers}");
         Console.WriteLine();
 
-        // Phase 1: Spawn the Program Manager
-        var pmIdentity = await _spawnManager.SpawnAgentAsync(AgentRole.ProgramManager, ct);
-        if (pmIdentity == null)
+        // Spawn all core agents
+        var roles = new[]
         {
-            _logger.LogCritical("Failed to spawn Program Manager agent");
-            return;
+            AgentRole.ProgramManager,
+            AgentRole.Researcher,
+            AgentRole.Architect,
+            AgentRole.PrincipalEngineer,
+            AgentRole.TestEngineer
+        };
+
+        foreach (var role in roles)
+        {
+            var identity = await _spawnManager.SpawnAgentAsync(role, ct);
+            if (identity == null)
+            {
+                _logger.LogCritical("Failed to spawn {Role} agent", role);
+                if (role == AgentRole.ProgramManager) return;
+                continue;
+            }
+            _logger.LogInformation("{Role} agent spawned: {Name}", role, identity.DisplayName);
         }
-        _logger.LogInformation("Program Manager agent spawned: {Name}", pmIdentity.DisplayName);
 
-        // Phase 2: Spawn Researcher
-        var researcherIdentity = await _spawnManager.SpawnAgentAsync(AgentRole.Researcher, ct);
-        _logger.LogInformation("Researcher agent spawned: {Name}", researcherIdentity?.DisplayName);
+        _logger.LogInformation("All core agents spawned. Starting agent loops...");
 
-        // Phase 3: Spawn Architect
-        var architectIdentity = await _spawnManager.SpawnAgentAsync(AgentRole.Architect, ct);
-        _logger.LogInformation("Architect agent spawned: {Name}", architectIdentity?.DisplayName);
+        // Start all agent loops as background tasks
+        foreach (var agent in _registry.GetAllAgents())
+        {
+            var agentTask = Task.Run(async () =>
+            {
+                try
+                {
+                    await agent.StartAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    // Graceful shutdown
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Agent {AgentId} ({Role}) loop crashed",
+                        agent.Identity.Id, agent.Identity.Role);
+                }
+            }, ct);
+            _agentTasks.Add(agentTask);
+        }
 
-        // Phase 4: Spawn Principal Engineer
-        var principalIdentity = await _spawnManager.SpawnAgentAsync(AgentRole.PrincipalEngineer, ct);
-        _logger.LogInformation("Principal Engineer agent spawned: {Name}", principalIdentity?.DisplayName);
+        _logger.LogInformation("All agent loops started. PM agent will orchestrate the workflow.");
 
-        // Phase 5: Spawn Test Engineer
-        var testerIdentity = await _spawnManager.SpawnAgentAsync(AgentRole.TestEngineer, ct);
-        _logger.LogInformation("Test Engineer agent spawned: {Name}", testerIdentity?.DisplayName);
-
-        _logger.LogInformation("All core agents spawned. PM agent will manage the rest.");
-
-        // Keep alive — the hosted services (agents, health monitor) run independently
-        await Task.Delay(Timeout.Infinite, ct);
+        // Keep alive until cancellation — agents run as background tasks
+        try
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("AgentSquad shutting down, waiting for agent loops...");
+            await Task.WhenAll(_agentTasks).WaitAsync(TimeSpan.FromSeconds(10));
+        }
     }
 }

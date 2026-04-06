@@ -6,7 +6,7 @@ using Microsoft.Extensions.Logging;
 namespace AgentSquad.Core.Persistence;
 
 /// <summary>
-/// Manages the shared Markdown files in the repo: TeamMembers.md, EngineeringPlan.md, Architecture.md, Research.md.
+/// Manages the shared Markdown files in the repo: TeamMembers.md, EngineeringPlan.md, Architecture.md, Research.md, PMSpec.md.
 /// </summary>
 public class ProjectFileManager
 {
@@ -18,6 +18,7 @@ public class ProjectFileManager
     private const string EngineeringPlanPath = "EngineeringPlan.md";
     private const string ArchitecturePath = "Architecture.md";
     private const string ResearchPath = "Research.md";
+    private const string PMSpecPath = "PMSpec.md";
 
     public ProjectFileManager(
         IGitHubService github,
@@ -212,6 +213,24 @@ public class ProjectFileManager
 
         _logger.LogInformation("Updating Research.md");
         await _github.CreateOrUpdateFileAsync(ResearchPath, content, "Update research document", _branch, ct);
+    }
+
+    #endregion
+
+    #region PMSpec.md
+
+    public async Task<string> GetPMSpecAsync(CancellationToken ct = default)
+    {
+        var content = await _github.GetFileContentAsync(PMSpecPath, _branch, ct);
+        return content ?? "# PM Specification\n\n_No PM specification has been created yet._\n";
+    }
+
+    public async Task UpdatePMSpecAsync(string content, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(content);
+
+        _logger.LogInformation("Updating PMSpec.md");
+        await _github.CreateOrUpdateFileAsync(PMSpecPath, content, "Update PM specification", _branch, ct);
     }
 
     #endregion

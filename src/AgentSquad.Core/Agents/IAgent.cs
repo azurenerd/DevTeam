@@ -4,6 +4,7 @@ public interface IAgent
 {
     AgentIdentity Identity { get; }
     AgentStatus Status { get; }
+    string? StatusReason { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
     Task StartAsync(CancellationToken ct = default);
@@ -11,6 +12,10 @@ public interface IAgent
     Task HandleMessageAsync(AgentMessage message, CancellationToken ct = default);
 
     event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
+    event EventHandler? ErrorsChanged;
+
+    IReadOnlyList<AgentLogEntry> RecentErrors { get; }
+    void ClearErrors();
 }
 
 public class AgentStatusChangedEventArgs : EventArgs

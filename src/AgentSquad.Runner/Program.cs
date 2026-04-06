@@ -4,9 +4,12 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Persistence;
 using AgentSquad.Orchestrator;
 using AgentSquad.Agents;
+using AgentSquad.Dashboard.Components;
+using AgentSquad.Dashboard.Hubs;
+using AgentSquad.Dashboard.Services;
 using AgentSquad.Runner;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
 // Bind configuration
 builder.Services.Configure<AgentSquadConfig>(
@@ -48,8 +51,33 @@ builder.Services.AddOrchestrator();
 // Agent factory
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
 
+// Dashboard: Blazor Server + SignalR
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<DashboardDataService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataService>());
+
 // Worker service that starts the core agents and kicks off the workflow
 builder.Services.AddHostedService<AgentSquadWorker>();
 
-var host = builder.Build();
-host.Run();
+var app = builder.Build();
+
+// Configure HTTP pipeline
+if (!app.Environment.IsDevelopment())
+{
+    app.UseExceptionHandler("/Error");
+    app.UseHsts();
+}
+
+app.UseStaticFiles();
+app.UseAntiforgery();
+
+// SignalR hub for real-time dashboard updates
+app.MapHub<AgentHub>("/agenthub");
+
+// Blazor Server components
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
+
+app.Run();

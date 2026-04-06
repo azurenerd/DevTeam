@@ -7,6 +7,7 @@ public class AgentSquadConfig
     public AgentConfigs Agents { get; set; } = new();
     public LimitsConfig Limits { get; set; } = new();
     public DashboardConfig Dashboard { get; set; } = new();
+    public CopilotCliConfig CopilotCli { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -16,6 +17,13 @@ public class ProjectConfig
     public string GitHubRepo { get; set; } = "";
     public string GitHubToken { get; set; } = "";
     public string DefaultBranch { get; set; } = "main";
+
+    /// <summary>
+    /// Custom prompt that guides the Researcher agent on what to investigate.
+    /// When empty, a comprehensive default prompt is generated from the project description.
+    /// Use this to steer research toward specific areas, technologies, or concerns.
+    /// </summary>
+    public string ResearchPrompt { get; set; } = "";
 }
 
 public class ModelConfig
@@ -53,10 +61,75 @@ public class LimitsConfig
     public int GitHubPollIntervalSeconds { get; set; } = 30;
     public int AgentTimeoutMinutes { get; set; } = 15;
     public int MaxConcurrentAgents { get; set; } = 10;
+
+    /// <summary>
+    /// If the Principal Engineer estimates all remaining tasks can be completed within
+    /// this many minutes, it won't request additional engineers.
+    /// </summary>
+    public int SelfCompletionThresholdMinutes { get; set; } = 10;
+
+    /// <summary>
+    /// Minimum number of parallelizable tasks required before the Principal Engineer
+    /// requests a new engineer from the PM.
+    /// </summary>
+    public int MinParallelizableTasksForNewEngineer { get; set; } = 3;
 }
 
 public class DashboardConfig
 {
     public int Port { get; set; } = 5000;
     public bool EnableSignalR { get; set; } = true;
+}
+
+/// <summary>
+/// Configuration for the Copilot CLI AI provider.
+/// When enabled, agents use the copilot CLI as the default AI backend instead of API keys.
+/// </summary>
+public class CopilotCliConfig
+{
+    /// <summary>Whether to use Copilot CLI as the default AI provider.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Path to the copilot executable. Defaults to "copilot" (assumes it's on PATH).</summary>
+    public string ExecutablePath { get; set; } = "copilot";
+
+    /// <summary>Maximum number of concurrent copilot processes.</summary>
+    public int MaxConcurrentRequests { get; set; } = 4;
+
+    /// <summary>Timeout in seconds for a single AI request.</summary>
+    public int RequestTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>Alias for RequestTimeoutSeconds (backwards compatibility with appsettings).</summary>
+    public int ProcessTimeoutSeconds
+    {
+        get => RequestTimeoutSeconds;
+        set => RequestTimeoutSeconds = value;
+    }
+
+    /// <summary>Model to request from Copilot CLI (e.g., "claude-opus-4.6").</summary>
+    public string ModelName { get; set; } = "claude-opus-4.6";
+
+    /// <summary>
+    /// Automatically approve all interactive prompts (y/n, selections, etc.).
+    /// When true, the interactive watchdog auto-responds to unexpected prompts.
+    /// </summary>
+    public bool AutoApprovePrompts { get; set; } = true;
+
+    /// <summary>Reasoning effort level: "low", "medium", "high", "xhigh", or null for default.</summary>
+    public string? ReasoningEffort { get; set; }
+
+    /// <summary>Use --silent flag to suppress stats and chrome in output.</summary>
+    public bool SilentMode { get; set; } = true;
+
+    /// <summary>Use --output-format json for structured JSONL output.</summary>
+    public bool JsonOutput { get; set; } = false;
+
+    /// <summary>Tools to exclude from the CLI's available tools (e.g., "shell", "write").</summary>
+    public List<string> ExcludedTools { get; set; } = new();
+
+    /// <summary>Working directory for copilot processes. Null uses the current directory.</summary>
+    public string? WorkingDirectory { get; set; }
+
+    /// <summary>Additional arguments to pass to the copilot CLI.</summary>
+    public string? AdditionalArgs { get; set; }
 }

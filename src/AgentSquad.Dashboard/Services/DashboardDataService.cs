@@ -14,7 +14,9 @@ public sealed record AgentSnapshot
     public required AgentStatus Status { get; init; }
     public required DateTime CreatedAt { get; init; }
     public string? AssignedPullRequest { get; init; }
+    public string? StatusReason { get; init; }
     public DateTime LastStatusChange { get; set; } = DateTime.UtcNow;
+    public int ErrorCount { get; init; }
 }
 
 public sealed class DashboardDataService : BackgroundService
@@ -26,6 +28,8 @@ public sealed class DashboardDataService : BackgroundService
     private readonly ILogger<DashboardDataService> _logger;
 
     private readonly Dictionary<string, AgentSnapshot> _agentCache = new();
+    private readonly Dictionary<string, List<AgentLogEntry>> _agentErrors = new();
+    private readonly Dictionary<string, IAgent> _trackedAgents = new();
     private readonly object _cacheLock = new();
 
     private AgentHealthSnapshot? _lastHealthSnapshot;
@@ -100,6 +104,36 @@ public sealed class DashboardDataService : BackgroundService
         return _deadlockDetector.HasDeadlock(out cycle);
     }
 
+    /// <summary>Gets error/warning log entries for a specific agent.</summary>
+    public IReadOnlyList<AgentLogEntry> GetAgentErrors(string agentId)
+    {
+        lock (_cacheLock)
+        {
+            return _agentErrors.TryGetValue(agentId, out var errors)
+                ? errors.ToList()
+                : [];
+        }
+    }
+
+    /// <summary>Clears tracked errors for a specific agent and updates the snapshot.</summary>
+    public void ClearAgentErrors(string agentId)
+    {
+        lock (_cacheLock)
+        {
+            if (_agentErrors.ContainsKey(agentId))
+                _agentErrors[agentId].Clear();
+
+            if (_agentCache.TryGetValue(agentId, out var snapshot))
+                _agentCache[agentId] = snapshot with { ErrorCount = 0 };
+        }
+
+        if (_trackedAgents.TryGetValue(agentId, out var agent))
+            agent.ClearErrors();
+
+        _ = _hubContext.Clients.All.SendAsync("AgentErrorsCleared", agentId);
+        NotifyStateChanged();
+    }
+
     private void SeedCache()
     {
         var agents = _registry.GetAllAgents();
@@ -108,6 +142,8 @@ public sealed class DashboardDataService : BackgroundService
             foreach (var agent in agents)
             {
                 _agentCache[agent.Identity.Id] = ToSnapshot(agent);
+                _trackedAgents[agent.Identity.Id] = agent;
+                SubscribeToErrors(agent);
             }
         }
     }
@@ -118,6 +154,8 @@ public sealed class DashboardDataService : BackgroundService
         lock (_cacheLock)
         {
             _agentCache[e.Agent.Identity.Id] = snapshot;
+            _trackedAgents[e.Agent.Identity.Id] = e.Agent;
+            SubscribeToErrors(e.Agent);
         }
 
         _ = _hubContext.Clients.All.SendAsync("AgentRegistered", snapshot);
@@ -129,6 +167,8 @@ public sealed class DashboardDataService : BackgroundService
         lock (_cacheLock)
         {
             _agentCache.Remove(e.Agent.Identity.Id);
+            _agentErrors.Remove(e.Agent.Identity.Id);
+            _trackedAgents.Remove(e.Agent.Identity.Id);
         }
 
         _ = _hubContext.Clients.All.SendAsync("AgentUnregistered", e.Agent.Identity.Id);
@@ -141,10 +181,17 @@ public sealed class DashboardDataService : BackgroundService
         {
             if (_agentCache.TryGetValue(e.Agent.Id, out var cached))
             {
+                // Only reset the timer when the status enum actually changes,
+                // not when just the status reason text updates
+                var statusChangeTime = e.OldStatus != e.NewStatus
+                    ? DateTime.UtcNow
+                    : cached.LastStatusChange;
+
                 _agentCache[e.Agent.Id] = cached with
                 {
                     Status = e.NewStatus,
-                    LastStatusChange = DateTime.UtcNow
+                    StatusReason = e.Reason,
+                    LastStatusChange = statusChangeTime
                 };
             }
         }
@@ -172,6 +219,36 @@ public sealed class DashboardDataService : BackgroundService
         }
     }
 
+    private void SubscribeToErrors(IAgent agent)
+    {
+        agent.ErrorsChanged += OnAgentErrorsChanged;
+    }
+
+    private void OnAgentErrorsChanged(object? sender, EventArgs e)
+    {
+        if (sender is not IAgent agent) return;
+
+        var agentId = agent.Identity.Id;
+        var currentErrors = agent.RecentErrors;
+
+        lock (_cacheLock)
+        {
+            _agentErrors[agentId] = currentErrors.ToList();
+
+            if (_agentCache.TryGetValue(agentId, out var snapshot))
+            {
+                _agentCache[agentId] = snapshot with { ErrorCount = currentErrors.Count };
+            }
+        }
+
+        _ = _hubContext.Clients.All.SendAsync("AgentErrorsUpdated", new
+        {
+            AgentId = agentId,
+            ErrorCount = currentErrors.Count
+        });
+        NotifyStateChanged();
+    }
+
     private static AgentSnapshot ToSnapshot(IAgent agent) => new()
     {
         Id = agent.Identity.Id,
@@ -179,9 +256,11 @@ public sealed class DashboardDataService : BackgroundService
         Role = agent.Identity.Role,
         ModelTier = agent.Identity.ModelTier,
         Status = agent.Status,
+        StatusReason = agent.StatusReason,
         CreatedAt = agent.Identity.CreatedAt,
         AssignedPullRequest = agent.Identity.AssignedPullRequest,
-        LastStatusChange = DateTime.UtcNow
+        LastStatusChange = DateTime.UtcNow,
+        ErrorCount = agent.RecentErrors.Count
     };
 
     // Observable event for Blazor components to subscribe to for re-rendering

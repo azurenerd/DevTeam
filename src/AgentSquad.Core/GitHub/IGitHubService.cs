@@ -9,6 +9,7 @@ public interface IGitHubService
     Task<AgentPullRequest?> GetPullRequestAsync(int number, CancellationToken ct = default);
     Task<IReadOnlyList<AgentPullRequest>> GetOpenPullRequestsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AgentPullRequest>> GetPullRequestsForAgentAsync(string agentName, CancellationToken ct = default);
+    Task<IReadOnlyList<IssueComment>> GetPullRequestCommentsAsync(int prNumber, CancellationToken ct = default);
     Task AddPullRequestCommentAsync(int prNumber, string comment, CancellationToken ct = default);
     Task AddPullRequestReviewAsync(int prNumber, string body, string eventType, CancellationToken ct = default);
     Task UpdatePullRequestAsync(int prNumber, string? title = null, string? body = null, string[]? labels = null, CancellationToken ct = default);

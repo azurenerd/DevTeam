@@ -14,6 +14,7 @@ public record AgentPullRequest
     public DateTime? UpdatedAt { get; init; }
     public List<string> Labels { get; init; } = new();
     public List<string> ReviewComments { get; init; } = new();
+    public List<IssueComment> Comments { get; init; } = new();
 }
 
 public record AgentIssue

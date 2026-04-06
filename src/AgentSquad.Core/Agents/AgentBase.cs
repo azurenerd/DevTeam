@@ -5,8 +5,11 @@ namespace AgentSquad.Core.Agents;
 public abstract class AgentBase : IAgent, IDisposable
 {
     private readonly object _statusLock = new();
+    private readonly object _errorLock = new();
     private AgentStatus _status = AgentStatus.Requested;
+    private string? _statusReason;
     private bool _disposed;
+    private readonly List<AgentLogEntry> _recentErrors = new();
 
     protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger)
     {
@@ -22,7 +25,26 @@ public abstract class AgentBase : IAgent, IDisposable
         get { lock (_statusLock) { return _status; } }
     }
 
+    public string? StatusReason
+    {
+        get { lock (_statusLock) { return _statusReason; } }
+    }
+
+    /// <summary>Gets recent error/warning log entries for this agent.</summary>
+    public IReadOnlyList<AgentLogEntry> RecentErrors
+    {
+        get { lock (_errorLock) { return _recentErrors.ToList(); } }
+    }
+
+    /// <summary>Clears all tracked errors/warnings.</summary>
+    public void ClearErrors()
+    {
+        lock (_errorLock) { _recentErrors.Clear(); }
+        ErrorsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
+    public event EventHandler? ErrorsChanged;
 
     protected ILogger<AgentBase> Logger { get; }
     protected CancellationTokenSource LifetimeCts { get; }
@@ -67,6 +89,7 @@ public abstract class AgentBase : IAgent, IDisposable
         {
             oldStatus = _status;
             _status = newStatus;
+            _statusReason = reason;
         }
 
         Logger.LogInformation("Agent {AgentId} status changed: {OldStatus} -> {NewStatus} ({Reason})",
@@ -79,6 +102,28 @@ public abstract class AgentBase : IAgent, IDisposable
             NewStatus = newStatus,
             Reason = reason
         });
+    }
+
+    /// <summary>Record an error or warning that will be visible in the dashboard.</summary>
+    protected void RecordError(string message, LogLevel level = LogLevel.Error, Exception? exception = null)
+    {
+        var entry = new AgentLogEntry
+        {
+            Timestamp = DateTime.UtcNow,
+            Level = level,
+            Message = message,
+            ExceptionDetails = exception?.ToString()
+        };
+
+        lock (_errorLock)
+        {
+            _recentErrors.Add(entry);
+            // Keep last 50 entries max
+            if (_recentErrors.Count > 50)
+                _recentErrors.RemoveAt(0);
+        }
+
+        ErrorsChanged?.Invoke(this, EventArgs.Empty);
     }
 
     protected virtual Task OnInitializeAsync(CancellationToken ct) => Task.CompletedTask;
@@ -97,4 +142,13 @@ public abstract class AgentBase : IAgent, IDisposable
         }
         GC.SuppressFinalize(this);
     }
+}
+
+/// <summary>A log entry recorded by an agent for dashboard display.</summary>
+public record AgentLogEntry
+{
+    public DateTime Timestamp { get; init; }
+    public LogLevel Level { get; init; }
+    public string Message { get; init; } = "";
+    public string? ExceptionDetails { get; init; }
 }
