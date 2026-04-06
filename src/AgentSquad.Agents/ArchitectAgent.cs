@@ -405,12 +405,41 @@ public class ArchitectAgent : AgentBase
                 Logger.LogInformation("Reviewing PR #{Number} for architectural alignment: {Title}",
                     pr.Number, pr.Title);
 
-                var review = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                var (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
 
-                if (review is not null)
+                if (verdict == "APPROVED")
                 {
+                    await _prWorkflow.ApproveAndMaybeMergeAsync(
+                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct);
+                    Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
+                    LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title}");
+                }
+                else if (verdict == "REWORK")
+                {
+                    await _prWorkflow.RequestChangesAsync(
+                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct);
+                    Logger.LogInformation("Architect requested changes on PR #{Number}", pr.Number);
+                    LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
+
+                    // Notify the PR author via bus so they can start rework
+                    await _messageBus.PublishAsync(new ChangesRequestedMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "ChangesRequested",
+                        PrNumber = pr.Number,
+                        PrTitle = pr.Title,
+                        ReviewerAgent = "Architect",
+                        Feedback = reasoning
+                    }, ct);
+                }
+                else
+                {
+                    // Fallback: post as informational comment if AI didn't produce a clear verdict
                     await _github.AddPullRequestCommentAsync(pr.Number,
-                        $"🏗️ **Architecture Review:**\n\n{review}", ct);
+                        $"🏗️ **Architecture Review (Advisory):**\n\n{reasoning}", ct);
+                    Logger.LogWarning("Architect review for PR #{Number} produced unclear verdict: {Verdict}",
+                        pr.Number, verdict);
                 }
 
                 _reviewedPrNumbers.Add(pr.Number);
@@ -422,7 +451,7 @@ public class ArchitectAgent : AgentBase
         }
     }
 
-    private async Task<string?> EvaluateArchitecturalAlignmentAsync(
+    private async Task<(string Verdict, string Reasoning)> EvaluateArchitecturalAlignmentAsync(
         AgentPullRequest pr, CancellationToken ct)
     {
         try
@@ -441,9 +470,12 @@ public class ArchitectAgent : AgentBase
                 "used in this PR follow the architectural decisions and boundaries for the parts it " +
                 "touches. Do NOT flag missing features that belong to other tasks.\n\n" +
                 "Evaluate whether the PR's scope, approach, and design follow the architectural " +
-                "decisions and component boundaries. Be concise and actionable. " +
-                "Flag any deviations or potential issues within the task's scope. " +
-                "If everything aligns well, say so briefly and note any positive patterns.");
+                "decisions and component boundaries. Be concise and actionable.\n\n" +
+                "You MUST start your response with exactly one of these two verdicts on the first line:\n" +
+                "APPROVED — if the PR aligns with the architecture (minor suggestions are fine)\n" +
+                "REWORK — if there are significant architectural deviations that must be fixed\n\n" +
+                "Then provide your reasoning on subsequent lines. Default to APPROVED unless there " +
+                "are clear, significant architectural violations.");
 
             history.AddUserMessage(
                 $"## Architecture Document\n{architectureDoc}\n\n" +
@@ -452,13 +484,42 @@ public class ArchitectAgent : AgentBase
             var response = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
 
-            return response.Content?.Trim();
+            var text = response.Content?.Trim() ?? "";
+
+            // Parse verdict from first line
+            var firstLine = text.Split('\n', 2)[0].Trim();
+            string verdict;
+            string reasoning;
+
+            if (firstLine.StartsWith("APPROVED", StringComparison.OrdinalIgnoreCase))
+            {
+                verdict = "APPROVED";
+                reasoning = text.Length > firstLine.Length
+                    ? text[(firstLine.Length + 1)..].Trim()
+                    : firstLine;
+            }
+            else if (firstLine.StartsWith("REWORK", StringComparison.OrdinalIgnoreCase))
+            {
+                verdict = "REWORK";
+                reasoning = text.Length > firstLine.Length
+                    ? text[(firstLine.Length + 1)..].Trim()
+                    : firstLine;
+            }
+            else
+            {
+                // AI didn't follow format — try to infer from content
+                verdict = text.Contains("REWORK", StringComparison.OrdinalIgnoreCase) ? "REWORK" : "APPROVED";
+                reasoning = text;
+                Logger.LogWarning("Architect AI didn't start with APPROVED/REWORK, inferred {Verdict}", verdict);
+            }
+
+            return (verdict, reasoning);
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to evaluate PR #{Number} for architecture alignment",
                 pr.Number);
-            return null;
+            return ("UNKNOWN", "Architecture review failed due to an internal error.");
         }
     }
 

@@ -444,9 +444,27 @@ public partial class PullRequestWorkflow
         @"\*\*\[(.+?)\]\s*CHANGES\s*REQUESTED\*\*", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// The two agents required to approve code PRs before merge.
+    /// The default agents required to approve code PRs before merge.
+    /// When the PR author is one of the reviewers, the Architect substitutes in.
     /// </summary>
-    public static readonly string[] RequiredReviewers = ["ProgramManager", "PrincipalEngineer"];
+    public static readonly string[] DefaultReviewers = ["ProgramManager", "PrincipalEngineer"];
+    public static readonly string FallbackReviewer = "Architect";
+
+    /// <summary>
+    /// Get the required reviewers for a PR, substituting the Architect when the
+    /// author is one of the default reviewers (e.g., PE can't review its own PR).
+    /// </summary>
+    public static string[] GetRequiredReviewers(string prAuthorRole)
+    {
+        if (DefaultReviewers.Any(r => string.Equals(r, prAuthorRole, StringComparison.OrdinalIgnoreCase)))
+        {
+            return DefaultReviewers
+                .Where(r => !string.Equals(r, prAuthorRole, StringComparison.OrdinalIgnoreCase))
+                .Append(FallbackReviewer)
+                .ToArray();
+        }
+        return DefaultReviewers;
+    }
 
     /// <summary>
     /// Check whether a specific agent has posted an approval comment on a PR.
@@ -474,11 +492,13 @@ public partial class PullRequestWorkflow
 
     /// <summary>
     /// Get all agents that have currently approved a PR (considering most-recent-comment logic).
+    /// Checks all possible reviewers (default + fallback) for approvals.
     /// </summary>
     public async Task<List<string>> GetApprovedReviewersAsync(int prNumber, CancellationToken ct = default)
     {
+        var allPossibleReviewers = DefaultReviewers.Append(FallbackReviewer).Distinct(StringComparer.OrdinalIgnoreCase);
         var approved = new List<string>();
-        foreach (var reviewer in RequiredReviewers)
+        foreach (var reviewer in allPossibleReviewers)
         {
             if (await HasAgentApprovedAsync(prNumber, reviewer, ct))
                 approved.Add(reviewer);
@@ -488,7 +508,8 @@ public partial class PullRequestWorkflow
 
     /// <summary>
     /// Post an approval comment and merge if this is the last required reviewer.
-    /// Returns true if the PR was merged, false if still waiting for the other reviewer.
+    /// The required reviewer list is dynamic — when the PR author is a default reviewer,
+    /// the Architect substitutes in. Returns true if the PR was merged.
     /// </summary>
     public async Task<bool> ApproveAndMaybeMergeAsync(
         int prNumber, string approverAgent, string reason, CancellationToken ct = default)
@@ -500,18 +521,22 @@ public partial class PullRequestWorkflow
         await _github.AddPullRequestCommentAsync(prNumber, comment, ct);
         _logger.LogInformation("Agent {Agent} approved PR #{Number}", approverAgent, prNumber);
 
+        // Determine required reviewers based on PR author
+        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var authorRole = DetectAuthorRole(pr?.Title ?? "");
+        var requiredReviewers = GetRequiredReviewers(authorRole);
+
         // Check if all required reviewers have now approved
         var approvedReviewers = await GetApprovedReviewersAsync(prNumber, ct);
         _logger.LogInformation("PR #{Number} approvals: [{Approvers}] of [{Required}]",
-            prNumber, string.Join(", ", approvedReviewers), string.Join(", ", RequiredReviewers));
+            prNumber, string.Join(", ", approvedReviewers), string.Join(", ", requiredReviewers));
 
-        if (RequiredReviewers.All(r => approvedReviewers.Contains(r, StringComparer.OrdinalIgnoreCase)))
+        if (requiredReviewers.All(r => approvedReviewers.Contains(r, StringComparer.OrdinalIgnoreCase)))
         {
             // All reviewers approved — merge!
             _logger.LogInformation("All reviewers approved PR #{Number}, merging", prNumber);
 
             // Update labels
-            var pr = await _github.GetPullRequestAsync(prNumber, ct);
             if (pr is not null)
             {
                 var updatedLabels = pr.Labels
@@ -534,8 +559,19 @@ public partial class PullRequestWorkflow
 
         _logger.LogInformation("PR #{Number} still needs approval from: {Missing}",
             prNumber,
-            string.Join(", ", RequiredReviewers.Except(approvedReviewers, StringComparer.OrdinalIgnoreCase)));
+            string.Join(", ", requiredReviewers.Except(approvedReviewers, StringComparer.OrdinalIgnoreCase)));
         return false;
+    }
+
+    /// <summary>
+    /// Detect the author's agent role from the PR title (format: "AgentRole: Task title").
+    /// </summary>
+    private static string DetectAuthorRole(string prTitle)
+    {
+        var colonIdx = prTitle.IndexOf(':');
+        if (colonIdx > 0)
+            return prTitle[..colonIdx].Trim();
+        return "";
     }
 
     /// <summary>
