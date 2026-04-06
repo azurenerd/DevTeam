@@ -282,7 +282,18 @@ public partial class PullRequestWorkflow
         var docSlug = Slugify(System.IO.Path.GetFileNameWithoutExtension(documentPath));
         var branchName = await CreateTaskBranchAsync(agentName, docSlug, ct);
 
-        // 2. Create a tracking marker so the branch has a diff from main (required for PR creation)
+        // 2. Clean up any stale document content from a prior run on this branch
+        try
+        {
+            await _github.DeleteFileAsync(documentPath, "Clean stale document from prior run", branchName, ct);
+            _logger.LogInformation("Removed stale {Path} from branch {Branch}", documentPath, branchName);
+        }
+        catch
+        {
+            // File doesn't exist on the branch — that's expected for fresh branches
+        }
+
+        // 3. Create a tracking marker so the branch has a diff from main (required for PR creation)
         // We do NOT commit a WIP placeholder into the actual document — only the final content goes there.
         _logger.LogInformation("Creating branch marker on {Branch} for {Path}", branchName, documentPath);
         await _github.CreateOrUpdateFileAsync(
@@ -291,7 +302,7 @@ public partial class PullRequestWorkflow
             $"Start work on {documentPath}",
             branchName, ct);
 
-        // 3. Build PR body with optional issue linking
+        // 4. Build PR body with optional issue linking
         var issueRef = closesIssueNumber.HasValue
             ? $"\n\nCloses #{closesIssueNumber.Value}"
             : "";
@@ -303,7 +314,7 @@ public partial class PullRequestWorkflow
             {prDescription}{issueRef}
             """;
 
-        // 4. Create PR with in-progress label
+        // 5. Create PR with in-progress label
         _logger.LogInformation("Creating document PR '{Title}'", fullPrTitle);
         var pr = await _github.CreatePullRequestAsync(
             fullPrTitle, prBody, branchName, _defaultBranch,

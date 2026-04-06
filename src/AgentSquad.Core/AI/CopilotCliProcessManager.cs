@@ -246,7 +246,8 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         var args = new StringBuilder();
 
         // Core flags for non-interactive autonomous operation
-        args.Append("--allow-all ");
+        // NOTE: We intentionally omit --allow-all so the CLI cannot use file-creation
+        // tools. Our agents need TEXT responses, not local file operations.
         args.Append("--no-ask-user ");
         args.Append("--no-auto-update ");
         args.Append("--no-custom-instructions ");

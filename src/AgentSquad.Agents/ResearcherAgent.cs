@@ -134,6 +134,20 @@ public class ResearcherAgent : AgentBase
                         Logger.LogInformation("Research.md PR created and merged for '{Topic}'", directive.Topic);
                         currentDirective = null; // Don't re-enqueue on success
 
+                        // Explicitly close the related issue (don't rely on "Closes #X" in PR body)
+                        if (relatedIssue.HasValue)
+                        {
+                            try
+                            {
+                                await _github.CloseIssueAsync(relatedIssue.Value, ct);
+                                Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.LogWarning(ex, "Failed to close issue #{IssueNumber}", relatedIssue.Value);
+                            }
+                        }
+
                         await _messageBus.PublishAsync(new StatusUpdateMessage
                         {
                             FromAgentId = Identity.Id,

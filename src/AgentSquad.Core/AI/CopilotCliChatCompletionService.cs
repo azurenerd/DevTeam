@@ -107,6 +107,12 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
     {
         var sb = new StringBuilder();
 
+        // Force text-only output — the CLI must not create files
+        sb.AppendLine("[IMPORTANT DIRECTIVE]");
+        sb.AppendLine("You are being used as a text generation service. Output ALL content directly in your response text.");
+        sb.AppendLine("Do NOT create, edit, or write any files. Do NOT use any tools. Return the complete content as plain text.");
+        sb.AppendLine();
+
         // Collect system messages as context prefix
         var systemMessages = chatHistory
             .Where(m => m.Role == AuthorRole.System)

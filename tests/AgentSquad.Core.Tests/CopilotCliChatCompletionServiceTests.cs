@@ -13,7 +13,8 @@ public class CopilotCliChatCompletionServiceTests
 
         var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history);
 
-        Assert.Equal("Write a hello world program.", prompt);
+        Assert.Contains("[IMPORTANT DIRECTIVE]", prompt);
+        Assert.Contains("Write a hello world program.", prompt);
     }
 
     [Fact]
@@ -51,11 +52,11 @@ public class CopilotCliChatCompletionServiceTests
     }
 
     [Fact]
-    public void FormatChatHistory_EmptyHistory_ReturnsEmpty()
+    public void FormatChatHistory_EmptyHistory_ReturnsDirectiveOnly()
     {
         var history = new ChatHistory();
         var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history);
-        Assert.Equal(string.Empty, prompt.Trim());
+        Assert.Contains("[IMPORTANT DIRECTIVE]", prompt);
     }
 
     [Fact]

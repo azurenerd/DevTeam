@@ -323,6 +323,20 @@ public class ArchitectAgent : AgentBase
 
         Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);
 
+        // Explicitly close the related issue
+        if (relatedIssue.HasValue)
+        {
+            try
+            {
+                await _github.CloseIssueAsync(relatedIssue.Value, ct);
+                Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to close issue #{IssueNumber}", relatedIssue.Value);
+            }
+        }
+
         // 4. Create Issue for Principal Engineer
         await _issueWorkflow.AskAgentAsync(
             Identity.DisplayName,
