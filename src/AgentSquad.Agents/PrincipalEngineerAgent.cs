@@ -5,6 +5,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -20,6 +21,7 @@ public class PrincipalEngineerAgent : AgentBase
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
+    private readonly AgentRegistry _registry;
     private readonly AgentSquadConfig _config;
 
     private bool _planningComplete;
@@ -36,6 +38,7 @@ public class PrincipalEngineerAgent : AgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentRegistry registry,
         IOptions<AgentSquadConfig> config,
         ILogger<PrincipalEngineerAgent> logger)
         : base(identity, logger)
@@ -46,6 +49,7 @@ public class PrincipalEngineerAgent : AgentBase
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
+        _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
 
@@ -300,11 +304,14 @@ public class PrincipalEngineerAgent : AgentBase
     {
         try
         {
-            // Read TeamMembers.md to find available engineers
-            var teamDoc = await _projectFiles.GetTeamMembersAsync(ct);
-            var availableEngineers = ParseAvailableEngineers(teamDoc);
+            // Discover engineers from the in-process AgentRegistry
+            var registeredEngineers = new List<EngineerInfo>();
+            foreach (var agent in _registry.GetAgentsByRole(AgentRole.SeniorEngineer))
+                registeredEngineers.Add(new EngineerInfo { Name = agent.Identity.DisplayName, Role = AgentRole.SeniorEngineer });
+            foreach (var agent in _registry.GetAgentsByRole(AgentRole.JuniorEngineer))
+                registeredEngineers.Add(new EngineerInfo { Name = agent.Identity.DisplayName, Role = AgentRole.JuniorEngineer });
 
-            foreach (var engineer in availableEngineers)
+            foreach (var engineer in registeredEngineers)
             {
                 // Skip if this engineer already has an active PR assignment
                 if (_agentAssignments.ContainsKey(engineer.Name))
@@ -583,10 +590,10 @@ public class PrincipalEngineerAgent : AgentBase
             if (unassignedCount < _config.Limits.MinParallelizableTasksForNewEngineer)
                 return;
 
-            var teamDoc = await _projectFiles.GetTeamMembersAsync(ct);
-            var availableEngineers = ParseAvailableEngineers(teamDoc);
+            var engineerCount = _registry.GetAgentsByRole(AgentRole.SeniorEngineer).Count
+                             + _registry.GetAgentsByRole(AgentRole.JuniorEngineer).Count;
             var busyEngineers = _agentAssignments.Count;
-            var freeEngineers = availableEngineers.Count - busyEngineers;
+            var freeEngineers = engineerCount - busyEngineers;
 
             // Only request if there are meaningfully more tasks than free engineers
             if (unassignedCount <= freeEngineers + 1)
@@ -615,7 +622,7 @@ public class PrincipalEngineerAgent : AgentBase
                                 $"({pendingMedium} Medium, {pendingLow} Low) ready for assignment " +
                                 $"but only {freeEngineers} available engineers. " +
                                 $"Requesting a {neededRole} to increase throughput.",
-                CurrentTeamSize = availableEngineers.Count
+                CurrentTeamSize = engineerCount
             }, ct);
         }
         catch (Exception ex)
