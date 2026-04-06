@@ -769,14 +769,21 @@ public class ProgramManagerAgent : AgentBase
                     var merged = await _prWorkflow.ApproveAndMaybeMergeAsync(
                         pr.Number, "ProgramManager", reviewBody, ct);
                     if (merged)
+                    {
                         Logger.LogInformation("PM approved and merged PR #{Number}", pr.Number);
+                        LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
+                    }
                     else
+                    {
                         Logger.LogInformation("PM approved PR #{Number}, waiting for PE approval", pr.Number);
+                        LogActivity("task", $"✅ Approved PR #{pr.Number}, waiting for PE approval");
+                    }
                 }
                 else
                 {
                     await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
+                    LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
 
                     // Notify the author engineer to rework
                     await _messageBus.PublishAsync(new ChangesRequestedMessage
@@ -1073,6 +1080,7 @@ public class ProgramManagerAgent : AgentBase
                 $"Add PM Specification for {projectName}",
                 ct);
             Logger.LogInformation("PMSpec.md PR created and merged for project {ProjectName}", projectName);
+            LogActivity("task", $"📝 PMSpec.md created and merged for {projectName}");
 
             // Notify all agents that PMSpec is ready — Architect will pick this up
             await _messageBus.PublishAsync(new StatusUpdateMessage
@@ -1206,6 +1214,7 @@ public class ProgramManagerAgent : AgentBase
 
             _userStoryIssuesCreated = true;
             Logger.LogInformation("Created {Count} User Story Issues from PMSpec", issueCount);
+            LogActivity("task", $"📌 Created {issueCount} User Story Issues from PMSpec");
 
             // Notify PE that planning issues are ready
             await _messageBus.PublishAsync(new PlanningCompleteMessage

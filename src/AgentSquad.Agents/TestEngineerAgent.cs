@@ -148,6 +148,7 @@ public class TestEngineerAgent : AgentBase
             Logger.LogInformation(
                 "Found merged PR #{Number} with {Count} testable code files: {Title}",
                 pr.Number, codeFiles.Count, pr.Title);
+            LogActivity("task", $"🧪 Generating tests for PR #{pr.Number}: {pr.Title} ({codeFiles.Count} code files)");
 
             try
             {
@@ -218,6 +219,7 @@ public class TestEngineerAgent : AgentBase
         Logger.LogInformation(
             "Created test PR #{TestPR} with {Count} test files for merged PR #{SourcePR}",
             testPrNumber, testFiles.Count, pr.Number);
+        LogActivity("task", $"✅ Created test PR #{testPrNumber} with {testFiles.Count} test files for PR #{pr.Number}");
 
         // Notify via message bus
         await _messageBus.PublishAsync(new StatusUpdateMessage

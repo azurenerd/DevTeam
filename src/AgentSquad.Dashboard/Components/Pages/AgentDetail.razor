@@ -1,6 +1,7 @@
 @page "/agent/{AgentId}"
 @rendermode InteractiveServer
 @using AgentSquad.Core.Agents
+@using AgentSquad.Core.Persistence
 @using AgentSquad.Dashboard.Services
 @using AgentSquad.Orchestrator
 @implements IDisposable
@@ -113,21 +114,32 @@ else
 
             <!-- Token Usage / Cost Card -->
             <div class="detail-card">
-                <div class="detail-card-title">Token Usage & Cost</div>
+                <div class="detail-card-title">Estimated Usage & Cost (MSRP)</div>
                 <div class="detail-card-body">
                     <div class="detail-metric-row">
                         <span class="detail-field-label">Prompt Tokens</span>
-                        <span class="detail-metric-value">—</span>
+                        <span class="detail-metric-value">@FormatTokenCount(_agent.EstPromptTokens)</span>
                     </div>
                     <div class="detail-metric-row">
                         <span class="detail-field-label">Completion Tokens</span>
-                        <span class="detail-metric-value">—</span>
+                        <span class="detail-metric-value">@FormatTokenCount(_agent.EstCompletionTokens)</span>
                     </div>
                     <div class="detail-metric-row">
-                        <span class="detail-field-label">Estimated Cost</span>
-                        <span class="detail-metric-value">—</span>
+                        <span class="detail-field-label">AI Calls</span>
+                        <span class="detail-metric-value">@_agent.AiCalls</span>
                     </div>
-                    <div class="detail-placeholder-note">Token tracking coming soon</div>
+                    <div class="detail-metric-row">
+                        <span class="detail-field-label">Est. Cost</span>
+                        <span class="detail-metric-value cost-value">@FormatCost(_agent.EstimatedCost)</span>
+                    </div>
+                    @if (_agent.ActiveModel is { Length: > 0 })
+                    {
+                        <div class="detail-metric-row">
+                            <span class="detail-field-label">Model</span>
+                            <span class="detail-metric-value mono">@_agent.ActiveModel</span>
+                        </div>
+                    }
+                    <div class="detail-placeholder-note">Estimates based on ~4 chars/token × MSRP pricing</div>
                 </div>
             </div>
 
@@ -153,20 +165,51 @@ else
 
         <!-- Activity Log -->
         <div class="detail-card detail-log-card">
-            <div class="detail-card-title">Activity Log</div>
+            <div class="detail-card-header-row">
+                <div class="detail-card-title">Activity Log</div>
+                <div class="detail-log-filters">
+                    <button class="log-filter-btn @(_activeFilter is null ? "active" : "")" @onclick="() => SetFilter(null)">
+                        All
+                    </button>
+                    <button class="log-filter-btn filter-task @(_activeFilter == "task" ? "active" : "")" @onclick='() => SetFilter("task")'>
+                        Task
+                    </button>
+                    <button class="log-filter-btn filter-status @(_activeFilter == "status" ? "active" : "")" @onclick='() => SetFilter("status")'>
+                        Status
+                    </button>
+                    <button class="log-filter-btn filter-system @(_activeFilter == "system" ? "active" : "")" @onclick='() => SetFilter("system")'>
+                        System
+                    </button>
+                    <button class="log-filter-btn filter-message @(_activeFilter == "message" ? "active" : "")" @onclick='() => SetFilter("message")'>
+                        Message
+                    </button>
+                    <button class="log-filter-btn filter-github @(_activeFilter == "github" ? "active" : "")" @onclick='() => SetFilter("github")'>
+                        GitHub
+                    </button>
+                </div>
+            </div>
             <div class="detail-card-body">
                 <div class="detail-log-list">
-                    @foreach (var entry in _activityLog)
+                    @foreach (var entry in GetFilteredLog())
                     {
                         <div class="detail-log-entry">
                             <span class="log-timestamp">@entry.Timestamp.ToString("HH:mm:ss")</span>
-                            <span class="log-badge @entry.BadgeClass">@entry.EventType</span>
+                            <span class="log-badge log-badge-@entry.EventType">@entry.EventType</span>
                             <span class="log-message">@entry.Details</span>
                         </div>
                     }
-                    @if (_activityLog.Count == 0)
+                    @if (GetFilteredLog().Count == 0)
                     {
-                        <div class="detail-idle-message">No activity recorded yet</div>
+                        <div class="detail-idle-message">
+                            @if (_activeFilter is not null)
+                            {
+                                <span>No @_activeFilter events recorded</span>
+                            }
+                            else
+                            {
+                                <span>No activity recorded yet</span>
+                            }
+                        </div>
                     }
                 </div>
             </div>
@@ -179,7 +222,8 @@ else
 
     private AgentSnapshot? _agent;
     private bool _actionInProgress;
-    private List<MockActivityEntry> _activityLog = [];
+    private List<ActivityLogEntry> _activityLog = [];
+    private string? _activeFilter;
     private System.Threading.Timer? _refreshTimer;
 
     protected override void OnInitialized()
@@ -202,13 +246,42 @@ else
     private void RefreshData()
     {
         _agent = DataService.GetAgentSnapshot(AgentId);
-        _activityLog = GenerateMockActivityLog();
+        _ = LoadActivityLogAsync();
+    }
+
+    private async Task LoadActivityLogAsync()
+    {
+        try
+        {
+            var entries = await DataService.GetActivityLogAsync(AgentId, 200);
+            _activityLog = entries.ToList();
+            await InvokeAsync(StateHasChanged);
+        }
+        catch
+        {
+            // Silently handle — the log will just be empty
+        }
+    }
+
+    private List<ActivityLogEntry> GetFilteredLog()
+    {
+        if (_activeFilter is null)
+            return _activityLog;
+
+        return _activityLog
+            .Where(e => e.EventType.Equals(_activeFilter, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+    }
+
+    private void SetFilter(string? filter)
+    {
+        _activeFilter = filter;
     }
 
     private async void OnDataChanged()
     {
-        RefreshData();
-        await InvokeAsync(StateHasChanged);
+        _agent = DataService.GetAgentSnapshot(AgentId);
+        await LoadActivityLogAsync();
     }
 
     private void GoBack() => Navigation.NavigateTo("/");
@@ -252,30 +325,6 @@ else
         }
     }
 
-    private List<MockActivityEntry> GenerateMockActivityLog()
-    {
-        if (_agent is null) return [];
-
-        var now = DateTime.UtcNow;
-        var entries = new List<MockActivityEntry>
-        {
-            new(now.AddMinutes(-2), "status", "log-badge-status", $"Status changed to {_agent.Status}"),
-            new(now.AddMinutes(-5), "message", "log-badge-message", "Received task assignment from orchestrator"),
-            new(now.AddMinutes(-8), "status", "log-badge-status", "Status changed to Online"),
-            new(now.AddMinutes(-12), "system", "log-badge-system", "Agent initialized successfully"),
-            new(now.AddMinutes(-15), "message", "log-badge-message", "Sent capabilities report to Program Manager"),
-            new(now.AddMinutes(-20), "status", "log-badge-status", "Status changed to Initializing"),
-            new(now.AddMinutes(-22), "system", "log-badge-system", "Agent registered with orchestrator"),
-        };
-
-        if (_agent.AssignedPullRequest is not null)
-        {
-            entries.Insert(1, new(now.AddMinutes(-3), "task", "log-badge-task", $"Assigned to PR: {_agent.AssignedPullRequest}"));
-        }
-
-        return entries;
-    }
-
     private static string GetRoleInitials(AgentRole role) => role switch
     {
         AgentRole.ProgramManager => "PM",
@@ -306,11 +355,25 @@ else
             ? $"{ts.Minutes}m {ts.Seconds}s"
             : $"{ts.Seconds}s";
 
+    private static string FormatTokenCount(int tokens) => tokens switch
+    {
+        0 => "—",
+        < 1000 => tokens.ToString("N0"),
+        < 1_000_000 => $"{tokens / 1000.0:N1}K",
+        _ => $"{tokens / 1_000_000.0:N2}M"
+    };
+
+    private static string FormatCost(decimal cost) => cost switch
+    {
+        0m => "—",
+        < 0.01m => $"< $0.01",
+        < 1m => cost.ToString("$0.00"),
+        _ => cost.ToString("$#,##0.00")
+    };
+
     public void Dispose()
     {
         DataService.OnChange -= OnDataChanged;
         _refreshTimer?.Dispose();
     }
-
-    private record MockActivityEntry(DateTime Timestamp, string EventType, string BadgeClass, string Details);
 }

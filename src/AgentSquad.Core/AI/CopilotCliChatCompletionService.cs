@@ -17,15 +17,18 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
 {
     private readonly CopilotCliProcessManager _processManager;
     private readonly CopilotCliConfig _config;
+    private readonly AgentUsageTracker _usageTracker;
     private readonly ILogger<CopilotCliChatCompletionService> _logger;
 
     public CopilotCliChatCompletionService(
         CopilotCliProcessManager processManager,
         CopilotCliConfig config,
+        AgentUsageTracker usageTracker,
         ILogger<CopilotCliChatCompletionService> logger)
     {
         _processManager = processManager ?? throw new ArgumentNullException(nameof(processManager));
         _config = config ?? throw new ArgumentNullException(nameof(config));
+        _usageTracker = usageTracker ?? throw new ArgumentNullException(nameof(usageTracker));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -79,6 +82,11 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         }
 
         _logger.LogDebug("Received copilot response ({Length} chars)", parsedResponse.Length);
+
+        // Record estimated usage for cost tracking
+        var agentId = AgentCallContext.CurrentAgentId ?? "unknown";
+        var effectiveModel = modelOverride ?? _config.ModelName;
+        _usageTracker.RecordCall(agentId, effectiveModel, prompt.Length, parsedResponse.Length);
 
         var message = new ChatMessageContent(AuthorRole.Assistant, parsedResponse);
         return [message];

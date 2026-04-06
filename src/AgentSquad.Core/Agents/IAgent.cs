@@ -13,6 +13,7 @@ public interface IAgent
 
     event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
     event EventHandler? ErrorsChanged;
+    event EventHandler<AgentActivityEventArgs>? ActivityLogged;
 
     IReadOnlyList<AgentLogEntry> RecentErrors { get; }
     void ClearErrors();
@@ -24,4 +25,11 @@ public class AgentStatusChangedEventArgs : EventArgs
     public required AgentStatus OldStatus { get; init; }
     public required AgentStatus NewStatus { get; init; }
     public string? Reason { get; init; }
+}
+
+public class AgentActivityEventArgs : EventArgs
+{
+    public required string AgentId { get; init; }
+    public required string EventType { get; init; }
+    public required string Details { get; init; }
 }

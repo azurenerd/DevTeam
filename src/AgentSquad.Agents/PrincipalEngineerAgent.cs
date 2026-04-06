@@ -228,6 +228,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
         UpdateStatus(AgentStatus.Working, "Creating engineering plan from Issues");
         Logger.LogInformation("Starting engineering plan creation from Enhancement issues");
+        LogActivity("task", "📋 Starting engineering plan creation from Enhancement issues");
 
         var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
         var pmSpec = await ProjectFiles.GetPMSpecAsync(ct);
@@ -330,6 +331,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
         Logger.LogInformation("Engineering plan created with {Count} tasks from {IssueCount} issues",
             _taskBacklog.Count, enhancementIssues.Count);
+        LogActivity("task", $"📋 Engineering plan created: {_taskBacklog.Count} tasks from {enhancementIssues.Count} issues");
 
         var planDoc = BuildEngineeringPlanMarkdown();
         await ProjectFiles.UpdateEngineeringPlanAsync(planDoc, ct);
@@ -455,6 +457,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             UpdateStatus(AgentStatus.Working, $"Working on: {task.Name}");
             Logger.LogInformation("Principal Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
+            LogActivity("task", $"🔨 Working on task {task.Id}: {task.Name}");
 
             // Assign Issue to self
             if (task.IssueNumber.HasValue)
@@ -707,14 +710,21 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     var merged = await PrWorkflow.ApproveAndMaybeMergeAsync(
                         pr.Number, "PrincipalEngineer", reviewBody, ct);
                     if (merged)
+                    {
                         Logger.LogInformation("PE approved and merged PR #{Number}", pr.Number);
+                        LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
+                    }
                     else
+                    {
                         Logger.LogInformation("PE approved PR #{Number}, waiting for PM approval", pr.Number);
+                        LogActivity("task", $"✅ Approved PR #{pr.Number}, waiting for PM approval");
+                    }
                 }
                 else
                 {
                     await PrWorkflow.RequestChangesAsync(pr.Number, "PrincipalEngineer", reviewBody, ct);
                     Logger.LogInformation("PE requested changes on PR #{Number}", pr.Number);
+                    LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
 
                     await MessageBus.PublishAsync(new ChangesRequestedMessage
                     {

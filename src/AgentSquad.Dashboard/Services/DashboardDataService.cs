@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Persistence;
 using AgentSquad.Dashboard.Hubs;
 using AgentSquad.Orchestrator;
 using Microsoft.AspNetCore.SignalR;
@@ -19,6 +20,13 @@ public sealed record AgentSnapshot
     public string ActiveModel { get; init; } = "";
     public DateTime LastStatusChange { get; set; } = DateTime.UtcNow;
     public int ErrorCount { get; init; }
+
+    // Estimated usage & cost (MSRP)
+    public int EstPromptTokens { get; init; }
+    public int EstCompletionTokens { get; init; }
+    public int EstTotalTokens => EstPromptTokens + EstCompletionTokens;
+    public int AiCalls { get; init; }
+    public decimal EstimatedCost { get; init; }
 }
 
 public sealed class DashboardDataService : BackgroundService
@@ -27,6 +35,7 @@ public sealed class DashboardDataService : BackgroundService
     private readonly HealthMonitor _healthMonitor;
     private readonly DeadlockDetector _deadlockDetector;
     private readonly ModelRegistry _modelRegistry;
+    private readonly AgentStateStore _stateStore;
     private readonly IHubContext<AgentHub> _hubContext;
     private readonly ILogger<DashboardDataService> _logger;
 
@@ -42,6 +51,7 @@ public sealed class DashboardDataService : BackgroundService
         HealthMonitor healthMonitor,
         DeadlockDetector deadlockDetector,
         ModelRegistry modelRegistry,
+        AgentStateStore stateStore,
         IHubContext<AgentHub> hubContext,
         ILogger<DashboardDataService> logger)
     {
@@ -49,6 +59,7 @@ public sealed class DashboardDataService : BackgroundService
         _healthMonitor = healthMonitor;
         _deadlockDetector = deadlockDetector;
         _modelRegistry = modelRegistry;
+        _stateStore = stateStore;
         _hubContext = hubContext;
         _logger = logger;
     }
@@ -139,6 +150,21 @@ public sealed class DashboardDataService : BackgroundService
         NotifyStateChanged();
     }
 
+    /// <summary>Gets the activity log for a specific agent from the persistent store.</summary>
+    public async Task<IReadOnlyList<ActivityLogEntry>> GetActivityLogAsync(
+        string agentId, int count = 100, CancellationToken ct = default)
+    {
+        try
+        {
+            return await _stateStore.GetRecentActivityAsync(agentId, count, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to retrieve activity log for agent {AgentId}", agentId);
+            return [];
+        }
+    }
+
     /// <summary>Get the list of available model names for the dropdown.</summary>
     public IReadOnlyList<string> GetAvailableModels() => ModelRegistry.AvailableCopilotModels;
 
@@ -180,6 +206,9 @@ public sealed class DashboardDataService : BackgroundService
             _trackedAgents[e.Agent.Identity.Id] = e.Agent;
             SubscribeToErrors(e.Agent);
         }
+
+        _ = _stateStore.LogActivityAsync(e.Agent.Identity.Id, "system",
+            $"Agent registered: {e.Agent.Identity.DisplayName} ({e.Agent.Identity.Role})");
 
         _ = _hubContext.Clients.All.SendAsync("AgentRegistered", snapshot);
         NotifyStateChanged();
@@ -234,6 +263,7 @@ public sealed class DashboardDataService : BackgroundService
         try
         {
             _lastHealthSnapshot = _healthMonitor.GetSnapshot();
+            RefreshUsageStats();
             await _hubContext.Clients.All.SendAsync("HealthUpdate", _lastHealthSnapshot, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -245,6 +275,27 @@ public sealed class DashboardDataService : BackgroundService
     private void SubscribeToErrors(IAgent agent)
     {
         agent.ErrorsChanged += OnAgentErrorsChanged;
+        agent.ActivityLogged += OnAgentActivityLogged;
+    }
+
+    private void OnAgentActivityLogged(object? sender, AgentActivityEventArgs e)
+    {
+        try
+        {
+            _ = _stateStore.LogActivityAsync(e.AgentId, e.EventType, e.Details);
+
+            _ = _hubContext.Clients.All.SendAsync("AgentActivityLogged", new
+            {
+                e.AgentId,
+                e.EventType,
+                e.Details,
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist activity log for agent {AgentId}", e.AgentId);
+        }
     }
 
     private void OnAgentErrorsChanged(object? sender, EventArgs e)
@@ -272,20 +323,47 @@ public sealed class DashboardDataService : BackgroundService
         NotifyStateChanged();
     }
 
-    private AgentSnapshot ToSnapshot(IAgent agent) => new()
+    private AgentSnapshot ToSnapshot(IAgent agent)
     {
-        Id = agent.Identity.Id,
-        DisplayName = agent.Identity.DisplayName,
-        Role = agent.Identity.Role,
-        ModelTier = agent.Identity.ModelTier,
-        Status = agent.Status,
-        StatusReason = agent.StatusReason,
-        CreatedAt = agent.Identity.CreatedAt,
-        AssignedPullRequest = agent.Identity.AssignedPullRequest,
-        ActiveModel = _modelRegistry.GetEffectiveModel(agent.Identity.Id),
-        LastStatusChange = DateTime.UtcNow,
-        ErrorCount = agent.RecentErrors.Count
-    };
+        var usage = _modelRegistry.UsageTracker.GetStats(agent.Identity.Id);
+        return new()
+        {
+            Id = agent.Identity.Id,
+            DisplayName = agent.Identity.DisplayName,
+            Role = agent.Identity.Role,
+            ModelTier = agent.Identity.ModelTier,
+            Status = agent.Status,
+            StatusReason = agent.StatusReason,
+            CreatedAt = agent.Identity.CreatedAt,
+            AssignedPullRequest = agent.Identity.AssignedPullRequest,
+            ActiveModel = _modelRegistry.GetEffectiveModel(agent.Identity.Id),
+            LastStatusChange = DateTime.UtcNow,
+            ErrorCount = agent.RecentErrors.Count,
+            EstPromptTokens = usage.PromptTokens,
+            EstCompletionTokens = usage.CompletionTokens,
+            AiCalls = usage.TotalCalls,
+            EstimatedCost = usage.EstimatedCost
+        };
+    }
+
+    /// <summary>Refreshes usage stats for all cached agents from the usage tracker.</summary>
+    private void RefreshUsageStats()
+    {
+        lock (_cacheLock)
+        {
+            foreach (var (agentId, snapshot) in _agentCache.ToList())
+            {
+                var usage = _modelRegistry.UsageTracker.GetStats(agentId);
+                _agentCache[agentId] = snapshot with
+                {
+                    EstPromptTokens = usage.PromptTokens,
+                    EstCompletionTokens = usage.CompletionTokens,
+                    AiCalls = usage.TotalCalls,
+                    EstimatedCost = usage.EstimatedCost
+                };
+            }
+        }
+    }
 
     // Observable event for Blazor components to subscribe to for re-rendering
     public event Action? OnChange;

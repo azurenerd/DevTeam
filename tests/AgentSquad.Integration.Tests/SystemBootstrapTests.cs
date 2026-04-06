@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
@@ -63,6 +64,7 @@ public class SystemBootstrapTests : IDisposable
 
         // Core services
         services.AddInProcessMessageBus();
+        services.AddSingleton<AgentUsageTracker>();
         services.AddSemanticKernelModels();
 
         // Persistence

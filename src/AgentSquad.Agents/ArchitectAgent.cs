@@ -212,6 +212,7 @@ public class ArchitectAgent : AgentBase
         UpdateStatus(AgentStatus.Working, "Designing (1/5): Key architectural decisions");
         Logger.LogInformation("Starting architecture design for task {TaskId}: {Title}",
             directive.TaskId, directive.Title);
+        LogActivity("task", $"🏗️ Starting architecture design: {directive.Title}");
 
         // 1. Read PM specs and Research.md
         var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
@@ -339,6 +340,7 @@ public class ArchitectAgent : AgentBase
             ct);
 
         Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);
+        LogActivity("task", $"✅ Architecture.md merged: {directive.Title}");
 
         // Explicitly close the related issue
         if (relatedIssue.HasValue)

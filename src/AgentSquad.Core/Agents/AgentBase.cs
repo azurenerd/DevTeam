@@ -1,3 +1,4 @@
+using AgentSquad.Core.AI;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Core.Agents;
@@ -45,21 +46,27 @@ public abstract class AgentBase : IAgent, IDisposable
 
     public event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
     public event EventHandler? ErrorsChanged;
+    public event EventHandler<AgentActivityEventArgs>? ActivityLogged;
 
     protected ILogger<AgentBase> Logger { get; }
     protected CancellationTokenSource LifetimeCts { get; }
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
+        AgentCallContext.CurrentAgentId = Identity.Id;
         UpdateStatus(AgentStatus.Initializing, "Agent initialization started");
+        LogActivity("system", "Agent initialization started");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LifetimeCts.Token);
         await OnInitializeAsync(linked.Token);
         UpdateStatus(AgentStatus.Online, "Agent initialized successfully");
+        LogActivity("system", "Agent initialized successfully");
     }
 
     public async Task StartAsync(CancellationToken ct = default)
     {
+        AgentCallContext.CurrentAgentId = Identity.Id;
         UpdateStatus(AgentStatus.Working, "Agent starting main loop");
+        LogActivity("system", "Agent starting main loop");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LifetimeCts.Token);
         await OnStartAsync(linked.Token);
         await RunAgentLoopAsync(linked.Token);
@@ -68,9 +75,11 @@ public abstract class AgentBase : IAgent, IDisposable
     public async Task StopAsync(CancellationToken ct = default)
     {
         Logger.LogInformation("Agent {AgentId} stopping", Identity.Id);
+        LogActivity("system", "Agent stopping");
         await LifetimeCts.CancelAsync();
         await OnStopAsync(ct);
         UpdateStatus(AgentStatus.Offline, "Agent stopped gracefully");
+        LogActivity("system", "Agent stopped gracefully");
     }
 
     public async Task HandleMessageAsync(AgentMessage message, CancellationToken ct = default)
@@ -94,6 +103,11 @@ public abstract class AgentBase : IAgent, IDisposable
 
         Logger.LogInformation("Agent {AgentId} status changed: {OldStatus} -> {NewStatus} ({Reason})",
             Identity.Id, oldStatus, newStatus, reason ?? "no reason");
+
+        if (oldStatus != newStatus)
+        {
+            LogActivity("status", $"{oldStatus} → {newStatus}" + (reason is not null ? $": {reason}" : ""));
+        }
 
         StatusChanged?.Invoke(this, new AgentStatusChangedEventArgs
         {
@@ -124,6 +138,20 @@ public abstract class AgentBase : IAgent, IDisposable
         }
 
         ErrorsChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    /// <summary>
+    /// Log an activity event that will appear in the agent's activity history on the dashboard.
+    /// Event types: "task", "status", "system", "message", "github".
+    /// </summary>
+    protected void LogActivity(string eventType, string details)
+    {
+        ActivityLogged?.Invoke(this, new AgentActivityEventArgs
+        {
+            AgentId = Identity.Id,
+            EventType = eventType,
+            Details = details
+        });
     }
 
     protected virtual Task OnInitializeAsync(CancellationToken ct) => Task.CompletedTask;

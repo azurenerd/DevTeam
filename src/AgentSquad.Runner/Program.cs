@@ -19,6 +19,7 @@ builder.Services.Configure<LimitsConfig>(
 
 // Core services
 builder.Services.AddInProcessMessageBus();
+builder.Services.AddSingleton<AgentSquad.Core.AI.AgentUsageTracker>();
 builder.Services.AddSemanticKernelModels();
 builder.Services.AddGitHubIntegration();
 

@@ -52,12 +52,14 @@ public class CopilotCliProviderTests : IDisposable
 
         services.AddSingleton(Options.Create(config));
         services.AddSingleton<CopilotCliProcessManager>();
+        services.AddSingleton<AgentUsageTracker>();
         services.AddSingleton(sp =>
         {
             var cfg = sp.GetRequiredService<IOptions<AgentSquadConfig>>().Value;
             var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+            var usageTracker = sp.GetRequiredService<AgentUsageTracker>();
             var processManager = sp.GetRequiredService<CopilotCliProcessManager>();
-            return new ModelRegistry(cfg, loggerFactory, processManager);
+            return new ModelRegistry(cfg, loggerFactory, usageTracker, processManager);
         });
 
         _serviceProvider = services.BuildServiceProvider();

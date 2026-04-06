@@ -23,8 +23,9 @@ public static class SemanticKernelExtensions
         {
             var config = sp.GetRequiredService<IOptions<AgentSquadConfig>>().Value;
             var loggerFactory = sp.GetRequiredService<ILoggerFactory>();
+            var usageTracker = sp.GetRequiredService<AgentUsageTracker>();
             var processManager = sp.GetRequiredService<CopilotCliProcessManager>();
-            return new ModelRegistry(config, loggerFactory, processManager);
+            return new ModelRegistry(config, loggerFactory, usageTracker, processManager);
         });
 
         return services;

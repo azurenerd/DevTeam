@@ -223,6 +223,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             CurrentIssueNumber = assignment.IssueNumber;
             UpdateStatus(AgentStatus.Working, $"Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
+            LogActivity("task", $"📋 Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
 
             var issue = await GitHub.GetIssueAsync(assignment.IssueNumber, ct);
             if (issue is null)
@@ -293,6 +294,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             Logger.LogInformation("{Role} {Name} created PR #{PrNumber} for issue #{IssueNumber}",
                 Identity.Role, Identity.DisplayName, pr.Number, issue.Number);
+            LogActivity("github", $"Created PR #{pr.Number} for issue #{issue.Number}: {issue.Title}");
 
             await ImplementAndCommitAsync(pr, issue, ct);
 
@@ -335,6 +337,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         Logger.LogInformation("{Role} {Name} generated {Count} implementation steps for PR #{Number}",
             Identity.Role, Identity.DisplayName, steps.Count, pr.Number);
+        LogActivity("task", $"Generated {steps.Count} implementation steps for PR #{pr.Number}");
 
         // Step 2: Iterate through each step, generating code and committing
         var completedSteps = new List<string>();
@@ -401,6 +404,7 @@ public abstract class EngineerAgentBase : AgentBase
                 await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, commitMsg, ct);
                 Logger.LogInformation("{Role} {Name} committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
                     Identity.Role, Identity.DisplayName, codeFiles.Count, stepNumber, steps.Count, pr.Number);
+                LogActivity("task", $"✅ Step {stepNumber}/{steps.Count} committed ({codeFiles.Count} files): {Truncate(step, 80)}");
             }
             else
             {
@@ -520,6 +524,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
+        LogActivity("task", $"🎉 Completed PR #{pr.Number}: {pr.Title} — marked ready for review");
 
         UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting review/next task");
     }
@@ -633,6 +638,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
+        LogActivity("task", $"🎉 Completed PR #{pr.Number}: {pr.Title} — marked ready for review");
 
         UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting review/next task");
         // Keep CurrentPrNumber and AssignedPullRequest set so rework feedback can match.
@@ -683,6 +689,7 @@ public abstract class EngineerAgentBase : AgentBase
         }
 
         UpdateStatus(AgentStatus.Working, $"Addressing feedback on PR #{rework.PrNumber} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
+        LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {rework.Reviewer} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
         Logger.LogInformation("{Role} {Name} reworking PR #{PrNumber} based on feedback from {Reviewer} (attempt {Attempt}/{Max})",
             Identity.Role, Identity.DisplayName, rework.PrNumber, rework.Reviewer, attempts, Config.Limits.MaxReworkCycles);
 
@@ -858,6 +865,7 @@ public abstract class EngineerAgentBase : AgentBase
     {
         Logger.LogInformation("{Role} {Name} received issue assignment: #{IssueNumber} {Title}",
             Identity.Role, Identity.DisplayName, message.IssueNumber, message.IssueTitle);
+        LogActivity("message", $"Received issue assignment: #{message.IssueNumber} {message.IssueTitle}");
         AssignmentQueue.Enqueue(message);
         return Task.CompletedTask;
     }
@@ -1089,6 +1097,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
                 Identity.Role, Identity.DisplayName, pr.Number);
+            LogActivity("task", $"🎉 Completed PR #{pr.Number}: {pr.Title} — marked ready for review");
 
             UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting next task");
             Identity.AssignedPullRequest = null;

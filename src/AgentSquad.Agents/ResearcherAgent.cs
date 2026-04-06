@@ -113,6 +113,7 @@ public class ResearcherAgent : AgentBase
                         // Now do the AI research work
                         UpdateStatus(AgentStatus.Working, $"Researching: {directive.Topic}");
                         Logger.LogInformation("Starting research on: {Topic}", directive.Topic);
+                        LogActivity("task", $"🔬 Starting research on: {directive.Topic}");
 
                         var research = await ConductResearchAsync(directive, ct);
 
@@ -132,6 +133,7 @@ public class ResearcherAgent : AgentBase
                             ct);
 
                         Logger.LogInformation("Research.md PR created and merged for '{Topic}'", directive.Topic);
+                        LogActivity("task", $"✅ Research.md merged: {directive.Topic}");
                         currentDirective = null; // Don't re-enqueue on success
 
                         // Explicitly close the related issue (don't rely on "Closes #X" in PR body)
