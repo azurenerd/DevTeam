@@ -27,6 +27,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private bool _planningSignalReceived;
     private bool _architectureReady;
     private bool _resourceRequestPending;
+    private bool _recoveredReviewPRs;
     private readonly List<EngineeringTask> _taskBacklog = new();
     private readonly Dictionary<string, int> _agentAssignments = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
@@ -114,6 +115,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 }
                 else
                 {
+                    // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
+                    await RecoverReadyForReviewPRsAsync(ct);
                     // Priority 1: Process rework feedback on our own PRs
                     await ProcessOwnReworkAsync(ct);
                     // Priority 2: Assign issues to available engineers
@@ -754,6 +757,51 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         while (ReworkQueue.TryDequeue(out var rework))
         {
             await HandleReworkAsync(rework, ct);
+        }
+    }
+
+    /// <summary>
+    /// On restart, check for our own PRs that are ready-for-review but haven't been
+    /// picked up by reviewers (bus messages lost). Re-broadcasts ReviewRequestMessage.
+    /// </summary>
+    private async Task RecoverReadyForReviewPRsAsync(CancellationToken ct)
+    {
+        if (_recoveredReviewPRs)
+            return;
+        _recoveredReviewPRs = true;
+
+        try
+        {
+            var myPRs = await PrWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
+            foreach (var pr in myPRs)
+            {
+                if (string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
+                    && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                {
+                    // Track this PR
+                    CurrentPrNumber = pr.Number;
+                    Identity.AssignedPullRequest = pr.Number.ToString();
+
+                    // Re-broadcast review request
+                    await MessageBus.PublishAsync(new ReviewRequestMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "ReviewRequest",
+                        PrNumber = pr.Number,
+                        PrTitle = pr.Title,
+                        ReviewType = "Recovery"
+                    }, ct);
+
+                    Logger.LogInformation("PE re-broadcast review request for own PR #{PrNumber}: {Title}",
+                        pr.Number, pr.Title);
+                    UpdateStatus(AgentStatus.Idle, $"PR #{pr.Number} awaiting review");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to recover ready-for-review PRs");
         }
     }
 
