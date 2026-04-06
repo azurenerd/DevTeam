@@ -26,6 +26,7 @@ public abstract class EngineerAgentBase : AgentBase
     protected readonly ProjectFileManager ProjectFiles;
     protected readonly ModelRegistry Models;
     protected readonly AgentSquadConfig Config;
+    protected readonly AgentStateStore StateStore;
 
     protected readonly HashSet<int> ProcessedIssueIds = new();
     protected readonly ConcurrentQueue<ReworkItem> ReworkQueue = new();
@@ -46,6 +47,7 @@ public abstract class EngineerAgentBase : AgentBase
         IssueWorkflow issueWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentStateStore stateStore,
         AgentSquadConfig config,
         ILogger<AgentBase> logger)
         : base(identity, logger)
@@ -56,12 +58,13 @@ public abstract class EngineerAgentBase : AgentBase
         IssueWf = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
         ProjectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         Models = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
+        StateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         Config = config ?? throw new ArgumentNullException(nameof(config));
     }
 
     #region Lifecycle
 
-    protected override Task OnInitializeAsync(CancellationToken ct)
+    protected override async Task OnInitializeAsync(CancellationToken ct)
     {
         Subscriptions.Add(MessageBus.Subscribe<TaskAssignmentMessage>(
             Identity.Id, HandleTaskAssignmentAsync));
@@ -77,9 +80,24 @@ public abstract class EngineerAgentBase : AgentBase
 
         RegisterAdditionalSubscriptions();
 
+        // Restore rework attempt counts from checkpoint
+        try
+        {
+            var reworkCounts = await StateStore.LoadReworkAttemptsAsync(Identity.Role.ToString(), ct);
+            foreach (var kvp in reworkCounts)
+                ReworkAttemptCounts[kvp.Key] = kvp.Value;
+
+            if (reworkCounts.Count > 0)
+                Logger.LogInformation("{Role} restored {Count} rework attempt counters from checkpoint",
+                    Identity.Role, reworkCounts.Count);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "{Role} failed to restore rework counters from checkpoint", Identity.Role);
+        }
+
         Logger.LogInformation("{Role} {Name} initialized, awaiting task assignments",
             Identity.Role, Identity.DisplayName);
-        return Task.CompletedTask;
     }
 
     /// <summary>Override to register additional message bus subscriptions beyond the standard four.</summary>
@@ -339,9 +357,23 @@ public abstract class EngineerAgentBase : AgentBase
             Identity.Role, Identity.DisplayName, steps.Count, pr.Number);
         LogActivity("task", $"Generated {steps.Count} implementation steps for PR #{pr.Number}");
 
+        // Check for previously completed steps (crash recovery)
+        var resumeFromStep = await DetectCompletedStepsAsync(pr.Number, steps.Count, ct);
+        if (resumeFromStep > 0)
+        {
+            Logger.LogInformation("{Role} {Name} resuming PR #{PrNumber} from step {Step}/{Total} (skipping {Completed} already-committed steps)",
+                Identity.Role, Identity.DisplayName, pr.Number, resumeFromStep + 1, steps.Count, resumeFromStep);
+            LogActivity("task", $"♻️ Resuming PR #{pr.Number} from step {resumeFromStep + 1}/{steps.Count} ({resumeFromStep} steps already committed)");
+        }
+
         // Step 2: Iterate through each step, generating code and committing
         var completedSteps = new List<string>();
-        for (var i = 0; i < steps.Count; i++)
+
+        // Pre-populate completed steps list for context (steps we're skipping)
+        for (var s = 0; s < resumeFromStep && s < steps.Count; s++)
+            completedSteps.Add(steps[s]);
+
+        for (var i = resumeFromStep; i < steps.Count; i++)
         {
             ct.ThrowIfCancellationRequested();
             var step = steps[i];
@@ -405,6 +437,9 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogInformation("{Role} {Name} committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
                     Identity.Role, Identity.DisplayName, codeFiles.Count, stepNumber, steps.Count, pr.Number);
                 LogActivity("task", $"✅ Step {stepNumber}/{steps.Count} committed ({codeFiles.Count} files): {Truncate(step, 80)}");
+
+                // Checkpoint progress so we can resume after a crash
+                await CheckpointTaskProgressAsync(pr.Number, CurrentIssueNumber, stepNumber, ct);
             }
             else
             {
@@ -417,6 +452,71 @@ public abstract class EngineerAgentBase : AgentBase
 
         // Mark PR ready for review after all steps complete
         await MarkPrCompleteAsync(pr, issue, ct);
+    }
+
+    /// <summary>
+    /// Detects how many implementation steps have already been committed to a PR
+    /// by examining commit messages for the "Step N/M" pattern. Returns the 0-based
+    /// index to resume from (i.e., the number of completed steps).
+    /// </summary>
+    protected async Task<int> DetectCompletedStepsAsync(int prNumber, int totalSteps, CancellationToken ct)
+    {
+        try
+        {
+            // First check SQLite checkpoint (faster, more reliable)
+            var checkpoint = await StateStore.LoadAgentTaskCheckpointAsync(Identity.Role.ToString(), ct);
+            if (checkpoint is not null && checkpoint.PrNumber == prNumber && checkpoint.StepIndex > 0)
+            {
+                Logger.LogInformation("{Role} found SQLite checkpoint: step {Step} for PR #{Pr}",
+                    Identity.Role, checkpoint.StepIndex, prNumber);
+                return Math.Min(checkpoint.StepIndex, totalSteps);
+            }
+
+            // Fallback: parse commit messages from GitHub
+            var commitMessages = await GitHub.GetPullRequestCommitMessagesAsync(prNumber, ct);
+            var maxCompletedStep = 0;
+
+            foreach (var msg in commitMessages)
+            {
+                // Match "Step 3/6:" pattern
+                var match = System.Text.RegularExpressions.Regex.Match(msg, @"^Step\s+(\d+)/(\d+):");
+                if (match.Success && int.TryParse(match.Groups[1].Value, out var stepNum))
+                {
+                    maxCompletedStep = Math.Max(maxCompletedStep, stepNum);
+                }
+            }
+
+            return Math.Min(maxCompletedStep, totalSteps);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to detect completed steps for PR #{Pr}, starting from beginning", prNumber);
+            return 0;
+        }
+    }
+
+    /// <summary>
+    /// Checkpoint current task progress to SQLite after each successful step commit.
+    /// </summary>
+    protected async Task CheckpointTaskProgressAsync(int prNumber, int? issueNumber, int stepIndex, CancellationToken ct)
+    {
+        try
+        {
+            var reworkJson = System.Text.Json.JsonSerializer.Serialize(ReworkAttemptCounts);
+            await StateStore.SaveAgentTaskCheckpointAsync(
+                Identity.Role.ToString(),
+                currentTaskId: null,
+                stepIndex: stepIndex,
+                prNumber: prNumber,
+                issueNumber: issueNumber,
+                reworkAttemptsJson: reworkJson,
+                stateJson: null,
+                ct);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to checkpoint task progress for PR #{Pr} step {Step}", prNumber, stepIndex);
+        }
     }
 
     /// <summary>
@@ -525,6 +625,9 @@ public abstract class EngineerAgentBase : AgentBase
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
         LogActivity("task", $"🎉 Completed PR #{pr.Number}: {pr.Title} — marked ready for review");
+
+        // Clear task checkpoint since this PR is complete
+        await CheckpointTaskProgressAsync(pr.Number, CurrentIssueNumber, stepIndex: 0, ct);
 
         UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting review/next task");
     }

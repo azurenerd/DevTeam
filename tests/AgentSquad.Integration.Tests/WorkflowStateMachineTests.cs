@@ -1,17 +1,26 @@
+using AgentSquad.Core.Persistence;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace AgentSquad.Integration.Tests;
 
-public class WorkflowStateMachineTests
+public class WorkflowStateMachineTests : IDisposable
 {
     private readonly AgentRegistry _registry;
+    private readonly AgentStateStore _stateStore;
     private readonly WorkflowStateMachine _workflow;
 
     public WorkflowStateMachineTests()
     {
         _registry = new AgentRegistry(NullLogger<AgentRegistry>.Instance);
-        _workflow = new WorkflowStateMachine(_registry, NullLogger<WorkflowStateMachine>.Instance);
+        var dbPath = Path.Combine(Path.GetTempPath(), $"workflow-test-{Guid.NewGuid():N}.db");
+        _stateStore = new AgentStateStore(dbPath);
+        _workflow = new WorkflowStateMachine(_registry, _stateStore, NullLogger<WorkflowStateMachine>.Instance);
+    }
+
+    public void Dispose()
+    {
+        _stateStore.Dispose();
     }
 
     [Fact]
@@ -87,5 +96,36 @@ public class WorkflowStateMachineTests
         Assert.True(_workflow.HasReachedPhase(ProjectPhase.Research));
         Assert.True(_workflow.HasReachedPhase(ProjectPhase.Architecture));
         Assert.False(_workflow.HasReachedPhase(ProjectPhase.EngineeringPlanning));
+    }
+
+    [Fact]
+    public async Task RecoverAsync_RestoresPhaseAndSignals()
+    {
+        // Arrange: advance phase and add signals, then checkpoint
+        _workflow.ForcePhase(ProjectPhase.ParallelDevelopment, "test");
+        _workflow.Signal(WorkflowStateMachine.Signals.ResearchComplete);
+        _workflow.Signal(WorkflowStateMachine.Signals.ArchitectureComplete);
+        await _workflow.CheckpointAsync();
+
+        // Create a new workflow instance (simulates crash + restart)
+        var recovered = new WorkflowStateMachine(
+            _registry, _stateStore, NullLogger<WorkflowStateMachine>.Instance);
+
+        // Act
+        var result = await recovered.RecoverAsync();
+
+        // Assert
+        Assert.True(result);
+        Assert.Equal(ProjectPhase.ParallelDevelopment, recovered.CurrentPhase);
+        Assert.True(recovered.HasSignal(WorkflowStateMachine.Signals.ResearchComplete));
+        Assert.True(recovered.HasSignal(WorkflowStateMachine.Signals.ArchitectureComplete));
+    }
+
+    [Fact]
+    public async Task RecoverAsync_ReturnsFalse_WhenNoCheckpoint()
+    {
+        var result = await _workflow.RecoverAsync();
+        Assert.False(result);
+        Assert.Equal(ProjectPhase.Initialization, _workflow.CurrentPhase);
     }
 }

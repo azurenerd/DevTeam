@@ -23,6 +23,25 @@ public record MetricEntry(
     string MetricName,
     double Value);
 
+public record WorkflowCheckpoint(
+    string Phase,
+    string SignalsJson,
+    DateTime Timestamp);
+
+public record AgentTaskCheckpoint(
+    string AgentRole,
+    string? CurrentTaskId,
+    int StepIndex,
+    int? PrNumber,
+    int? IssueNumber,
+    string? StateJson,
+    DateTime Timestamp);
+
+public record ProcessedItem(
+    string AgentRole,
+    string ItemType,
+    string ItemId);
+
 /// <summary>
 /// SQLite-based persistence for agent state recovery, activity logging, and metrics.
 /// </summary>
@@ -73,6 +92,32 @@ public class AgentStateStore : IDisposable
 
             CREATE INDEX IF NOT EXISTS idx_metrics_agent_name
                 ON metrics (agent_id, metric_name, timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS workflow_state (
+                id             INTEGER PRIMARY KEY CHECK (id = 1),
+                phase          TEXT NOT NULL,
+                signals_json   TEXT NOT NULL DEFAULT '[]',
+                updated_at     DATETIME NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_task_checkpoint (
+                agent_role     TEXT PRIMARY KEY,
+                current_task_id TEXT,
+                step_index     INTEGER NOT NULL DEFAULT 0,
+                pr_number      INTEGER,
+                issue_number   INTEGER,
+                rework_attempts_json TEXT DEFAULT '{}',
+                state_json     TEXT,
+                updated_at     DATETIME NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS processed_items (
+                agent_role     TEXT NOT NULL,
+                item_type      TEXT NOT NULL,
+                item_id        TEXT NOT NULL,
+                created_at     DATETIME NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (agent_role, item_type, item_id)
+            );
             """;
         cmd.ExecuteNonQuery();
     }
@@ -236,6 +281,170 @@ public class AgentStateStore : IDisposable
             """;
         cmd.Parameters.AddWithValue("@cutoff", cutoff);
 
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    // ── Workflow State ───────────────────────────────────────────────
+
+    /// <summary>Save the current workflow phase and signals to SQLite.</summary>
+    public async Task SaveWorkflowStateAsync(string phase, IEnumerable<string> signals, CancellationToken ct = default)
+    {
+        var signalsJson = System.Text.Json.JsonSerializer.Serialize(signals);
+
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO workflow_state (id, phase, signals_json, updated_at)
+                VALUES (1, @phase, @signals, datetime('now'))
+            ON CONFLICT(id) DO UPDATE SET
+                phase = excluded.phase,
+                signals_json = excluded.signals_json,
+                updated_at = excluded.updated_at;
+            """;
+        cmd.Parameters.AddWithValue("@phase", phase);
+        cmd.Parameters.AddWithValue("@signals", signalsJson);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Load the persisted workflow state, if any.</summary>
+    public async Task<WorkflowCheckpoint?> LoadWorkflowStateAsync(CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT phase, signals_json, updated_at FROM workflow_state WHERE id = 1;";
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+
+        return new WorkflowCheckpoint(
+            Phase: reader.GetString(0),
+            SignalsJson: reader.GetString(1),
+            Timestamp: reader.GetDateTime(2));
+    }
+
+    // ── Agent Task Checkpoints ───────────────────────────────────────
+
+    /// <summary>Save an agent's current task progress for crash recovery.</summary>
+    public async Task SaveAgentTaskCheckpointAsync(
+        string agentRole,
+        string? currentTaskId,
+        int stepIndex,
+        int? prNumber,
+        int? issueNumber,
+        string? reworkAttemptsJson,
+        string? stateJson,
+        CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO agent_task_checkpoint (agent_role, current_task_id, step_index, pr_number, issue_number, rework_attempts_json, state_json, updated_at)
+                VALUES (@role, @task, @step, @pr, @issue, @rework, @state, datetime('now'))
+            ON CONFLICT(agent_role) DO UPDATE SET
+                current_task_id = excluded.current_task_id,
+                step_index = excluded.step_index,
+                pr_number = excluded.pr_number,
+                issue_number = excluded.issue_number,
+                rework_attempts_json = excluded.rework_attempts_json,
+                state_json = excluded.state_json,
+                updated_at = excluded.updated_at;
+            """;
+        cmd.Parameters.AddWithValue("@role", agentRole);
+        cmd.Parameters.AddWithValue("@task", (object?)currentTaskId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@step", stepIndex);
+        cmd.Parameters.AddWithValue("@pr", (object?)prNumber ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@issue", (object?)issueNumber ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@rework", (object?)reworkAttemptsJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@state", (object?)stateJson ?? DBNull.Value);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Load an agent's task checkpoint for crash recovery.</summary>
+    public async Task<AgentTaskCheckpoint?> LoadAgentTaskCheckpointAsync(string agentRole, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT agent_role, current_task_id, step_index, pr_number, issue_number, state_json, updated_at
+            FROM agent_task_checkpoint
+            WHERE agent_role = @role;
+            """;
+        cmd.Parameters.AddWithValue("@role", agentRole);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+
+        return new AgentTaskCheckpoint(
+            AgentRole: reader.GetString(0),
+            CurrentTaskId: reader.IsDBNull(1) ? null : reader.GetString(1),
+            StepIndex: reader.GetInt32(2),
+            PrNumber: reader.IsDBNull(3) ? null : reader.GetInt32(3),
+            IssueNumber: reader.IsDBNull(4) ? null : reader.GetInt32(4),
+            StateJson: reader.IsDBNull(5) ? null : reader.GetString(5),
+            Timestamp: reader.GetDateTime(6));
+    }
+
+    /// <summary>Load rework attempt counts for an agent role.</summary>
+    public async Task<Dictionary<int, int>> LoadReworkAttemptsAsync(string agentRole, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT rework_attempts_json FROM agent_task_checkpoint WHERE agent_role = @role;";
+        cmd.Parameters.AddWithValue("@role", agentRole);
+
+        var result = await cmd.ExecuteScalarAsync(ct);
+        if (result is null or DBNull)
+            return new Dictionary<int, int>();
+
+        return System.Text.Json.JsonSerializer.Deserialize<Dictionary<int, int>>((string)result)
+               ?? new Dictionary<int, int>();
+    }
+
+    // ── Processed Items (dedup) ──────────────────────────────────────
+
+    /// <summary>Record that an item has been processed by an agent role.</summary>
+    public async Task AddProcessedItemAsync(string agentRole, string itemType, string itemId, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO processed_items (agent_role, item_type, item_id)
+            VALUES (@role, @type, @item);
+            """;
+        cmd.Parameters.AddWithValue("@role", agentRole);
+        cmd.Parameters.AddWithValue("@type", itemType);
+        cmd.Parameters.AddWithValue("@item", itemId);
+
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Load all processed item IDs for an agent role and item type.</summary>
+    public async Task<HashSet<string>> LoadProcessedItemsAsync(string agentRole, string itemType, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT item_id FROM processed_items
+            WHERE agent_role = @role AND item_type = @type;
+            """;
+        cmd.Parameters.AddWithValue("@role", agentRole);
+        cmd.Parameters.AddWithValue("@type", itemType);
+
+        var items = new HashSet<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            items.Add(reader.GetString(0));
+        }
+        return items;
+    }
+
+    /// <summary>Clear all checkpoints (for fresh runs).</summary>
+    public async Task ClearAllCheckpointsAsync(CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM workflow_state;
+            DELETE FROM agent_task_checkpoint;
+            DELETE FROM processed_items;
+            """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

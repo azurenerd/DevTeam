@@ -45,6 +45,13 @@ public class AgentSquadWorker : BackgroundService
         Console.WriteLine($"  Max additional engineers: {_config.Limits.MaxAdditionalEngineers}");
         Console.WriteLine();
 
+        // Recover workflow state from SQLite checkpoint if available
+        var recovered = await _workflow.RecoverAsync(ct);
+        if (recovered)
+        {
+            _logger.LogInformation("Resumed from checkpoint — workflow phase: {Phase}", _workflow.CurrentPhase);
+        }
+
         // Spawn all core agents
         var roles = new[]
         {

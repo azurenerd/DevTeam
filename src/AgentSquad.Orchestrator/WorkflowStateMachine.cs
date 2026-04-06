@@ -1,7 +1,9 @@
 namespace AgentSquad.Orchestrator;
 
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 public enum ProjectPhase
 {
@@ -39,6 +41,7 @@ public record GateCondition
 public class WorkflowStateMachine
 {
     private readonly AgentRegistry _registry;
+    private readonly AgentStateStore _stateStore;
     private readonly ILogger<WorkflowStateMachine> _logger;
 
     private readonly object _lock = new();
@@ -62,9 +65,11 @@ public class WorkflowStateMachine
 
     public WorkflowStateMachine(
         AgentRegistry registry,
+        AgentStateStore stateStore,
         ILogger<WorkflowStateMachine> logger)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -93,6 +98,7 @@ public class WorkflowStateMachine
         }
 
         _logger.LogInformation("Signal recorded: '{Signal}'.", signal);
+        _ = CheckpointAsync();
     }
 
     /// <summary>Returns true if the given signal has been raised.</summary>
@@ -187,6 +193,73 @@ public class WorkflowStateMachine
         lock (_lock) { return _history.ToList().AsReadOnly(); }
     }
 
+    // ── Checkpoint / Recovery ────────────────────────────────────────
+
+    /// <summary>
+    /// Persist current phase and signals to SQLite for crash recovery.
+    /// Called automatically on every signal and phase transition.
+    /// </summary>
+    public async Task CheckpointAsync()
+    {
+        string phase;
+        string[] signals;
+        lock (_lock)
+        {
+            phase = _currentPhase.ToString();
+            signals = _signals.ToArray();
+        }
+
+        try
+        {
+            await _stateStore.SaveWorkflowStateAsync(phase, signals);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to checkpoint workflow state");
+        }
+    }
+
+    /// <summary>
+    /// Recover phase and signals from SQLite on startup.
+    /// Returns true if a checkpoint was found and restored.
+    /// </summary>
+    public async Task<bool> RecoverAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var checkpoint = await _stateStore.LoadWorkflowStateAsync(ct);
+            if (checkpoint is null)
+                return false;
+
+            if (!Enum.TryParse<ProjectPhase>(checkpoint.Phase, out var phase))
+            {
+                _logger.LogWarning("Invalid phase '{Phase}' in checkpoint, ignoring", checkpoint.Phase);
+                return false;
+            }
+
+            var signals = JsonSerializer.Deserialize<List<string>>(checkpoint.SignalsJson) ?? [];
+
+            lock (_lock)
+            {
+                var oldPhase = _currentPhase;
+                _currentPhase = phase;
+                foreach (var signal in signals)
+                    _signals.Add(signal);
+
+                _logger.LogInformation(
+                    "Workflow recovered from checkpoint: {Phase} with {SignalCount} signals (checkpoint age: {Age})",
+                    phase, _signals.Count, DateTime.UtcNow - checkpoint.Timestamp);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to recover workflow state from checkpoint");
+            return false;
+        }
+    }
+
     // ── Private helpers ──────────────────────────────────────────────
 
     private PhaseTransitionEventArgs Transition(ProjectPhase from, ProjectPhase to, string? reason)
@@ -204,6 +277,9 @@ public class WorkflowStateMachine
         // Invoke outside the lock would be ideal, but keep simple for now;
         // handlers should be fast and non-blocking.
         PhaseChanged?.Invoke(this, args);
+
+        // Persist the new phase to SQLite for crash recovery
+        _ = CheckpointAsync();
 
         return args;
     }

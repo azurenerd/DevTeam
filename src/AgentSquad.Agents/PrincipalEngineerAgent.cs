@@ -41,11 +41,12 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentStateStore stateStore,
         AgentRegistry registry,
         IOptions<AgentSquadConfig> config,
         ILogger<PrincipalEngineerAgent> logger)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, config.Value, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, logger)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
     }

@@ -48,6 +48,7 @@ public interface IGitHubService
     // PR file inspection
     Task<IReadOnlyList<AgentPullRequest>> GetMergedPullRequestsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPullRequestChangedFilesAsync(int prNumber, CancellationToken ct = default);
+    Task<IReadOnlyList<string>> GetPullRequestCommitMessagesAsync(int prNumber, CancellationToken ct = default);
 
     // Rate Limiting
     Task<GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default);

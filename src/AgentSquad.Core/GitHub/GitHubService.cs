@@ -154,6 +154,20 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<string>> GetPullRequestCommitMessagesAsync(int prNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            var commits = await _client.PullRequest.Commits(_owner, _repo, prNumber);
+            return commits.Select(c => c.Commit.Message).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get commit messages for PR #{Number}", prNumber);
+            return Array.Empty<string>();
+        }
+    }
+
     public async Task<IReadOnlyList<Models.IssueComment>> GetPullRequestCommentsAsync(int prNumber, CancellationToken ct = default)
     {
         try
