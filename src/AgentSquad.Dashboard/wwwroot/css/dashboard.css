@@ -970,18 +970,23 @@ main {
 }
 
 /* ===== Team Visualization ===== */
-.team-office {
+/* ===== Team Radial Visualization ===== */
+.team-radial {
     position: relative;
     background: var(--bg-card);
     border: 1px solid var(--border-card);
     border-radius: var(--radius-lg);
-    padding: 2.5rem 2rem;
     margin-bottom: 1.5rem;
     overflow: hidden;
-    min-height: 400px;
+    width: 100%;
+    aspect-ratio: 1;
+    max-width: 820px;
+    max-height: 820px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
-.team-connections {
+.radial-svg {
     position: absolute;
     top: 0;
     left: 0;
@@ -991,85 +996,69 @@ main {
     z-index: 0;
 }
 
-.connection-line {
-    stroke-width: 1;
-    stroke-dasharray: 6, 4;
-    opacity: 0.3;
-    transition: opacity var(--transition-normal);
+/* Center PM card */
+.radial-center {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 2;
 }
 
-.connection-line.connection-pm {
-    stroke: var(--accent-purple);
-    opacity: 0.2;
+.radial-center .team-desk {
+    min-width: 140px;
+    box-shadow: 0 0 30px rgba(163, 113, 247, 0.15), 0 0 60px rgba(124, 58, 237, 0.06);
+    border-color: rgba(163, 113, 247, 0.25);
 }
 
-.connection-line.connection-pe {
-    stroke: var(--accent-green);
-    opacity: 0.25;
+.radial-center .desk-avatar {
+    width: 64px;
+    height: 64px;
+    font-size: 1.15rem;
 }
 
-.team-office:hover .connection-line {
-    opacity: 0.45;
-}
-
-.team-grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 1.5rem;
-    position: relative;
+/* Outer agents positioned absolutely */
+.radial-agent {
+    position: absolute;
+    transform: translate(-50%, -50%);
     z-index: 1;
 }
 
-@media (max-width: 1200px) {
-    .team-grid {
-        grid-template-columns: repeat(3, 1fr);
-    }
-}
-
-@media (max-width: 768px) {
-    .team-grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-}
-
-@media (max-width: 480px) {
-    .team-grid {
-        grid-template-columns: 1fr;
-    }
+.radial-agent .team-desk {
+    min-width: 120px;
 }
 
 .team-desk {
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 1.5rem 1rem;
+    padding: 1.25rem 1rem;
     background: var(--bg-secondary);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     text-align: center;
     position: relative;
     transition: all var(--transition-normal);
-    transform: perspective(600px) rotateX(2deg);
 }
 
 .team-desk:hover {
-    transform: perspective(600px) rotateX(0deg) translateY(-3px);
+    transform: translateY(-3px);
     box-shadow: var(--shadow-card-hover);
     border-color: rgba(255, 255, 255, 0.12);
 }
 
 .desk-avatar {
-    width: 56px;
-    height: 56px;
+    width: 52px;
+    height: 52px;
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
     font-family: var(--font-mono);
-    font-size: 1rem;
+    font-size: 0.95rem;
     font-weight: 700;
     color: #fff;
-    margin-bottom: 0.75rem;
+    margin-bottom: 0.6rem;
     position: relative;
     transition: transform var(--transition-normal);
 }
@@ -1284,6 +1273,36 @@ main {
 
 .legend-line.connection-pe {
     border-color: var(--accent-green);
+}
+
+/* Responsive radial layout */
+@media (max-width: 768px) {
+    .team-radial {
+        max-width: 100%;
+        aspect-ratio: auto;
+        min-height: 600px;
+    }
+
+    .radial-agent .team-desk,
+    .radial-center .team-desk {
+        min-width: 90px;
+        padding: 0.75rem 0.5rem;
+    }
+
+    .radial-agent .desk-avatar,
+    .desk-avatar {
+        width: 40px;
+        height: 40px;
+        font-size: 0.8rem;
+    }
+
+    .desk-name {
+        font-size: 0.72rem;
+    }
+
+    .desk-role-label {
+        font-size: 0.6rem;
+    }
 }
 
 /* ===== Agent Detail Page ===== */
