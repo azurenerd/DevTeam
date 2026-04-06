@@ -900,14 +900,17 @@ public class PrincipalEngineerAgent : AgentBase
 
             var history = new ChatHistory();
             history.AddSystemMessage(
-                "You are a Principal Engineer reviewing a pull request for technical quality. " +
+                "You are a Principal Engineer reviewing a pull request for technical quality.\n\n" +
+                "IMPORTANT: This PR is ONE TASK from the Engineering Plan — it is NOT expected to " +
+                "implement the entire architecture or PM spec. Review it ONLY against its own stated " +
+                "description, acceptance criteria, and the specific task it addresses. Do NOT request " +
+                "changes because the PR doesn't cover other tasks or the full system.\n\n" +
                 "Evaluate:\n" +
-                "1. Code correctness and completeness\n" +
-                "2. Architecture alignment (see Architecture document)\n" +
-                "3. Business requirements alignment (see PM Specification)\n" +
-                "4. Error handling and edge cases\n" +
-                "5. Performance considerations\n" +
-                "6. Test coverage\n\n" +
+                "1. Code correctness and completeness FOR THIS TASK's scope\n" +
+                "2. Architecture alignment for the components this task touches\n" +
+                "3. Error handling and edge cases within this task's scope\n" +
+                "4. Performance considerations\n" +
+                "5. Test coverage for the changes made\n\n" +
                 "End your review with exactly one of these verdicts on a new line:\n" +
                 "VERDICT: APPROVE\n" +
                 "VERDICT: REQUEST_CHANGES\n\n" +

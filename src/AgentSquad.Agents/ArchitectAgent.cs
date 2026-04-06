@@ -436,10 +436,14 @@ public class ArchitectAgent : AgentBase
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a software architect reviewing a pull request for alignment with " +
-                "the project's architecture document. Evaluate whether the PR's scope, approach, " +
-                "and design follow the architectural decisions and component boundaries defined " +
-                "in the architecture. Be concise and actionable. " +
-                "Flag any deviations, missing considerations, or potential architectural issues. " +
+                "the project's architecture document.\n\n" +
+                "IMPORTANT: This PR implements ONE TASK from the Engineering Plan — it is NOT expected " +
+                "to cover the entire architecture. Review ONLY whether the components and patterns " +
+                "used in this PR follow the architectural decisions and boundaries for the parts it " +
+                "touches. Do NOT flag missing features that belong to other tasks.\n\n" +
+                "Evaluate whether the PR's scope, approach, and design follow the architectural " +
+                "decisions and component boundaries. Be concise and actionable. " +
+                "Flag any deviations or potential issues within the task's scope. " +
                 "If everything aligns well, say so briefly and note any positive patterns.");
 
             history.AddUserMessage(

@@ -906,11 +906,16 @@ public class ProgramManagerAgent : AgentBase
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a Program Manager reviewing a pull request for alignment with " +
-                "project requirements and the PM specification. Evaluate:\n" +
-                "1. Does the PR meet the stated requirements from the PM spec?\n" +
-                "2. Is the scope correct — not too broad, not too narrow?\n" +
-                "3. Are there any gaps in functionality or missing edge cases?\n" +
-                "4. Does the implementation approach make sense for the business goals?\n\n" +
+                "project requirements and the PM specification.\n\n" +
+                "IMPORTANT: This PR is ONE TASK from the Engineering Plan — it is NOT expected to " +
+                "cover the entire PM Spec or Architecture. Review it ONLY against its own stated " +
+                "description, acceptance criteria, and the specific task it addresses. Do NOT request " +
+                "changes because the PR doesn't implement features from other tasks.\n\n" +
+                "Evaluate:\n" +
+                "1. Does the PR fulfill its own stated description and acceptance criteria?\n" +
+                "2. Is the implementation consistent with the PM spec for the scope of THIS task?\n" +
+                "3. Are there any bugs, gaps, or missing edge cases within this task's scope?\n" +
+                "4. Does the approach make sense for the business goals?\n\n" +
                 "Be constructive and specific with feedback.\n" +
                 "End your review with exactly one of these verdicts on a new line:\n" +
                 "VERDICT: APPROVE\n" +
