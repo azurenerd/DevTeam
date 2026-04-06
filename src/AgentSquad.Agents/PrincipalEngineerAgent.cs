@@ -365,20 +365,20 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         {
             var registeredEngineers = new List<EngineerInfo>();
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.SeniorEngineer))
-                registeredEngineers.Add(new EngineerInfo { Name = agent.Identity.DisplayName, Role = AgentRole.SeniorEngineer });
+                registeredEngineers.Add(new EngineerInfo { AgentId = agent.Identity.Id, Name = agent.Identity.DisplayName, Role = AgentRole.SeniorEngineer });
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.JuniorEngineer))
-                registeredEngineers.Add(new EngineerInfo { Name = agent.Identity.DisplayName, Role = AgentRole.JuniorEngineer });
+                registeredEngineers.Add(new EngineerInfo { AgentId = agent.Identity.Id, Name = agent.Identity.DisplayName, Role = AgentRole.JuniorEngineer });
 
             foreach (var engineer in registeredEngineers)
             {
-                if (_agentAssignments.ContainsKey(engineer.Name))
+                if (_agentAssignments.ContainsKey(engineer.AgentId))
                 {
-                    var assignedIssueNum = _agentAssignments[engineer.Name];
+                    var assignedIssueNum = _agentAssignments[engineer.AgentId];
                     var assignedIssue = await GitHub.GetIssueAsync(assignedIssueNum, ct);
                     if (assignedIssue is not null &&
                         string.Equals(assignedIssue.State, "open", StringComparison.OrdinalIgnoreCase))
                         continue;
-                    _agentAssignments.Remove(engineer.Name);
+                    _agentAssignments.Remove(engineer.AgentId);
                 }
 
                 var targetComplexity = engineer.Role switch
@@ -400,7 +400,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     var newTitle = $"{engineer.Name}: {task.Name}";
                     await GitHub.UpdateIssueTitleAsync(task.IssueNumber.Value, newTitle, ct);
 
-                    _agentAssignments[engineer.Name] = task.IssueNumber.Value;
+                    _agentAssignments[engineer.AgentId] = task.IssueNumber.Value;
 
                     var taskIndex = _taskBacklog.FindIndex(t => t.Id == task.Id);
                     if (taskIndex >= 0)
@@ -419,7 +419,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     await MessageBus.PublishAsync(new IssueAssignmentMessage
                     {
                         FromAgentId = Identity.Id,
-                        ToAgentId = engineer.Name,
+                        ToAgentId = engineer.AgentId,
                         MessageType = "IssueAssignment",
                         IssueNumber = task.IssueNumber.Value,
                         IssueTitle = task.Name,
@@ -684,10 +684,10 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
             var freeEngineers = 0;
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.SeniorEngineer))
-                if (!_agentAssignments.ContainsKey(agent.Identity.DisplayName))
+                if (!_agentAssignments.ContainsKey(agent.Identity.Id))
                     freeEngineers++;
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.JuniorEngineer))
-                if (!_agentAssignments.ContainsKey(agent.Identity.DisplayName))
+                if (!_agentAssignments.ContainsKey(agent.Identity.Id))
                     freeEngineers++;
 
             if (parallelizable > freeEngineers + 1)
@@ -750,7 +750,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
             if (message.CurrentTask is not null)
             {
-                var task = _taskBacklog.FirstOrDefault(t => t.Id == message.CurrentTask);
+                var task = _taskBacklog.FirstOrDefault(t =>
+                    string.Equals(t.Name, message.CurrentTask, StringComparison.OrdinalIgnoreCase)
+                    || t.Id == message.CurrentTask);
                 if (task is not null)
                 {
                     var idx = _taskBacklog.FindIndex(t => t.Id == task.Id);
@@ -1081,6 +1083,7 @@ internal record EngineeringTask
 
 internal record EngineerInfo
 {
+    public string AgentId { get; init; } = "";
     public string Name { get; init; } = "";
     public AgentRole Role { get; init; }
 }

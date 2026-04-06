@@ -107,20 +107,48 @@ public abstract class EngineerAgentBase : AgentBase
                 // Priority 3: Subclass-specific loop work (PE orchestration, etc.)
                 await RunAdditionalLoopWorkAsync(ct);
 
-                // Priority 4: Recovery — check for existing open PR after restart
+                // Priority 4: Check if our current PR was merged/closed — reset state
+                if (CurrentPrNumber is not null)
+                {
+                    var currentPr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+                    if (currentPr is null || !string.Equals(currentPr.State, "open", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Logger.LogInformation("{Role} {Name} PR #{PrNumber} is no longer open (merged/closed), resetting",
+                            Identity.Role, Identity.DisplayName, CurrentPrNumber.Value);
+                        CurrentPrNumber = null;
+                        Identity.AssignedPullRequest = null;
+                    }
+                }
+
+                // Priority 5: Recovery — check for existing open PR after restart
                 if (CurrentPrNumber is null)
                 {
                     var myTasks = await PrWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
                     var activePR = myTasks.FirstOrDefault(pr =>
-                        string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase));
+                        string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
+                        && !pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase));
 
                     if (activePR != null && Identity.AssignedPullRequest != activePR.Number.ToString())
                     {
                         await WorkOnExistingPrAsync(activePR, ct);
                     }
-                    else if (activePR == null)
+                    else
                     {
-                        UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
+                        // Track a ready-for-review PR so rework feedback can reach us
+                        var reviewPR = myTasks.FirstOrDefault(pr =>
+                            string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
+                            && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase));
+                        if (reviewPR != null)
+                        {
+                            CurrentPrNumber = reviewPR.Number;
+                            Identity.AssignedPullRequest = reviewPR.Number.ToString();
+                            Logger.LogInformation("{Role} {Name} re-tracking PR #{PrNumber} awaiting review",
+                                Identity.Role, Identity.DisplayName, reviewPR.Number);
+                        }
+                        else if (activePR == null)
+                        {
+                            UpdateStatus(AgentStatus.Idle, "Waiting for task assignment");
+                        }
                     }
                 }
 
@@ -180,6 +208,10 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
+            // Clear any previous PR tracking from prior task
+            CurrentPrNumber = null;
+            Identity.AssignedPullRequest = null;
+
             CurrentIssueNumber = assignment.IssueNumber;
             UpdateStatus(AgentStatus.Working, $"Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
 
@@ -358,9 +390,9 @@ public abstract class EngineerAgentBase : AgentBase
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
 
-        UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting next task");
-        Identity.AssignedPullRequest = null;
-        CurrentPrNumber = null;
+        UpdateStatus(AgentStatus.Idle, $"Completed PR #{pr.Number}, awaiting review/next task");
+        // Keep CurrentPrNumber and AssignedPullRequest set so rework feedback can match.
+        // They will be cleared when the next issue assignment starts in WorkOnIssueAsync.
     }
 
     #endregion
