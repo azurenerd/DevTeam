@@ -510,6 +510,63 @@ public class GitHubService : IGitHubService
         }
     }
 
+    // BUG FIX: The Contents API (CreateOrUpdateFileAsync) creates one commit per file,
+    // which floods PR history with N commits for N files in a single logical step.
+    // BatchCommitFilesAsync uses the Git Trees API to commit all files atomically in one commit.
+    public async Task BatchCommitFilesAsync(
+        IReadOnlyList<(string Path, string Content)> files,
+        string commitMessage,
+        string branch,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(files);
+        if (files.Count == 0) return;
+
+        // 1. Get the current commit SHA at the tip of the branch
+        var branchRef = await _client.Git.Reference.Get(_owner, _repo, $"heads/{branch}");
+        var latestCommitSha = branchRef.Object.Sha;
+        var baseCommit = await _client.Git.Commit.Get(_owner, _repo, latestCommitSha);
+
+        // 2. Create blobs for each file and build the tree items
+        var treeItems = new List<NewTreeItem>();
+        foreach (var (path, content) in files)
+        {
+            var blob = new NewBlob
+            {
+                Content = content,
+                Encoding = EncodingType.Utf8
+            };
+            var blobResult = await _client.Git.Blob.Create(_owner, _repo, blob);
+
+            treeItems.Add(new NewTreeItem
+            {
+                Path = path,
+                Mode = "100644", // regular file
+                Type = TreeType.Blob,
+                Sha = blobResult.Sha
+            });
+        }
+
+        // 3. Create a new tree based on the current commit's tree
+        var newTree = new NewTree { BaseTree = baseCommit.Tree.Sha };
+        foreach (var item in treeItems)
+            newTree.Tree.Add(item);
+
+        var treeResult = await _client.Git.Tree.Create(_owner, _repo, newTree);
+
+        // 4. Create the commit pointing to the new tree
+        var newCommit = new NewCommit(commitMessage, treeResult.Sha, latestCommitSha);
+        var commitResult = await _client.Git.Commit.Create(_owner, _repo, newCommit);
+
+        // 5. Update the branch reference to point to the new commit
+        await _client.Git.Reference.Update(_owner, _repo, $"heads/{branch}",
+            new ReferenceUpdate(commitResult.Sha));
+
+        _logger.LogInformation(
+            "Batch-committed {Count} files to branch {Branch} in a single commit: {Message}",
+            files.Count, branch, commitMessage);
+    }
+
     // Branches
 
     public async Task CreateBranchAsync(string branchName, string fromBranch = "main", CancellationToken ct = default)

@@ -577,10 +577,13 @@ public partial class PullRequestWorkflow
     /// Commit multiple source code files to a PR's branch in sequence.
     /// Used by engineering agents to commit parsed code files from AI output.
     /// </summary>
+    // BUG FIX: Previously used CreateOrUpdateFileAsync per file, which created one commit per file,
+    // flooding PR history (e.g., 18 commits for Step 1/5 instead of 1). Now uses BatchCommitFilesAsync
+    // to commit all files for a step in a single atomic commit.
     public async Task CommitCodeFilesToPRAsync(
         int prNumber,
         IReadOnlyList<AI.CodeFileParser.CodeFile> files,
-        string commitMessagePrefix,
+        string commitMessage,
         CancellationToken ct = default)
     {
         var pr = await _github.GetPullRequestAsync(prNumber, ct);
@@ -591,20 +594,38 @@ public partial class PullRequestWorkflow
             "Committing {Count} code files to PR #{Number} branch {Branch}",
             files.Count, prNumber, pr.HeadBranch);
 
-        foreach (var file in files)
+        // Convert to the tuple format expected by BatchCommitFilesAsync
+        var fileTuples = files
+            .Select(f => (f.Path, f.Content))
+            .ToList()
+            .AsReadOnly();
+
+        try
         {
-            try
+            await _github.BatchCommitFilesAsync(fileTuples, commitMessage, pr.HeadBranch, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "Batch commit failed for PR #{Number}, falling back to per-file commits",
+                prNumber);
+
+            // Fallback: commit files individually (original behavior)
+            foreach (var file in files)
             {
-                await _github.CreateOrUpdateFileAsync(
-                    file.Path, file.Content,
-                    $"{commitMessagePrefix}: {file.Path}",
-                    pr.HeadBranch, ct);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Failed to commit file {Path} to PR #{Number}, continuing with remaining files",
-                    file.Path, prNumber);
+                try
+                {
+                    await _github.CreateOrUpdateFileAsync(
+                        file.Path, file.Content,
+                        $"{commitMessage}: {file.Path}",
+                        pr.HeadBranch, ct);
+                }
+                catch (Exception fileEx)
+                {
+                    _logger.LogWarning(fileEx,
+                        "Failed to commit file {Path} to PR #{Number}, continuing with remaining files",
+                        file.Path, prNumber);
+                }
             }
         }
     }

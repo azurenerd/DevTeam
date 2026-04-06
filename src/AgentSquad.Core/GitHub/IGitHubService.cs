@@ -30,6 +30,16 @@ public interface IGitHubService
     Task CreateOrUpdateFileAsync(string path, string content, string commitMessage, string? branch = null, CancellationToken ct = default);
     Task DeleteFileAsync(string path, string commitMessage, string? branch = null, CancellationToken ct = default);
 
+    /// <summary>
+    /// Commits multiple files to a branch in a single atomic commit using the Git Trees API.
+    /// This avoids the one-commit-per-file limitation of the Contents API.
+    /// </summary>
+    Task BatchCommitFilesAsync(
+        IReadOnlyList<(string Path, string Content)> files,
+        string commitMessage,
+        string branch,
+        CancellationToken ct = default);
+
     // Branches
     Task CreateBranchAsync(string branchName, string fromBranch = "main", CancellationToken ct = default);
     Task<bool> BranchExistsAsync(string branchName, CancellationToken ct = default);
