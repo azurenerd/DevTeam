@@ -67,41 +67,16 @@ public class AgentSquadWorker : BackgroundService
             _logger.LogInformation("{Role} agent spawned: {Name}", role, identity.DisplayName);
         }
 
-        _logger.LogInformation("All core agents spawned. Starting agent loops...");
+        _logger.LogInformation("All core agents spawned. Agent loops already started by SpawnAgentAsync.");
 
-        // Start all agent loops as background tasks
-        foreach (var agent in _registry.GetAllAgents())
-        {
-            var agentTask = Task.Run(async () =>
-            {
-                try
-                {
-                    await agent.StartAsync(ct);
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                {
-                    // Graceful shutdown
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Agent {AgentId} ({Role}) loop crashed",
-                        agent.Identity.Id, agent.Identity.Role);
-                }
-            }, ct);
-            _agentTasks.Add(agentTask);
-        }
-
-        _logger.LogInformation("All agent loops started. PM agent will orchestrate the workflow.");
-
-        // Keep alive until cancellation — agents run as background tasks
+        // Keep alive until cancellation — agents run as background tasks started by SpawnAgentAsync
         try
         {
             await Task.Delay(Timeout.Infinite, ct);
         }
         catch (OperationCanceledException)
         {
-            _logger.LogInformation("AgentSquad shutting down, waiting for agent loops...");
-            await Task.WhenAll(_agentTasks).WaitAsync(TimeSpan.FromSeconds(10));
+            _logger.LogInformation("AgentSquad shutting down...");
         }
     }
 }

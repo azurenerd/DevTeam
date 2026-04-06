@@ -489,6 +489,10 @@ public class GitHubService : IGitHubService
             await _client.Git.Reference.Create(_owner, _repo, newRef);
             _logger.LogInformation("Created branch {Branch} from {Source}", branchName, fromBranch);
         }
+        catch (ApiValidationException ex) when (ex.Message.Contains("Reference already exists", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("Branch {Branch} already exists, reusing", branchName);
+        }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to create branch {Branch}", branchName);
