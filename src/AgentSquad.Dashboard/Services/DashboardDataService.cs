@@ -37,11 +37,64 @@ public sealed record AgentSnapshot
     public decimal EstimatedCost { get; init; }
 }
 
+/// <summary>A point-in-time record of an agent's diagnostic justification.</summary>
+public sealed record DiagnosticHistoryEntry
+{
+    public required string AgentId { get; init; }
+    public required string AgentDisplayName { get; init; }
+    public required AgentRole Role { get; init; }
+    public required string Summary { get; init; }
+    public required string Justification { get; init; }
+    public required bool IsCompliant { get; init; }
+    public string? ComplianceIssue { get; init; }
+    public string? ScenarioRef { get; init; }
+    public required DateTime Timestamp { get; init; }
+}
+
+/// <summary>Overall execution health assessment for the Health Monitor page.</summary>
+public sealed record ExecutionHealthAssessment
+{
+    public required string OverallStatus { get; init; }
+    public required string Phase { get; init; }
+    public required TimeSpan Uptime { get; init; }
+    public required int TotalAgents { get; init; }
+    public required int WorkingAgents { get; init; }
+    public required int CompliantAgents { get; init; }
+    public required int NonCompliantAgents { get; init; }
+    public required int ErrorAgents { get; init; }
+    public required bool HasDeadlock { get; init; }
+    public required List<string> Observations { get; init; }
+    public required List<GateCondition> NextPhaseGates { get; init; }
+    public required List<PhaseTimelineEntry> PhaseTimeline { get; init; }
+}
+
+/// <summary>Entry in the phase progression timeline.</summary>
+public sealed record PhaseTimelineEntry
+{
+    public required string Phase { get; init; }
+    public required bool IsCompleted { get; init; }
+    public required bool IsCurrent { get; init; }
+    public DateTime? CompletedAt { get; init; }
+}
+
+/// <summary>A significant event in the execution flow, shown in the timeline flowchart.</summary>
+public sealed record ExecutionMilestone
+{
+    public required string Icon { get; init; }
+    public required string Title { get; init; }
+    public string? Detail { get; init; }
+    public required string Category { get; init; } // phase, document, pr, issues, review, test
+    public required DateTime Timestamp { get; init; }
+    public required bool IsCompleted { get; init; }
+    public string? AgentName { get; init; }
+}
+
 public sealed class DashboardDataService : BackgroundService
 {
     private readonly AgentRegistry _registry;
     private readonly HealthMonitor _healthMonitor;
     private readonly DeadlockDetector _deadlockDetector;
+    private readonly WorkflowStateMachine _workflow;
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentStateStore _stateStore;
     private readonly AgentChatService _chatService;
@@ -51,7 +104,13 @@ public sealed class DashboardDataService : BackgroundService
     private readonly Dictionary<string, AgentSnapshot> _agentCache = new();
     private readonly Dictionary<string, List<AgentLogEntry>> _agentErrors = new();
     private readonly Dictionary<string, IAgent> _trackedAgents = new();
+    private readonly List<DiagnosticHistoryEntry> _diagnosticHistory = new();
+    private readonly List<ExecutionMilestone> _milestones = new();
+    private readonly HashSet<string> _recordedMilestoneKeys = new();
     private readonly object _cacheLock = new();
+    private readonly DateTime _startedAt = DateTime.UtcNow;
+
+    private const int MaxDiagnosticHistory = 500;
 
     private AgentHealthSnapshot? _lastHealthSnapshot;
 
@@ -59,6 +118,7 @@ public sealed class DashboardDataService : BackgroundService
         AgentRegistry registry,
         HealthMonitor healthMonitor,
         DeadlockDetector deadlockDetector,
+        WorkflowStateMachine workflow,
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
         AgentChatService chatService,
@@ -68,6 +128,7 @@ public sealed class DashboardDataService : BackgroundService
         _registry = registry;
         _healthMonitor = healthMonitor;
         _deadlockDetector = deadlockDetector;
+        _workflow = workflow;
         _modelRegistry = modelRegistry;
         _stateStore = stateStore;
         _chatService = chatService;
@@ -80,7 +141,9 @@ public sealed class DashboardDataService : BackgroundService
         _registry.AgentRegistered += OnAgentRegistered;
         _registry.AgentUnregistered += OnAgentUnregistered;
         _registry.AgentStatusChanged += OnAgentStatusChanged;
+        _workflow.PhaseChanged += OnPhaseChanged;
 
+        RecordMilestone("🚀", "Session Started", "AgentSquad pipeline initialized", "phase");
         SeedCache();
 
         _logger.LogInformation("Dashboard data service started");
@@ -102,6 +165,7 @@ public sealed class DashboardDataService : BackgroundService
             _registry.AgentRegistered -= OnAgentRegistered;
             _registry.AgentUnregistered -= OnAgentUnregistered;
             _registry.AgentStatusChanged -= OnAgentStatusChanged;
+            _workflow.PhaseChanged -= OnPhaseChanged;
         }
     }
 
@@ -266,6 +330,18 @@ public sealed class DashboardDataService : BackgroundService
             NewStatus = e.NewStatus.ToString(),
             e.Reason
         });
+
+        // Detect milestones from status reason text
+        if (!string.IsNullOrEmpty(e.Reason))
+        {
+            DetectActivityMilestone(new AgentActivityEventArgs
+            {
+                AgentId = e.Agent.Id,
+                EventType = "status",
+                Details = e.Reason
+            });
+        }
+
         NotifyStateChanged();
     }
 
@@ -304,6 +380,24 @@ public sealed class DashboardDataService : BackgroundService
                     DiagnosticComplianceIssue = e.Diagnostic.ComplianceIssue,
                     DiagnosticScenarioRef = e.Diagnostic.ScenarioRef
                 };
+
+                // Record to diagnostic history feed
+                _diagnosticHistory.Add(new DiagnosticHistoryEntry
+                {
+                    AgentId = e.AgentId,
+                    AgentDisplayName = snapshot.DisplayName,
+                    Role = snapshot.Role,
+                    Summary = e.Diagnostic.Summary,
+                    Justification = e.Diagnostic.Justification,
+                    IsCompliant = e.Diagnostic.IsCompliant,
+                    ComplianceIssue = e.Diagnostic.ComplianceIssue,
+                    ScenarioRef = e.Diagnostic.ScenarioRef,
+                    Timestamp = e.Diagnostic.Timestamp
+                });
+
+                // Trim history to prevent unbounded growth
+                if (_diagnosticHistory.Count > MaxDiagnosticHistory)
+                    _diagnosticHistory.RemoveRange(0, _diagnosticHistory.Count - MaxDiagnosticHistory);
             }
         }
 
@@ -332,12 +426,151 @@ public sealed class DashboardDataService : BackgroundService
                 e.Details,
                 Timestamp = DateTime.UtcNow
             });
+
+            // Detect milestones from activity events
+            DetectActivityMilestone(e);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to persist activity log for agent {AgentId}", e.AgentId);
         }
     }
+
+    private void OnPhaseChanged(object? sender, PhaseTransitionEventArgs e)
+    {
+        var phaseIcon = e.NewPhase switch
+        {
+            ProjectPhase.Research => "🔬",
+            ProjectPhase.Architecture => "🏗️",
+            ProjectPhase.EngineeringPlanning => "📋",
+            ProjectPhase.ParallelDevelopment => "⚙️",
+            ProjectPhase.Testing => "🧪",
+            ProjectPhase.Review => "🔍",
+            ProjectPhase.Completion => "🎉",
+            _ => "▶️"
+        };
+
+        RecordMilestone(phaseIcon, $"{FormatPhase(e.NewPhase)} Phase Started",
+            e.Reason, "phase");
+    }
+
+    private void DetectActivityMilestone(AgentActivityEventArgs e)
+    {
+        var details = e.Details ?? "";
+        var detailsLower = details.ToLowerInvariant();
+        string? agentName;
+        lock (_cacheLock)
+        {
+            agentName = _agentCache.TryGetValue(e.AgentId, out var snap) ? snap.DisplayName : e.AgentId;
+        }
+
+        // Detect PR creation
+        if (detailsLower.Contains("created pr") || detailsLower.Contains("opened pr") ||
+            (e.EventType == "status" && detailsLower.Contains("pr #") && detailsLower.Contains("creat")))
+        {
+            var prRef = ExtractPrRef(details);
+            RecordMilestone("📝", $"PR {prRef} Created",
+                $"{agentName}: {TruncateDetail(details)}", "pr", agentName);
+        }
+
+        // Detect PR merge
+        if (detailsLower.Contains("merged") && detailsLower.Contains("pr"))
+        {
+            var prRef = ExtractPrRef(details);
+            RecordMilestone("✅", $"PR {prRef} Merged",
+                $"{agentName}: {TruncateDetail(details)}", "pr", agentName);
+        }
+
+        // Detect document creation/updates
+        if (detailsLower.Contains("research.md"))
+        {
+            RecordMilestone("📄", "Research.md Created",
+                $"{agentName} produced the research document", "document", agentName);
+        }
+        if (detailsLower.Contains("pmspec.md"))
+        {
+            RecordMilestone("📋", "PMSpec.md Created",
+                $"{agentName} produced the PM specification", "document", agentName);
+        }
+        if (detailsLower.Contains("architecture.md") && !detailsLower.Contains("marker"))
+        {
+            RecordMilestone("🏛️", "Architecture.md Created",
+                $"{agentName} produced the architecture document", "document", agentName);
+        }
+        if (detailsLower.Contains("engineeringplan.md") && !detailsLower.Contains("marker"))
+        {
+            RecordMilestone("📐", "EngineeringPlan.md Created",
+                $"{agentName} produced the engineering plan", "document", agentName);
+        }
+
+        // Detect issue creation
+        if (detailsLower.Contains("created") && detailsLower.Contains("issue") &&
+            (detailsLower.Contains("user stor") || detailsLower.Contains("task")))
+        {
+            RecordMilestone("🎫", "User Story Issues Created",
+                $"{agentName}: {TruncateDetail(details)}", "issues", agentName);
+        }
+
+        // Detect review actions
+        if (detailsLower.Contains("approved") && detailsLower.Contains("pr"))
+        {
+            var prRef = ExtractPrRef(details);
+            RecordMilestone("👍", $"PR {prRef} Approved",
+                $"{agentName}: {TruncateDetail(details)}", "review", agentName);
+        }
+        if (detailsLower.Contains("changes requested") || detailsLower.Contains("requested changes"))
+        {
+            var prRef = ExtractPrRef(details);
+            RecordMilestone("🔄", $"Changes Requested on PR {prRef}",
+                $"{agentName}: {TruncateDetail(details)}", "review", agentName);
+        }
+
+        // Detect test actions
+        if (detailsLower.Contains("test") && (detailsLower.Contains("created") || detailsLower.Contains("written")))
+        {
+            RecordMilestone("🧪", "Tests Written",
+                $"{agentName}: {TruncateDetail(details)}", "test", agentName);
+        }
+    }
+
+    private void RecordMilestone(string icon, string title, string? detail, string category, string? agentName = null)
+    {
+        var key = $"{category}:{title}";
+        lock (_cacheLock)
+        {
+            if (!_recordedMilestoneKeys.Add(key))
+                return; // Already recorded
+
+            _milestones.Add(new ExecutionMilestone
+            {
+                Icon = icon,
+                Title = title,
+                Detail = detail,
+                Category = category,
+                Timestamp = DateTime.UtcNow,
+                IsCompleted = true,
+                AgentName = agentName
+            });
+        }
+    }
+
+    /// <summary>Get the execution timeline milestones, oldest first.</summary>
+    public IReadOnlyList<ExecutionMilestone> GetExecutionTimeline()
+    {
+        lock (_cacheLock)
+        {
+            return _milestones.OrderBy(m => m.Timestamp).ToList();
+        }
+    }
+
+    private static string ExtractPrRef(string text)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(text, @"#(\d+)");
+        return match.Success ? $"#{match.Groups[1].Value}" : "";
+    }
+
+    private static string TruncateDetail(string text) =>
+        text.Length > 120 ? text[..117] + "…" : text;
 
     private void OnAgentErrorsChanged(object? sender, EventArgs e)
     {
@@ -435,6 +668,151 @@ public sealed class DashboardDataService : BackgroundService
 
     /// <summary>Clear the chat history for an agent.</summary>
     public void ClearAgentChat(string agentId) => _chatService.ClearHistory(agentId);
+
+    /// <summary>Get the diagnostic justification history feed, newest first.</summary>
+    public IReadOnlyList<DiagnosticHistoryEntry> GetDiagnosticHistory(
+        string? agentIdFilter = null, bool? compliantFilter = null, int limit = 200)
+    {
+        lock (_cacheLock)
+        {
+            IEnumerable<DiagnosticHistoryEntry> query = _diagnosticHistory;
+
+            if (agentIdFilter is not null)
+                query = query.Where(e => e.AgentId == agentIdFilter);
+            if (compliantFilter.HasValue)
+                query = query.Where(e => e.IsCompliant == compliantFilter.Value);
+
+            return query.OrderByDescending(e => e.Timestamp).Take(limit).ToList();
+        }
+    }
+
+    /// <summary>Build the overall execution health assessment.</summary>
+    public ExecutionHealthAssessment GetExecutionHealthAssessment()
+    {
+        var snapshot = _lastHealthSnapshot ?? _healthMonitor.GetSnapshot();
+        var hasDeadlock = _deadlockDetector.HasDeadlock(out var deadlockCycle);
+        var currentPhase = _workflow.CurrentPhase;
+        var gates = _workflow.GetCurrentGates();
+        var transitionHistory = _workflow.GetTransitionHistory();
+
+        List<AgentSnapshot> agents;
+        lock (_cacheLock) { agents = _agentCache.Values.ToList(); }
+
+        var workingCount = agents.Count(a => a.Status == AgentStatus.Working);
+        var compliantCount = agents.Count(a => a.DiagnosticCompliant);
+        var nonCompliantCount = agents.Count(a => !a.DiagnosticCompliant);
+        var errorCount = agents.Count(a => a.ErrorCount > 0);
+
+        // Build observations
+        var observations = new List<string>();
+
+        // Phase assessment
+        observations.Add($"Workflow is in the **{FormatPhase(currentPhase)}** phase.");
+        if (transitionHistory.Count > 0)
+        {
+            var lastTransition = transitionHistory[^1];
+            var sinceTransition = DateTime.UtcNow - lastTransition.Timestamp;
+            observations.Add($"Entered current phase {FormatTimeAgo(sinceTransition)} ago.");
+        }
+
+        // Gate conditions
+        var metGates = gates.Count(g => g.IsMet);
+        var totalGates = gates.Count;
+        if (currentPhase < ProjectPhase.Completion)
+            observations.Add($"Next phase gates: {metGates}/{totalGates} met.");
+
+        // Agent health
+        if (nonCompliantCount > 0)
+        {
+            var ncAgents = agents.Where(a => !a.DiagnosticCompliant)
+                .Select(a => a.DisplayName);
+            observations.Add($"⚠️ {nonCompliantCount} agent(s) report non-compliant behavior: {string.Join(", ", ncAgents)}.");
+        }
+        else if (agents.Count > 0)
+        {
+            observations.Add("All agents report compliant behavior.");
+        }
+
+        if (hasDeadlock && deadlockCycle is not null)
+            observations.Add($"🔴 Deadlock detected involving: {string.Join(" → ", deadlockCycle)}.");
+
+        if (errorCount > 0)
+        {
+            var errAgents = agents.Where(a => a.ErrorCount > 0)
+                .Select(a => $"{a.DisplayName} ({a.ErrorCount})");
+            observations.Add($"⚠️ {errorCount} agent(s) have errors: {string.Join(", ", errAgents)}.");
+        }
+
+        // Working agents
+        if (workingCount > 0)
+        {
+            var workingNames = agents.Where(a => a.Status == AgentStatus.Working)
+                .Select(a => a.DisplayName);
+            observations.Add($"Currently working: {string.Join(", ", workingNames)}.");
+        }
+        else
+        {
+            observations.Add("No agents are currently working — all idle or waiting.");
+        }
+
+        // Blocked agents
+        var blockedAgents = agents.Where(a => a.Status == AgentStatus.Blocked).ToList();
+        if (blockedAgents.Count > 0)
+        {
+            var blocked = blockedAgents.Select(a => $"{a.DisplayName}: {a.StatusReason ?? "unknown"}");
+            observations.Add($"🟡 Blocked agents: {string.Join("; ", blocked)}.");
+        }
+
+        // Overall status determination
+        var overallStatus = "Healthy";
+        if (hasDeadlock) overallStatus = "Critical";
+        else if (nonCompliantCount > 0 || blockedAgents.Count > 0) overallStatus = "Warning";
+        else if (errorCount > 0) overallStatus = "Caution";
+
+        // Build phase timeline
+        var allPhases = Enum.GetValues<ProjectPhase>();
+        var completedTransitions = transitionHistory
+            .GroupBy(t => t.OldPhase)
+            .ToDictionary(g => g.Key, g => g.OrderBy(t => t.Timestamp).Last().Timestamp);
+
+        var timeline = allPhases.Select(p => new PhaseTimelineEntry
+        {
+            Phase = FormatPhase(p),
+            IsCompleted = p < currentPhase,
+            IsCurrent = p == currentPhase,
+            CompletedAt = completedTransitions.GetValueOrDefault(p)
+        }).ToList();
+
+        return new ExecutionHealthAssessment
+        {
+            OverallStatus = overallStatus,
+            Phase = FormatPhase(currentPhase),
+            Uptime = DateTime.UtcNow - _startedAt,
+            TotalAgents = agents.Count,
+            WorkingAgents = workingCount,
+            CompliantAgents = compliantCount,
+            NonCompliantAgents = nonCompliantCount,
+            ErrorAgents = errorCount,
+            HasDeadlock = hasDeadlock,
+            Observations = observations,
+            NextPhaseGates = gates.ToList(),
+            PhaseTimeline = timeline
+        };
+    }
+
+    private static string FormatPhase(ProjectPhase phase) => phase switch
+    {
+        ProjectPhase.EngineeringPlanning => "Engineering Planning",
+        ProjectPhase.ParallelDevelopment => "Parallel Development",
+        _ => phase.ToString()
+    };
+
+    private static string FormatTimeAgo(TimeSpan ts)
+    {
+        if (ts.TotalHours >= 1) return $"{(int)ts.TotalHours}h {ts.Minutes}m";
+        if (ts.TotalMinutes >= 1) return $"{ts.Minutes}m {ts.Seconds}s";
+        return $"{ts.Seconds}s";
+    }
 
     // Observable event for Blazor components to subscribe to for re-rendering
     public event Action? OnChange;
