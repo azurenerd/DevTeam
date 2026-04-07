@@ -1160,17 +1160,40 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
             var engineeringPlan = await ProjectFiles.GetEngineeringPlanAsync(ct);
 
+            // Read the linked issue for acceptance criteria
+            var issueContext = "";
+            var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            if (issueNumber.HasValue)
+            {
+                try
+                {
+                    var issue = await GitHub.GetIssueAsync(issueNumber.Value, ct);
+                    if (issue is not null)
+                        issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Could not fetch linked issue #{Number} for PE review", issueNumber.Value);
+                }
+            }
+
+            // Read actual code files from the PR branch
+            var codeContext = await PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a Principal Engineer reviewing a pull request for technical quality " +
                 "and alignment with the architecture and engineering plan.\n\n" +
                 "IMPORTANT: This PR is ONE TASK — it is NOT expected to cover the entire project. " +
                 "Review it ONLY against its own stated description and acceptance criteria.\n\n" +
+                "You will be given the architecture, PM spec, engineering plan, the linked user story, " +
+                "AND the actual code files. Review the ACTUAL CODE — not just the PR description.\n\n" +
                 "Evaluate:\n" +
-                "1. Does the code follow the architecture patterns?\n" +
-                "2. Is the implementation complete for this task's scope?\n" +
-                "3. Code quality, error handling, edge cases\n" +
-                "4. Test coverage\n\n" +
+                "1. Does the code follow the architecture patterns and component boundaries?\n" +
+                "2. Is the implementation complete for this task's scope and acceptance criteria?\n" +
+                "3. Code quality: error handling, edge cases, naming, structure\n" +
+                "4. Are there any bugs, logic errors, or missing validation?\n" +
+                "5. Test coverage: are there tests, and do they cover key scenarios?\n\n" +
                 "End your review with exactly one of:\n" +
                 "VERDICT: APPROVE\n" +
                 "VERDICT: REQUEST_CHANGES");
@@ -1179,7 +1202,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 $"## Architecture\n{architectureDoc}\n\n" +
                 $"## PM Specification\n{pmSpec}\n\n" +
                 $"## Engineering Plan\n{engineeringPlan}\n\n" +
-                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}");
+                issueContext +
+                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}\n\n" +
+                codeContext);
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 

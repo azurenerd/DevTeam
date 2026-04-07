@@ -5,6 +5,7 @@ using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -34,6 +35,7 @@ public class TestEngineerAgent : AgentBase
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
     private readonly PullRequestWorkflow _prWorkflow;
+    private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentSquadConfig _config;
 
@@ -48,6 +50,7 @@ public class TestEngineerAgent : AgentBase
         IMessageBus messageBus,
         IGitHubService github,
         PullRequestWorkflow prWorkflow,
+        ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
         IOptions<AgentSquadConfig> config,
         ILogger<AgentBase> logger)
@@ -56,6 +59,7 @@ public class TestEngineerAgent : AgentBase
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
+        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
@@ -272,7 +276,8 @@ public class TestEngineerAgent : AgentBase
 
     /// <summary>
     /// Uses AI to generate real, runnable test code for the source files in a merged PR.
-    /// The prompt includes the actual file contents so the AI writes tests against real code.
+    /// Gathers full business context (linked issue, PMSpec, Architecture) so tests validate
+    /// acceptance criteria and business goals — not just structural code coverage.
     /// </summary>
     private async Task<string> GenerateTestCodeAsync(
         AgentPullRequest pr, Dictionary<string, string> sourceFiles, CancellationToken ct)
@@ -281,12 +286,20 @@ public class TestEngineerAgent : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
         var techStack = _config.Project.TechStack;
 
+        // Gather business context: linked issue, PMSpec, Architecture
+        var businessContext = await GatherBusinessContextAsync(pr, ct);
+
         var history = new ChatHistory();
         history.AddSystemMessage(
             $"You are an expert test engineer writing tests for a {techStack} project.\n\n" +
             "Your job is to generate REAL, RUNNABLE test code — not documentation or test plans.\n" +
             "Write actual test files that can be compiled and executed.\n\n" +
+            "You will be given:\n" +
+            "- The business requirements (user story and acceptance criteria) this code must satisfy\n" +
+            "- The PM specification and architecture for broader project context\n" +
+            "- The actual source code files to test\n\n" +
             "Guidelines:\n" +
+            "- Write acceptance tests that verify the user story and acceptance criteria are met\n" +
             "- Write unit tests for individual functions, methods, and classes\n" +
             "- Write integration tests for component interactions where applicable\n" +
             "- Write UI/rendering tests for frontend components where applicable\n" +
@@ -295,7 +308,8 @@ public class TestEngineerAgent : AgentBase
             "- Include proper imports, test class setup, and assertions\n" +
             "- Test happy paths, edge cases, and error conditions\n" +
             "- Use mocks/stubs for external dependencies\n" +
-            "- Place test files in a `tests/` directory mirroring the source structure\n\n" +
+            "- Place test files in a `tests/` directory mirroring the source structure\n" +
+            "- Prioritize testing business behavior over implementation details\n\n" +
             "Output each test file using this exact format:\n\n" +
             "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
             "Every file MUST use the FILE: marker format so it can be parsed and committed.");
@@ -317,13 +331,87 @@ public class TestEngineerAgent : AgentBase
         history.AddUserMessage(
             $"## Merged PR #{pr.Number}: {pr.Title}\n\n" +
             $"## PR Description\n{pr.Body}\n\n" +
+            businessContext +
             sourceContext.ToString() +
             $"\nGenerate comprehensive test files for the above source code using {techStack}. " +
-            "Focus on testing the actual implementation — functions, classes, components, " +
-            "and their behavior. Include edge cases and error handling.");
+            "Write tests that verify both the acceptance criteria from the user story AND " +
+            "the technical implementation. Ensure the business goals are testable and tested. " +
+            "Include edge cases and error handling.");
 
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
         return response.Content?.Trim() ?? "";
+    }
+
+    /// <summary>
+    /// Gathers business context from the linked issue, PMSpec.md, and Architecture.md
+    /// so the AI can write tests that validate acceptance criteria — not just code structure.
+    /// </summary>
+    private async Task<string> GatherBusinessContextAsync(AgentPullRequest pr, CancellationToken ct)
+    {
+        var context = new System.Text.StringBuilder();
+
+        // 1. Parse linked issue from PR body ("Closes #NNN")
+        var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+        if (issueNumber.HasValue)
+        {
+            try
+            {
+                var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                if (issue is not null)
+                {
+                    context.AppendLine("## Linked Issue (User Story & Acceptance Criteria)");
+                    context.AppendLine($"**Issue #{issue.Number}:** {issue.Title}\n");
+                    context.AppendLine(issue.Body);
+                    context.AppendLine();
+                    Logger.LogDebug("Loaded linked issue #{Number} for test context", issueNumber.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Could not fetch linked issue #{Number}", issueNumber.Value);
+            }
+        }
+
+        // 2. Read PMSpec.md for business requirements
+        try
+        {
+            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            if (!string.IsNullOrWhiteSpace(pmSpec))
+            {
+                // Truncate to keep token budget reasonable
+                var truncated = pmSpec.Length > 6000
+                    ? pmSpec[..6000] + "\n\n<!-- truncated -->"
+                    : pmSpec;
+                context.AppendLine("## PM Specification (Business Requirements)");
+                context.AppendLine(truncated);
+                context.AppendLine();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not read PMSpec.md for test context");
+        }
+
+        // 3. Read Architecture.md for technical patterns and constraints
+        try
+        {
+            var archDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+            if (!string.IsNullOrWhiteSpace(archDoc))
+            {
+                var truncated = archDoc.Length > 4000
+                    ? archDoc[..4000] + "\n\n<!-- truncated -->"
+                    : archDoc;
+                context.AppendLine("## Architecture Document (Technical Patterns)");
+                context.AppendLine(truncated);
+                context.AppendLine();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not read Architecture.md for test context");
+        }
+
+        return context.ToString();
     }
 
     /// <summary>

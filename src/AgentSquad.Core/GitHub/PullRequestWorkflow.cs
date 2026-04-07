@@ -614,6 +614,77 @@ public partial class PullRequestWorkflow
         return "";
     }
 
+    private static readonly Regex ClosesIssuePattern = new(
+        @"[Cc]loses?\s+#(\d+)", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Parse linked issue number from PR body text (e.g., "Closes #108").
+    /// </summary>
+    public static int? ParseLinkedIssueNumber(string? prBody)
+    {
+        if (string.IsNullOrWhiteSpace(prBody))
+            return null;
+        var match = ClosesIssuePattern.Match(prBody);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var num) ? num : null;
+    }
+
+    /// <summary>
+    /// Reads the actual code files from a PR's changed file list and returns them as a
+    /// formatted context string suitable for inclusion in an AI review prompt.
+    /// Skips non-code files (markdown, images, config) and truncates large files.
+    /// </summary>
+    public async Task<string> GetPRCodeContextAsync(
+        int prNumber, string headBranch, int maxFileSizeChars = 8000, CancellationToken ct = default)
+    {
+        var changedFiles = await _github.GetPullRequestChangedFilesAsync(prNumber, ct);
+        if (changedFiles.Count == 0)
+            return "";
+
+        var codeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rs",
+            ".razor", ".blazor", ".vue", ".svelte", ".rb", ".php", ".swift", ".kt",
+            ".css", ".scss", ".html", ".json"
+        };
+
+        var codeFiles = changedFiles
+            .Where(f => codeExtensions.Contains(Path.GetExtension(f)))
+            .ToList();
+
+        if (codeFiles.Count == 0)
+            return "";
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("## Code Files Changed in This PR\n");
+
+        foreach (var filePath in codeFiles)
+        {
+            try
+            {
+                var content = await _github.GetFileContentAsync(filePath, headBranch, ct);
+                if (string.IsNullOrWhiteSpace(content))
+                    continue;
+
+                var ext = Path.GetExtension(filePath).TrimStart('.');
+                var truncated = content.Length > maxFileSizeChars
+                    ? content[..maxFileSizeChars] + "\n// ... (truncated)"
+                    : content;
+
+                sb.AppendLine($"### {filePath}");
+                sb.AppendLine($"```{ext}");
+                sb.AppendLine(truncated);
+                sb.AppendLine("```\n");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Could not read {Path} from branch {Branch} for review context",
+                    filePath, headBranch);
+            }
+        }
+
+        return sb.ToString();
+    }
+
     /// <summary>
     /// Post a changes-requested comment on a PR.
     /// </summary>

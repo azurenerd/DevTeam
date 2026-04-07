@@ -486,17 +486,44 @@ public class ArchitectAgent : AgentBase
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+
+            // Read the linked issue for acceptance criteria
+            var issueContext = "";
+            var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            if (issueNumber.HasValue)
+            {
+                try
+                {
+                    var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                    if (issue is not null)
+                        issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Could not fetch linked issue #{Number} for architecture review", issueNumber.Value);
+                }
+            }
+
+            // Read actual code files from the PR branch
+            var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a software architect reviewing a pull request for alignment with " +
-                "the project's architecture document.\n\n" +
+                "the project's architecture document and PM specification.\n\n" +
                 "IMPORTANT: This PR implements ONE TASK from the Engineering Plan — it is NOT expected " +
                 "to cover the entire architecture. Review ONLY whether the components and patterns " +
                 "used in this PR follow the architectural decisions and boundaries for the parts it " +
                 "touches. Do NOT flag missing features that belong to other tasks.\n\n" +
-                "Evaluate whether the PR's scope, approach, and design follow the architectural " +
-                "decisions and component boundaries. Be concise and actionable.\n\n" +
+                "You will be given the architecture doc, PM spec, the linked user story, AND the " +
+                "actual code files. Review the ACTUAL CODE — not just the PR description.\n\n" +
+                "Evaluate:\n" +
+                "1. Does the code follow the architectural patterns, component boundaries, and tech stack?\n" +
+                "2. Are the file/folder structures consistent with the architecture?\n" +
+                "3. Does the implementation align with the business requirements for this task?\n" +
+                "4. Are there architectural anti-patterns or violations?\n\n" +
+                "Be concise and actionable.\n\n" +
                 "You MUST start your response with exactly one of these two verdicts on the first line:\n" +
                 "APPROVED — if the PR aligns with the architecture (minor suggestions are fine)\n" +
                 "REWORK — if there are significant architectural deviations that must be fixed\n\n" +
@@ -505,7 +532,10 @@ public class ArchitectAgent : AgentBase
 
             history.AddUserMessage(
                 $"## Architecture Document\n{architectureDoc}\n\n" +
-                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}");
+                $"## PM Specification\n{pmSpec}\n\n" +
+                issueContext +
+                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}\n\n" +
+                codeContext);
 
             var response = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);

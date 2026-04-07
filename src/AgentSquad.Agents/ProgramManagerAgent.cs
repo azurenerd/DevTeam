@@ -1380,6 +1380,26 @@ public class ProgramManagerAgent : AgentBase
             var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
             var engineeringPlan = await _projectFiles.GetEngineeringPlanAsync(ct);
 
+            // Read the linked issue for acceptance criteria
+            var issueContext = "";
+            var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            if (issueNumber.HasValue)
+            {
+                try
+                {
+                    var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                    if (issue is not null)
+                        issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Could not fetch linked issue #{Number} for PM review", issueNumber.Value);
+                }
+            }
+
+            // Read actual code files from the PR branch
+            var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a Program Manager reviewing a pull request for alignment with " +
@@ -1388,11 +1408,14 @@ public class ProgramManagerAgent : AgentBase
                 "cover the entire PM Spec or Architecture. Review it ONLY against its own stated " +
                 "description, acceptance criteria, and the specific task it addresses. Do NOT request " +
                 "changes because the PR doesn't implement features from other tasks.\n\n" +
+                "You will be given the PM spec, engineering plan, the linked user story, AND the " +
+                "actual code files. Review the ACTUAL CODE — not just the PR description.\n\n" +
                 "Evaluate:\n" +
-                "1. Does the PR fulfill its own stated description and acceptance criteria?\n" +
+                "1. Does the code fulfill the linked issue's acceptance criteria?\n" +
                 "2. Is the implementation consistent with the PM spec for the scope of THIS task?\n" +
                 "3. Are there any bugs, gaps, or missing edge cases within this task's scope?\n" +
-                "4. Does the approach make sense for the business goals?\n\n" +
+                "4. Does the approach make sense for the business goals?\n" +
+                "5. Does the code quality meet expectations for a production deliverable?\n\n" +
                 "Be constructive and specific with feedback.\n" +
                 "End your review with exactly one of these verdicts on a new line:\n" +
                 "VERDICT: APPROVE\n" +
@@ -1401,7 +1424,9 @@ public class ProgramManagerAgent : AgentBase
             history.AddUserMessage(
                 $"## PM Specification\n{pmSpec}\n\n" +
                 $"## Engineering Plan\n{engineeringPlan}\n\n" +
-                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}");
+                issueContext +
+                $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}\n\n" +
+                codeContext);
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 
