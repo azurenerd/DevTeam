@@ -41,8 +41,9 @@ public sealed partial class CliInteractiveWatchdog
             };
         }
 
-        // Auth/permission failures — fail fast
-        if (IsAuthFailure(trimmed))
+        // Auth/permission failures — fail fast, but only for short CLI error lines
+        // (not AI response content that might discuss auth concepts like "unauthorized access")
+        if (trimmed.Length < 200 && IsAuthFailure(trimmed))
         {
             return new WatchdogAction
             {
@@ -143,7 +144,7 @@ public sealed partial class CliInteractiveWatchdog
     private static bool IsCredentialPrompt(string line) =>
         CredentialPatternRegex().IsMatch(line);
 
-    [GeneratedRegex(@"(permission denied|unauthorized|authentication (failed|required)|not (logged|authenticated))", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(^error:.*permission denied|^error:.*unauthorized|^(401|403)\s|authentication (failed|required|error)|^not (logged in|authenticated)$|^access denied$)", RegexOptions.IgnoreCase)]
     private static partial Regex AuthFailurePatternRegex();
 
     private static bool IsAuthFailure(string line) =>

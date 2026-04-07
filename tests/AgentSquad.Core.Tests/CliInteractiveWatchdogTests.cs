@@ -72,16 +72,28 @@ public class CliInteractiveWatchdogTests
     }
 
     [Theory]
-    [InlineData("Permission denied")]
-    [InlineData("Unauthorized access")]
+    [InlineData("error: permission denied")]
+    [InlineData("error: unauthorized")]
     [InlineData("Authentication failed")]
     [InlineData("Not logged in")]
     [InlineData("Not authenticated")]
+    [InlineData("401 Unauthorized")]
+    [InlineData("access denied")]
     public void DetectsAuthFailures_FailsFast(string line)
     {
         var action = _watchdog.DetectPrompt(line);
         Assert.NotNull(action);
         Assert.Equal(WatchdogActionType.FailFast, action!.Type);
+    }
+
+    [Theory]
+    [InlineData("Handle unauthorized access by returning a 401 status code")]
+    [InlineData("The API should reject requests without permission and return forbidden")]
+    [InlineData("Users who are not authenticated should be redirected to the login page")]
+    public void DoesNotFalsePositiveOnAuthWords_InContent(string line)
+    {
+        var action = _watchdog.DetectPrompt(line);
+        Assert.Null(action);
     }
 
     [Theory]
