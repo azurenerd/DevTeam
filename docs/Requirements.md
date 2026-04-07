@@ -231,12 +231,15 @@ Each phase has gate conditions that must be met before advancing:
 
 - **REQ-ARCH-002a**: Architect subscribes to `ReviewRequestMessage`.
 - **REQ-ARCH-002b**: Reviews code PRs for architecture pattern compliance — scoped to the PR's own task, not the entire architecture.
+- **REQ-ARCH-002c**: Architect review reads Architecture.md + PMSpec.md + linked issue + actual code files from the PR branch.
+- **REQ-ARCH-002d**: Architect also reviews PE-authored PRs (part of the reviewer substitution when PE is the author — see REQ-REV-005).
+- **REQ-ARCH-002e**: Architect uses `NeedsReviewFromAsync` to prevent duplicate reviews across restarts.
 
 **Scenario: Architecture Phase**
 1. Architect receives PMSpecReady → reads PMSpec.md + Research.md
 2. Opens document PR → 5-turn AI conversation → produces Architecture.md
 3. Commits → auto-merges → broadcasts ArchitectureComplete
-4. Later: receives ReviewRequest for PR #34 → reviews code against architecture patterns → posts comment
+4. Later: receives ReviewRequest for PE's PR #37 → reads actual code files from branch + Architecture.md + PMSpec.md + linked issue → evaluates → posts APPROVED or REWORK comment
 
 ---
 
@@ -505,8 +508,8 @@ Each phase has gate conditions that must be met before advancing:
 
 **Scenario: Dual Review and Merge**
 1. Engineer marks PR #35 ready-for-review → broadcasts `ReviewRequestMessage`
-2. PM receives → queues PR #35 → next review loop: reads PR, AI evaluates against PMSpec scope → APPROVE → posts comment, checks if PE also approved → PE hasn't → waits
-3. PE receives → queues PR #35 → reads PR, AI evaluates against architecture → APPROVE → posts comment, checks if PM approved → PM has → triggers squash merge → deletes branch
+2. PM receives → queues PR #35 → next review loop: reads actual code files from branch + linked issue acceptance criteria + PMSpec → AI evaluates business alignment → APPROVE → posts comment, checks if PE also approved → PE hasn't → waits
+3. PE receives → queues PR #35 → reads actual code files + linked issue + Architecture + PMSpec + EngineeringPlan → AI evaluates technical quality → APPROVE → posts comment, checks if PM approved → PM has → triggers squash merge → deletes branch
 4. Issue #43 auto-closes because PR body contained "Closes #43"
 
 ---
@@ -730,11 +733,12 @@ Each phase has gate conditions that must be met before advancing:
 8. Junior reads Issue → creates PR → implements → marks ready-for-review
 9. Senior reads Issue → creates PR → implements → self-reviews → marks ready-for-review
 10. PE implements T3 → marks ready-for-review
-11. PM reviews Junior's PR → approves; PE reviews → approves → squash merge → branch deleted
+11. PM reviews Junior's PR (reads code, linked issue, PMSpec) → approves; PE reviews (reads code, architecture, plan) → approves → squash merge → branch deleted
 12. Senior's PR: PM approves, PE requests changes → Senior reworks → re-review → both approve → merge
-13. PE's PR: PM approves → PE can't self-review → PM merge triggers (only PM needed for PE PRs? — or PE uses separate reviewer)
+13. PE's PR: PM + Architect review (PE can't self-review) → both read actual code against PMSpec + Architecture → both approve → squash merge
 14. T1 complete → T4 depends on T1 → now assignable → PE assigns T4 to Junior
-15. All tasks complete → signals engineering complete → Testing phase
+15. Test Engineer scans merged PRs → generates tests for Junior's PR with full business context (linked issue + PMSpec + Architecture) → creates test PR → PE reviews test PR → approve → merge
+16. All tasks complete → PE creates integration PR → PM + Architect review → merge → Completion phase
 ```
 
 ### Scenario B: Clarification Loop with Multiple Rounds
@@ -766,14 +770,31 @@ Each phase has gate conditions that must be met before advancing:
 ### Scenario D: System Restart Mid-Work
 
 ```
-1. State before crash: PE has plan with 5 tasks, T1 assigned to Junior (PR #36 in-progress), T2 assigned to Senior (PR #35 ready-for-review), T3 PE working (PR #37 in-progress)
+1. State before crash: PE has plan with 5 tasks, T1 assigned to Junior (PR #36 in-progress),
+   T2 assigned to Senior (PR #35 ready-for-review, PM CHANGES_REQUESTED), T3 PE working (PR #37 in-progress)
 2. System restarts → PM reads TeamMembers.md → spawns Junior + Senior
-3. PE reads EngineeringPlan.md → restores 5 tasks → enters dev loop
+3. PE reads EngineeringPlan.md → restores 5 tasks → reconciles against merged PRs → enters dev loop
 4. Junior starts → finds PR #36 (in-progress, no ready-for-review label) → calls WorkOnExistingPrAsync → re-implements
 5. Senior starts → finds PR #35 (ready-for-review) → re-tracks it (CurrentPrNumber=35) → waits for rework/new assignment
-6. PE starts → _agentAssignments empty → finds Junior free → Issue for T1 still open → re-assigns
-7. PE finds Senior free → Issue for T2 still open → re-assigns
-8. PE finds T3 (own task) needs work → re-creates PR or finds existing → continues
+6. PE starts → recovers own PRs: finds PR #37 (in-progress) → continues work on it
+7. PE recovers ready-for-review PRs: checks PR #35 GitHub comments → finds PM CHANGES_REQUESTED →
+   populates ReworkQueue (does NOT re-broadcast ReviewRequest) → Senior picks up rework
+8. PE loop: _agentAssignments empty → re-checks which engineers are free → re-assigns unfinished tasks
+9. Test Engineer starts → _testedPRs empty → checks source PRs for "tested" label → repopulates dedup set
+10. Test Engineer finds its own open test PR #38 → checks comments → no reviews → re-requests PE review
+```
+
+### Scenario D2: Restart After PE's Own PR Gets CHANGES_REQUESTED
+
+```
+1. State before crash: PE has PR #37 (ready-for-review), PM posted CHANGES_REQUESTED, Architect APPROVED
+2. Bus message (ChangesRequestedMessage) is lost — in-memory only, no durability
+3. System restarts → PE's ReworkQueue is empty (lost)
+4. PE recovery: finds PR #37 with ready-for-review label → calls GetPendingChangesRequestedAsync
+5. Reads GitHub comments → finds PM's unaddressed CHANGES_REQUESTED → populates ReworkQueue directly
+6. PE processes rework: reads feedback → AI fixes → commits → re-marks ready-for-review → re-broadcasts ReviewRequestMessage
+7. PM receives ReviewRequest → re-reviews → APPROVE
+8. Both reviewers approved → PE auto-merges own PR
 ```
 
 ### Scenario E: Resource Scaling Under Load
@@ -816,6 +837,66 @@ Each phase has gate conditions that must be met before advancing:
 4. AI reads feedback + original source + existing test code → generates additional error handling tests
 5. Commits fixes → re-marks ready-for-review → sends ReviewRequestMessage
 6. PE re-reviews → APPROVE → merge → "tested" label applied to source PR #35
+```
+
+### Scenario H: PE-Authored PR Review (Reviewer Substitution)
+
+```
+1. PE implements T3 (High complexity) → creates PR #37 "PrincipalEngineer: Implement content schema"
+2. PE marks PR #37 ready-for-review → broadcasts ReviewRequestMessage
+3. GetRequiredReviewers("PrincipalEngineer") returns ["ProgramManager", "Architect"] (not PE + PM)
+4. PM receives ReviewRequest → reads PR #37 code files, linked issue, PMSpec → AI reviews → APPROVE
+5. Architect receives ReviewRequest → reads PR #37 code files, linked issue, Architecture.md + PMSpec → AI reviews → REWORK ("component should use shared interface from Architecture §4.2")
+6. PE receives ChangesRequestedMessage → enqueues rework → AI fixes → commits → re-marks ready
+7. Architect re-reviews → APPROVE; PM already approved → triggers squash merge
+```
+
+### Scenario I: Network Outage / Hibernate Recovery
+
+```
+1. PE is in middle of AI call generating code (copilot CLI process in-flight)
+2. User hibernates laptop → network drops → SSL/DNS errors
+3. In-flight copilot CLI process dies → AI call throws HttpRequestException
+4. PE catches exception → logs warning → retries after 5-second backoff → more SSL errors
+5. User resumes laptop → network restored → retries succeed
+6. BUT: any bus messages published during outage were delivered to dead agent threads
+7. HealthMonitor detects agents stuck for >60 minutes → logs warnings
+8. If manual restart is needed: recovery follows Scenario D (GitHub is source of truth, bus is volatile)
+```
+
+### Scenario J: Force-Approval After Max Rework Cycles
+
+```
+1. PM reviews Senior's PR #35 → CHANGES REQUESTED (round 1)
+2. Senior reworks → re-submits → PM reviews → CHANGES REQUESTED again (round 2)
+3. Senior reworks → re-submits → PM reviews → CHANGES REQUESTED again (round 3 = max)
+4. Senior: _reworkAttempts[35] == 3 → adds PR #35 to _forceApprovalPrs set → re-submits one more time
+5. PM receives ReviewRequest → checks _forceApprovalPrs → force-approves with note
+6. PE reviews → APPROVE → squash merge → prevents infinite rework loop
+```
+
+### Scenario K: Incremental Multi-Step Implementation
+
+```
+1. Senior Engineer reads Issue → AI produces implementation plan with 3 steps:
+   Step 1: "Create data models and DTOs" → Step 2: "Implement service layer" → Step 3: "Add controller endpoints"
+2. For each step: AI generates code → CodeFileParser extracts files → BatchCommitFilesAsync commits all files
+   in a single atomic commit per step (not one commit per file)
+3. PR accumulates 3 commits: "Step 1/3: Create data models (4 files)", "Step 2/3: Implement service layer (3 files)", etc.
+4. After final step → marks ready-for-review → ReviewRequestMessage
+5. Reviewers see clean commit history with logical groupings, not 10+ individual file commits
+```
+
+### Scenario L: Document Pipeline Idempotency on Restart
+
+```
+1. System ran to ParallelDevelopment phase, then crashes
+2. On restart: PM checks Research.md → has content → skips research kickoff
+3. PM checks PMSpec.md → has content → skips PMSpec creation → still broadcasts PMSpecReady
+4. PM checks Enhancement Issues → exist → skips Issue creation → re-sends PlanningCompleteMessage
+5. Architect checks Architecture.md → has content → skips design → enters review mode
+6. PE checks EngineeringPlan.md → has content → restores task backlog → enters development loop
+7. ALL downstream signals are still sent even when skipping creation, so dependent agents proceed
 ```
 
 ---
