@@ -1,4 +1,5 @@
 using AgentSquad.Core.AI;
+using AgentSquad.Core.Configuration;
 using Microsoft.SemanticKernel.ChatCompletion;
 
 namespace AgentSquad.Core.Tests;
@@ -13,7 +14,7 @@ public class CopilotCliChatCompletionServiceTests
 
         var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history);
 
-        Assert.Contains("[IMPORTANT DIRECTIVE]", prompt);
+        Assert.Contains("[CRITICAL DIRECTIVE", prompt);
         Assert.Contains("Write a hello world program.", prompt);
     }
 
@@ -49,6 +50,7 @@ public class CopilotCliChatCompletionServiceTests
         Assert.Contains("[ASSISTANT]: Here is my design for X...", prompt);
         Assert.Contains("[USER]: Now add caching.", prompt);
         Assert.Contains("[INSTRUCTION]:", prompt);
+        Assert.Contains("[REMINDER]:", prompt);
     }
 
     [Fact]
@@ -56,7 +58,7 @@ public class CopilotCliChatCompletionServiceTests
     {
         var history = new ChatHistory();
         var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history);
-        Assert.Contains("[IMPORTANT DIRECTIVE]", prompt);
+        Assert.Contains("[CRITICAL DIRECTIVE", prompt);
     }
 
     [Fact]
@@ -83,5 +85,55 @@ public class CopilotCliChatCompletionServiceTests
 
         Assert.Contains("You are a developer.", prompt);
         Assert.Contains("Follow clean code principles.", prompt);
+    }
+
+    [Fact]
+    public void FormatChatHistory_FastMode_InjectsBrevityConstraint()
+    {
+        var history = new ChatHistory();
+        history.AddUserMessage("Write a document.");
+
+        var config = new CopilotCliConfig { FastMode = true };
+        var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history, config);
+
+        Assert.Contains("[SPEED MODE", prompt);
+        Assert.Contains("500 words", prompt);
+    }
+
+    [Fact]
+    public void FormatChatHistory_NormalMode_NoBrevityConstraint()
+    {
+        var history = new ChatHistory();
+        history.AddUserMessage("Write a document.");
+
+        var config = new CopilotCliConfig { FastMode = false };
+        var prompt = CopilotCliChatCompletionService.FormatChatHistoryAsPrompt(history, config);
+
+        Assert.DoesNotContain("[SPEED MODE", prompt);
+    }
+
+    [Fact]
+    public void StripMetaCommentary_MetaPrefixWithHeading_ExtractsContent()
+    {
+        var response = "I've created the PMSpec document. Here it is:\n\n# PM Specification\n\n## Executive Summary\nWe are building a dashboard.";
+        var stripped = CopilotCliChatCompletionService.StripMetaCommentary(response);
+        Assert.StartsWith("# PM Specification", stripped);
+    }
+
+    [Fact]
+    public void StripMetaCommentary_CleanContent_ReturnsUnchanged()
+    {
+        var response = "# Architecture Document\n\n## Overview\nThis is the architecture.";
+        var stripped = CopilotCliChatCompletionService.StripMetaCommentary(response);
+        Assert.Equal(response, stripped);
+    }
+
+    [Fact]
+    public void StripMetaCommentary_TrailingMeta_RemovesTrailing()
+    {
+        var response = "# Document\n\nContent here.\n\nThe file has been saved to the session-state folder.";
+        var stripped = CopilotCliChatCompletionService.StripMetaCommentary(response);
+        Assert.DoesNotContain("session-state", stripped);
+        Assert.Contains("Content here.", stripped);
     }
 }

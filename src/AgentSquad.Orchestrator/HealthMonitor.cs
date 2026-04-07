@@ -181,49 +181,68 @@ public class HealthMonitor : IHostedService, IDisposable
                   .Any(a => keywords.Any(k =>
                       (a.StatusReason ?? "").Contains(k, StringComparison.OrdinalIgnoreCase)));
 
+        // Helper: is a downstream agent working? If so, predecessor phases are implicitly done.
+        bool IsDownstreamWorking(AgentRole role) =>
+            agents.Where(a => a.Identity.Role == role)
+                  .Any(a => a.Status == AgentStatus.Working &&
+                       !(a.StatusReason ?? "").Contains("Waiting for", StringComparison.OrdinalIgnoreCase));
+
         var phase = _workflow.CurrentPhase;
 
-        // Initialization → Research: PM must be online
-        // (gate already checks agent status directly, no signal needed)
-
-        // Research phase signals
-        if (phase == ProjectPhase.Research || !_workflow.HasSignal(WorkflowStateMachine.Signals.ResearchComplete))
+        // --- Research phase signals ---
+        // Infer research done if: Researcher status says complete/monitoring, OR
+        // the PM is writing PMSpec (downstream activity proves research merged),
+        // OR the Architect is already working on architecture
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.ResearchComplete))
         {
-            if (HasReasonContaining(AgentRole.Researcher, "research complete", "monitoring", "complete"))
+            bool researchDone =
+                HasReasonContaining(AgentRole.Researcher, "research complete", "monitoring", "complete", "waiting for research directives") ||
+                HasReasonContaining(AgentRole.ProgramManager, "pmspec", "pm spec", "specification", "writing spec", "kickoff complete", "monitoring team") ||
+                IsDownstreamWorking(AgentRole.Architect);
+
+            if (researchDone)
             {
                 SignalIfNew(WorkflowStateMachine.Signals.ResearchDocReady);
                 SignalIfNew(WorkflowStateMachine.Signals.ResearchComplete);
             }
         }
 
-        // Architecture phase signals
-        if (phase == ProjectPhase.Architecture || !_workflow.HasSignal(WorkflowStateMachine.Signals.ArchitectureComplete))
+        // --- Architecture phase signals ---
+        // Infer architecture done if: Architect says complete, OR PE is actively working
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.ArchitectureComplete))
         {
-            if (HasReasonContaining(AgentRole.Architect, "architecture complete", "monitoring pr", "complete"))
+            bool archDone =
+                HasReasonContaining(AgentRole.Architect, "architecture complete", "monitoring pr", "complete") ||
+                IsDownstreamWorking(AgentRole.PrincipalEngineer);
+
+            if (archDone)
             {
                 SignalIfNew(WorkflowStateMachine.Signals.ArchitectureDocReady);
                 SignalIfNew(WorkflowStateMachine.Signals.ArchitectureComplete);
             }
         }
 
-        // Engineering Planning signals
-        if (phase == ProjectPhase.EngineeringPlanning || !_workflow.HasSignal(WorkflowStateMachine.Signals.EngineeringPlanReady))
+        // --- Engineering Planning signals ---
+        // Infer plan ready if: PE has issues/PRs, OR any engineers are spawned and working
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.EngineeringPlanReady))
         {
-            // PE is working on PRs or has created the plan
-            if (HasReasonContaining(AgentRole.PrincipalEngineer, "pr #", "implementing", "assigned", "reviewing", "plan"))
+            bool planReady =
+                HasReasonContaining(AgentRole.PrincipalEngineer, "pr #", "implementing", "assigned", "reviewing", "plan", "creating issues", "engineering plan") ||
+                agents.Any(a => a.Identity.Role is AgentRole.SeniorEngineer or AgentRole.JuniorEngineer);
+
+            if (planReady)
             {
                 SignalIfNew(WorkflowStateMachine.Signals.EngineeringPlanReady);
                 SignalIfNew(WorkflowStateMachine.Signals.PrincipalEngineerReady);
             }
         }
 
-        // Parallel Development signals
-        if (phase == ProjectPhase.ParallelDevelopment || !_workflow.HasSignal(WorkflowStateMachine.Signals.AllEngineeringComplete))
+        // --- Parallel Development signals ---
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.AllEngineeringComplete))
         {
-            // Check if engineers are done — all engineer agents idle/online with "complete" or "no tasks"
             var engineers = agents.Where(a => a.Identity.Role is AgentRole.SeniorEngineer or AgentRole.JuniorEngineer).ToList();
             if (engineers.Count > 0 && engineers.All(a =>
-                a.Status == AgentStatus.Online &&
+                a.Status is AgentStatus.Online or AgentStatus.Idle &&
                 ((a.StatusReason ?? "").Contains("complete", StringComparison.OrdinalIgnoreCase) ||
                  (a.StatusReason ?? "").Contains("no task", StringComparison.OrdinalIgnoreCase) ||
                  (a.StatusReason ?? "").Contains("no assigned", StringComparison.OrdinalIgnoreCase))))
@@ -232,8 +251,8 @@ public class HealthMonitor : IHostedService, IDisposable
             }
         }
 
-        // Testing signals
-        if (phase == ProjectPhase.Testing || !_workflow.HasSignal(WorkflowStateMachine.Signals.TestCoverageMet))
+        // --- Testing signals ---
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.TestCoverageMet))
         {
             if (HasReasonContaining(AgentRole.TestEngineer, "all tested", "coverage met", "tests complete"))
             {
@@ -241,8 +260,8 @@ public class HealthMonitor : IHostedService, IDisposable
             }
         }
 
-        // Review signals
-        if (phase == ProjectPhase.Review || !_workflow.HasSignal(WorkflowStateMachine.Signals.AllReviewsApproved))
+        // --- Review signals ---
+        if (!_workflow.HasSignal(WorkflowStateMachine.Signals.AllReviewsApproved))
         {
             if (HasReasonContaining(AgentRole.ProgramManager, "all approved", "reviews complete", "all merged"))
             {

@@ -47,11 +47,12 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
     {
         ArgumentNullException.ThrowIfNull(chatHistory);
 
-        var prompt = FormatChatHistoryAsPrompt(chatHistory);
+        var prompt = FormatChatHistoryAsPrompt(chatHistory, _config);
         _logger.LogDebug("Sending prompt to copilot CLI ({Length} chars)", prompt.Length);
 
         // Allow per-request model override via PromptExecutionSettings.ModelId
-        var modelOverride = executionSettings?.ModelId;
+        // FastMode overrides model to a faster one for quick E2E testing
+        var modelOverride = _config.FastMode ? _config.FastModeModel : executionSettings?.ModelId;
 
         var result = await _processManager.ExecutePromptAsync(prompt, modelOverride, cancellationToken);
 
@@ -80,6 +81,9 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
                 result.Output.Length);
             parsedResponse = "(No response from Copilot CLI)";
         }
+
+        // Strip meta-commentary that the copilot CLI sometimes prepends
+        parsedResponse = StripMetaCommentary(parsedResponse);
 
         _logger.LogDebug("Received copilot response ({Length} chars)", parsedResponse.Length);
 
@@ -111,15 +115,31 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
     /// Converts a Semantic Kernel ChatHistory into a single prompt suitable for the copilot CLI.
     /// The CLI doesn't support multi-turn natively, so we flatten the conversation.
     /// </summary>
-    internal static string FormatChatHistoryAsPrompt(ChatHistory chatHistory)
+    internal static string FormatChatHistoryAsPrompt(ChatHistory chatHistory, CopilotCliConfig? config = null)
     {
         var sb = new StringBuilder();
 
-        // Force text-only output — the CLI must not create files
-        sb.AppendLine("[IMPORTANT DIRECTIVE]");
-        sb.AppendLine("You are being used as a text generation service. Output ALL content directly in your response text.");
-        sb.AppendLine("Do NOT create, edit, or write any files. Do NOT use any tools. Return the complete content as plain text.");
+        // Critical directive: prevent CLI from acting as an interactive assistant
+        sb.AppendLine("[CRITICAL DIRECTIVE — READ THIS FIRST]");
+        sb.AppendLine("You are operating as a HEADLESS TEXT GENERATION API, not an interactive assistant.");
+        sb.AppendLine("RULES:");
+        sb.AppendLine("1. Output the requested content DIRECTLY as plain text in your response.");
+        sb.AppendLine("2. Do NOT create, edit, or write any files. Do NOT use any tools or shell commands.");
+        sb.AppendLine("3. Do NOT describe what you would do or what you created. Just output the content itself.");
+        sb.AppendLine("4. Do NOT include meta-commentary like 'Here is the document' or 'I have created...'.");
+        sb.AppendLine("5. If asked for a markdown document, output the FULL markdown — start with the first heading.");
+        sb.AppendLine("6. Your ENTIRE response will be captured as the document content. Nothing else.");
         sb.AppendLine();
+
+        // Fast mode: inject brevity constraint
+        if (config?.FastMode == true)
+        {
+            sb.AppendLine("[SPEED MODE — ACTIVE]");
+            sb.AppendLine("Respond as concisely as possible. MAXIMUM 500 words. Skip examples, skip detailed explanations.");
+            sb.AppendLine("Use bullet points. Prioritize structure and actionable content over comprehensiveness.");
+            sb.AppendLine("This is a test run — focus on correct structure, not depth.");
+            sb.AppendLine();
+        }
 
         // Collect system messages as context prefix
         var systemMessages = chatHistory
@@ -147,6 +167,9 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         if (conversationMessages.Count == 1 && conversationMessages[0].Role == AuthorRole.User)
         {
             sb.Append(conversationMessages[0].Content);
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.AppendLine("[REMINDER]: Output the content directly. Do NOT describe what you would create. Start your response with the actual content.");
             return sb.ToString().Trim();
         }
 
@@ -161,7 +184,83 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         }
 
         sb.AppendLine("[INSTRUCTION]: Continue the conversation as the assistant. Respond to the last user message, taking into account the full conversation history above.");
+        sb.AppendLine("[REMINDER]: Output the content directly. Do NOT describe what you would create. Do NOT say 'I have created...' or 'Here is...'. Start your response with the actual requested content.");
 
         return sb.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Detects and strips meta-commentary that the copilot CLI sometimes prepends.
+    /// The CLI may respond with "I've created the document..." or "Here's the file..."
+    /// instead of outputting the content directly. This method extracts the actual content.
+    /// </summary>
+    internal static string StripMetaCommentary(string response)
+    {
+        if (string.IsNullOrWhiteSpace(response))
+            return response;
+
+        // Patterns that indicate the AI is describing what it did instead of outputting content
+        string[] metaPrefixPatterns =
+        [
+            "i've created", "i have created", "i'll create", "i will create",
+            "here is the", "here's the", "here are the",
+            "let me create", "let me write", "let me generate",
+            "the document has been", "the file has been", "the content has been",
+            "i've written", "i have written", "i've generated",
+            "now let me", "file location:", "file created",
+            "written to the session", "created successfully",
+            "saved to:", "output saved"
+        ];
+
+        var firstLine = response.Split('\n', 2)[0].Trim().ToLowerInvariant();
+
+        // If the first line is meta-commentary, try to find the real content start
+        if (metaPrefixPatterns.Any(p => firstLine.Contains(p)))
+        {
+            // Look for the first markdown heading as the start of real content
+            var headingIndex = response.IndexOf("\n#", StringComparison.Ordinal);
+            if (headingIndex >= 0)
+            {
+                return response[(headingIndex + 1)..].Trim();
+            }
+
+            // Look for the first substantial markdown (bold, bullet, etc.)
+            var lines = response.Split('\n');
+            for (int i = 1; i < lines.Length; i++)
+            {
+                var trimmed = lines[i].Trim();
+                if (trimmed.StartsWith('#') || trimmed.StartsWith("**") ||
+                    trimmed.StartsWith("- ") || trimmed.StartsWith("* ") ||
+                    trimmed.StartsWith("| ") || trimmed.StartsWith("```"))
+                {
+                    return string.Join('\n', lines[i..]).Trim();
+                }
+            }
+        }
+
+        // Check for trailing meta-commentary ("I've saved this to...", "The file is at...")
+        var lastLines = response.Split('\n');
+        var endTrimIndex = lastLines.Length;
+        for (int i = lastLines.Length - 1; i >= Math.Max(0, lastLines.Length - 5); i--)
+        {
+            var lower = lastLines[i].Trim().ToLowerInvariant();
+            if (metaPrefixPatterns.Any(p => lower.Contains(p)) ||
+                lower.Contains("session-state") || lower.Contains(".copilot/") ||
+                lower.StartsWith("you can copy") || lower.StartsWith("⚠️"))
+            {
+                endTrimIndex = i;
+            }
+            else if (!string.IsNullOrWhiteSpace(lastLines[i]))
+            {
+                break;
+            }
+        }
+
+        if (endTrimIndex < lastLines.Length)
+        {
+            return string.Join('\n', lastLines[..endTrimIndex]).Trim();
+        }
+
+        return response;
     }
 }

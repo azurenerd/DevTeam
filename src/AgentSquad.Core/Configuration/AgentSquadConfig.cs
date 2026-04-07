@@ -157,6 +157,17 @@ public class CopilotCliConfig
     /// <summary>Use --output-format json for structured JSONL output.</summary>
     public bool JsonOutput { get; set; } = false;
 
+    /// <summary>
+    /// When true, injects a brevity constraint into every prompt so AI responses
+    /// return in ~10 seconds instead of minutes. Uses a faster model (claude-haiku-4.5)
+    /// and limits responses to 500 words. Useful for testing E2E flow quickly.
+    /// Set to false for production-quality output.
+    /// </summary>
+    public bool FastMode { get; set; } = false;
+
+    /// <summary>Model to use when FastMode is enabled. Defaults to claude-haiku-4.5.</summary>
+    public string FastModeModel { get; set; } = "claude-haiku-4.5";
+
     /// <summary>Tools to exclude from the CLI's available tools (e.g., "shell", "write").</summary>
     public List<string> ExcludedTools { get; set; } = new();
 
