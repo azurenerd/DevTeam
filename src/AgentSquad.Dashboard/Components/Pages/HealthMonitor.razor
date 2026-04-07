@@ -181,22 +181,23 @@
 
 @* ── Diagnostic Feed ── *@
 <div class="health-card feed-card">
-    <div class="feed-header">
-        <h2>Diagnostic Feed</h2>
-        <div class="feed-filters">
-            <select class="feed-filter-select" @bind="_filterAgent">
-                <option value="">All Agents</option>
+    <h2>Diagnostic Feed</h2>
+    <div class="feed-toolbar">
+        <div class="feed-filter-pills">
+            <select class="feed-pill" @bind="_filterAgent">
+                <option value="">🤖 All Agents</option>
                 @foreach (var agent in _agents.OrderBy(a => a.DisplayName))
                 {
                     <option value="@agent.Id">@agent.DisplayName</option>
                 }
             </select>
-            <select class="feed-filter-select" @bind="_filterCompliance">
-                <option value="">All Status</option>
+            <select class="feed-pill" @bind="_filterCompliance">
+                <option value="">📋 All Status</option>
                 <option value="compliant">✅ Compliant</option>
                 <option value="non-compliant">⚠️ Non-Compliant</option>
             </select>
         </div>
+        <span class="feed-count">@GetFilteredFeed().Count entries</span>
     </div>
 
     <div class="feed-list">
@@ -210,24 +211,24 @@
             @foreach (var entry in feedItems)
             {
                 <div class="feed-entry @(!entry.IsCompliant ? "feed-entry-warn" : "")">
-                    <div class="feed-entry-header">
+                    <div class="feed-entry-row">
                         <span class="feed-timestamp">@entry.Timestamp.ToLocalTime().ToString("HH:mm:ss")</span>
-                        <span class="feed-agent-name">@entry.AgentDisplayName</span>
                         <span class="feed-compliance">@(entry.IsCompliant ? "✅" : "⚠️")</span>
+                        <span class="feed-agent-name">@entry.AgentDisplayName</span>
                         @if (!string.IsNullOrEmpty(entry.ScenarioRef))
                         {
                             <span class="feed-scenario-ref">@entry.ScenarioRef</span>
                         }
+                        <span class="feed-summary-inline">@entry.Summary</span>
                     </div>
-                    <div class="feed-summary">@entry.Summary</div>
-                    <details class="feed-details">
-                        <summary>Full justification</summary>
-                        <div class="feed-justification">@entry.Justification</div>
-                    </details>
                     @if (!entry.IsCompliant && !string.IsNullOrEmpty(entry.ComplianceIssue))
                     {
                         <div class="feed-compliance-issue">⚠️ @entry.ComplianceIssue</div>
                     }
+                    <details class="feed-details">
+                        <summary>Justification</summary>
+                        <div class="feed-justification">@entry.Justification</div>
+                    </details>
                 </div>
             }
         }
