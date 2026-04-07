@@ -238,7 +238,11 @@ public class ResearcherAgent : AgentBase
             "actionable findings that architects and engineers can build from directly. " +
             "Go beyond surface-level recommendations — provide specific tools, version numbers, " +
             "architecture patterns, trade-offs, and real-world considerations. " +
-            "Focus on practical, opinionated recommendations backed by reasoning.");
+            "Focus on practical, opinionated recommendations backed by reasoning.\n\n" +
+            $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
+            "Your research MUST target this stack. Recommend libraries, patterns, and tools that are " +
+            "native to or compatible with this stack. Do NOT recommend alternative tech stacks — " +
+            "the decision is final.");
 
         history.AddUserMessage(
             $"I need you to research the following topic for our software project.\n\n" +

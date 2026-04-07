@@ -274,9 +274,15 @@ public class ProgramManagerAgent : AgentBase
             return custom;
 
         // Generate a rich default prompt that drives deep, structured research
+        var techStack = _config.Project.TechStack;
         return $"""
             Conduct a thorough, multi-dimensional research analysis for the project "{projectName}".
             Go beyond surface-level recommendations — the engineering team needs depth and specificity.
+
+            **MANDATORY TECHNOLOGY STACK: {techStack}**
+            The technology stack has already been decided. All research, recommendations, libraries,
+            and patterns MUST target {techStack}. Do NOT recommend alternative stacks.
+            Focus on the best libraries, patterns, and tools within this ecosystem.
 
             ### 1. Domain & Market Research
             - What are the core domain concepts and terminology?
@@ -285,19 +291,19 @@ public class ProgramManagerAgent : AgentBase
             - What industry standards, regulations, or compliance requirements apply?
 
             ### 2. Technology Stack Evaluation
-            - Evaluate at least 2-3 candidate technology stacks (frontend, backend, database, infrastructure)
-            - For each candidate, provide: strengths, weaknesses, community size, maturity, learning curve
-            - Recommend a primary stack with clear justification tied to the project requirements
+            - Given the mandatory stack ({techStack}), evaluate the best libraries and frameworks within this ecosystem
+            - For each recommended library, provide: strengths, maturity, community size, alternatives within the stack
             - Include specific version numbers and compatibility considerations
+            - Do NOT evaluate alternative technology stacks — the stack decision is final
 
             ### 3. Architecture Patterns & Design
-            - Which architecture patterns best fit this project (monolith, microservices, serverless, etc.)?
+            - Which architecture patterns best fit this project within {techStack}?
             - What data storage strategy is appropriate (relational, document, graph, hybrid)?
             - How should the system handle scalability, caching, and performance?
-            - What API design approach should be used (REST, GraphQL, gRPC)?
+            - What API design approach should be used?
 
             ### 4. Libraries, Frameworks & Dependencies
-            - List specific libraries and packages for core functionality (not just categories)
+            - List specific libraries and packages for core functionality within {techStack}
             - Include testing frameworks, CI/CD tools, monitoring, and observability solutions
             - Flag any licensing concerns or deprecated dependencies
 

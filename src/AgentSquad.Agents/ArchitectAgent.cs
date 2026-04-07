@@ -254,18 +254,23 @@ public class ArchitectAgent : AgentBase
             "the PM specification (business requirements) and research findings. " +
             "Ensure the architecture supports all business goals, user stories, and " +
             "non-functional requirements from the PM spec. Be thorough, specific, and practical. " +
-            "Focus on producing actionable architecture that engineers can implement directly.");
+            "Focus on producing actionable architecture that engineers can implement directly.\n\n" +
+            $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
+            "Your architecture MUST use this stack. Design all components, patterns, and " +
+            "infrastructure around this technology. Do NOT recommend or use alternative stacks.");
 
         // Turn 1: Identify key architectural decisions
         history.AddUserMessage(
             $"I need you to design the system architecture for our project.\n\n" +
             $"**Task:** {directive.Title}\n\n" +
             $"**Description:** {directive.Description}\n\n" +
+            $"**Technology Stack (mandatory):** {_config.Project.TechStack}\n\n" +
             $"## PM Specification (Business Requirements)\n{pmSpec}\n\n" +
             $"## Research Findings\n{research}\n\n" +
             "First, identify the key architectural decisions we need to make. " +
             "For each decision, explain the options, trade-offs, and your recommendation. " +
             "Ensure the architecture supports all business goals and user stories from the PM Spec. " +
+            "All decisions must use the mandatory technology stack specified above. " +
             "List them clearly.");
 
         var decisionsResponse = await chat.GetChatMessageContentAsync(
