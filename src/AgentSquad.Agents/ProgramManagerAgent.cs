@@ -1416,6 +1416,11 @@ public class ProgramManagerAgent : AgentBase
                 "3. Are there any bugs, gaps, or missing edge cases within this task's scope?\n" +
                 "4. Does the approach make sense for the business goals?\n" +
                 "5. Does the code quality meet expectations for a production deliverable?\n\n" +
+                "REVIEW PHILOSOPHY: Be pragmatic, not pedantic. Only request changes for issues " +
+                "that are both significant AND fixable within a reasonable code change. Minor " +
+                "style issues, naming preferences, or cosmetic concerns should be noted as " +
+                "suggestions in an APPROVE verdict, not as blockers. If a problem would require " +
+                "a complete rewrite, APPROVE with caveats for future iteration.\n\n" +
                 "Be constructive and specific with feedback.\n" +
                 "End your review with exactly one of these verdicts on a new line:\n" +
                 "VERDICT: APPROVE\n" +

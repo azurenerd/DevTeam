@@ -33,9 +33,11 @@ public abstract class EngineerAgentBase : AgentBase
     protected readonly ConcurrentQueue<IssueAssignmentMessage> AssignmentQueue = new();
     protected readonly ConcurrentQueue<ClarificationResponseMessage> ClarificationResponses = new();
     protected readonly List<IDisposable> Subscriptions = new();
-    // BUG FIX: Track rework attempts per PR to enforce MaxReworkCycles limit.
-    // Without this, PM could keep requesting changes and the engineer would loop forever.
+    // Track rework attempts per PR to enforce MaxReworkCycles limit.
+    // Counts per review ROUND (not per individual reviewer feedback).
     protected readonly Dictionary<int, int> ReworkAttemptCounts = new();
+    // Prevent duplicate "max limit" comments when multiple reviewers' feedback arrives
+    private readonly HashSet<int> _forceApprovalSentPrs = new();
     protected int? CurrentIssueNumber;
     protected int? CurrentPrNumber;
 
@@ -112,9 +114,24 @@ public abstract class EngineerAgentBase : AgentBase
             try
             {
                 // Priority 1: Process rework feedback from reviewers
+                // Drain ALL queued rework items for the same PR into one round
+                // so that feedback from multiple reviewers counts as a single rework cycle.
                 if (ReworkQueue.TryDequeue(out var rework))
                 {
-                    await HandleReworkAsync(rework, ct);
+                    var batchedFeedback = new List<ReworkItem> { rework };
+                    // Drain additional items for the same PR
+                    var overflow = new List<ReworkItem>();
+                    while (ReworkQueue.TryDequeue(out var extra))
+                    {
+                        if (extra.PrNumber == rework.PrNumber)
+                            batchedFeedback.Add(extra);
+                        else
+                            overflow.Add(extra);
+                    }
+                    foreach (var item in overflow)
+                        ReworkQueue.Enqueue(item);
+
+                    await HandleReworkAsync(batchedFeedback, ct);
                     continue;
                 }
 
@@ -768,17 +785,18 @@ public abstract class EngineerAgentBase : AgentBase
     #region Rework Handling
 
     /// <summary>
-    /// Addresses reviewer feedback on a PR. Uses AI to produce fixes, commits, and re-requests review.
+    /// Addresses reviewer feedback on a PR. Batches feedback from multiple reviewers
+    /// into a single rework round so the cycle count is per-round, not per-reviewer.
     /// </summary>
-    protected virtual async Task HandleReworkAsync(ReworkItem rework, CancellationToken ct)
+    protected virtual async Task HandleReworkAsync(List<ReworkItem> reworkBatch, CancellationToken ct)
     {
+        var rework = reworkBatch[0]; // Use first item for PR number/title
         var pr = await GitHub.GetPullRequestAsync(rework.PrNumber, ct);
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
             return;
 
-        // BUG FIX: Enforce max rework cycles per PR. Without this limit, the PM/PE review
-        // loop could request changes indefinitely (observed in monitoring: PE stuck in
-        // infinite rework on PR #59 for 20+ min). After max cycles, force-approve instead.
+        // Enforce max rework cycles per PR. Counts per ROUND (all reviewer feedback
+        // in one cycle = one attempt) to prevent premature exhaustion with dual reviewers.
         var attempts = ReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
         ReworkAttemptCounts[rework.PrNumber] = attempts;
 
@@ -788,28 +806,37 @@ public abstract class EngineerAgentBase : AgentBase
                 "{Role} {Name} reached max rework cycles ({Max}) for PR #{PrNumber}, requesting force-approval",
                 Identity.Role, Identity.DisplayName, Config.Limits.MaxReworkCycles, rework.PrNumber);
 
-            await GitHub.AddPullRequestCommentAsync(
-                rework.PrNumber,
-                $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit " +
-                $"({Config.Limits.MaxReworkCycles}). Requesting final approval to unblock progress.",
-                ct);
-
-            await MessageBus.PublishAsync(new ReviewRequestMessage
+            // Only post the comment once per PR (not for every queued rework item)
+            if (_forceApprovalSentPrs.Add(rework.PrNumber))
             {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "ReviewRequest",
-                PrNumber = pr.Number,
-                PrTitle = pr.Title,
-                ReviewType = "FinalApproval"
-            }, ct);
+                await GitHub.AddPullRequestCommentAsync(
+                    rework.PrNumber,
+                    $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit " +
+                    $"({Config.Limits.MaxReworkCycles}). Requesting final approval to unblock progress.",
+                    ct);
+
+                await MessageBus.PublishAsync(new ReviewRequestMessage
+                {
+                    FromAgentId = Identity.Id,
+                    ToAgentId = "*",
+                    MessageType = "ReviewRequest",
+                    PrNumber = pr.Number,
+                    PrTitle = pr.Title,
+                    ReviewType = "FinalApproval"
+                }, ct);
+            }
             return;
         }
 
+        // Combine feedback from all reviewers into one prompt
+        var allReviewers = string.Join(", ", reworkBatch.Select(r => r.Reviewer).Distinct());
+        var combinedFeedback = string.Join("\n\n---\n\n",
+            reworkBatch.Select(r => $"### Feedback from {r.Reviewer}\n{r.Feedback}"));
+
         UpdateStatus(AgentStatus.Working, $"Addressing feedback on PR #{rework.PrNumber} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
-        LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {rework.Reviewer} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
-        Logger.LogInformation("{Role} {Name} reworking PR #{PrNumber} based on feedback from {Reviewer} (attempt {Attempt}/{Max})",
-            Identity.Role, Identity.DisplayName, rework.PrNumber, rework.Reviewer, attempts, Config.Limits.MaxReworkCycles);
+        LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {allReviewers} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
+        Logger.LogInformation("{Role} {Name} reworking PR #{PrNumber} based on feedback from {Reviewers} (attempt {Attempt}/{Max})",
+            Identity.Role, Identity.DisplayName, rework.PrNumber, allReviewers, attempts, Config.Limits.MaxReworkCycles);
 
         try
         {
@@ -829,7 +856,7 @@ public abstract class EngineerAgentBase : AgentBase
                 $"## Architecture\n{architectureDoc}\n\n" +
                 $"## PM Specification\n{pmSpecDoc}\n\n" +
                 await GetAdditionalReworkContextAsync(ct) +
-                $"## Review Feedback from {rework.Reviewer}\n{rework.Feedback}\n\n" +
+                $"## Review Feedback\n{combinedFeedback}\n\n" +
                 "Please provide the corrected files that address all the feedback. " +
                 "Output each file using this exact format:\n\n" +
                 "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
@@ -853,9 +880,9 @@ public abstract class EngineerAgentBase : AgentBase
                         pr.Number,
                         $"src/{taskTitle}-rework.md",
                         $"## Rework: Addressing Review Feedback\n\n" +
-                        $"**Reviewer:** {rework.Reviewer}\n\n" +
+                        $"**Reviewers:** {allReviewers}\n\n" +
                         $"### Changes Made\n{updatedImpl}",
-                        $"Address review feedback from {rework.Reviewer}",
+                        $"Address review feedback from {allReviewers}",
                         ct);
                 }
 
@@ -880,10 +907,9 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogError(ex, "{Role} {Name} failed rework on PR #{PrNumber}",
                 Identity.Role, Identity.DisplayName, rework.PrNumber);
 
-            // BUG FIX: Re-enqueue rework item on failure so it gets retried next loop.
-            // Previously, TryDequeue removed the item and a failed AI call meant the
-            // rework feedback was permanently lost — the PR would stay in limbo forever.
-            ReworkQueue.Enqueue(rework);
+            // Re-enqueue rework items on failure so they get retried next loop.
+            foreach (var item in reworkBatch)
+                ReworkQueue.Enqueue(item);
         }
     }
 

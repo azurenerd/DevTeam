@@ -26,6 +26,7 @@ public class ArchitectAgent : AgentBase
     private readonly Queue<ArchitectureDirective> _taskQueue = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
+    private readonly HashSet<int> _forceApprovalPrs = new();
     private readonly List<IDisposable> _subscriptions = new();
 
     private bool _architectureComplete;
@@ -174,6 +175,11 @@ public class ArchitectAgent : AgentBase
 
         // Clear reviewed flag so reworked PRs get re-reviewed
         _reviewedPrNumbers.Remove(message.PrNumber);
+
+        // Track FinalApproval requests so Architect auto-approves after max rework cycles
+        if (string.Equals(message.ReviewType, "FinalApproval", StringComparison.OrdinalIgnoreCase))
+            _forceApprovalPrs.Add(message.PrNumber);
+
         _reviewQueue.Enqueue(message.PrNumber);
         return Task.CompletedTask;
     }
@@ -431,7 +437,20 @@ public class ArchitectAgent : AgentBase
                 Logger.LogInformation("Reviewing PR #{Number} for architectural alignment: {Title}",
                     pr.Number, pr.Title);
 
-                var (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                // Force-approve after max rework cycles to prevent infinite loops
+                string verdict;
+                string reasoning;
+                if (_forceApprovalPrs.Contains(prNumber))
+                {
+                    verdict = "APPROVED";
+                    reasoning = "Force-approving after maximum rework cycles reached. " +
+                        "The engineer has made best-effort improvements across multiple iterations.";
+                    _forceApprovalPrs.Remove(prNumber);
+                }
+                else
+                {
+                    (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                }
 
                 if (verdict == "APPROVED")
                 {
@@ -523,6 +542,11 @@ public class ArchitectAgent : AgentBase
                 "2. Are the file/folder structures consistent with the architecture?\n" +
                 "3. Does the implementation align with the business requirements for this task?\n" +
                 "4. Are there architectural anti-patterns or violations?\n\n" +
+                "REVIEW PHILOSOPHY: Be pragmatic, not pedantic. Only request REWORK for issues that " +
+                "are both significant AND fixable within a reasonable code change. If the code works " +
+                "and the deviations are minor or cosmetic, APPROVE with suggestions. If a problem " +
+                "would require a complete rewrite or fundamental tech stack change, APPROVE with " +
+                "caveats noting the concern for future iteration — do NOT request a rewrite.\n\n" +
                 "Be concise and actionable.\n\n" +
                 "You MUST start your response with exactly one of these two verdicts on the first line:\n" +
                 "APPROVED — if the PR aligns with the architecture (minor suggestions are fine)\n" +

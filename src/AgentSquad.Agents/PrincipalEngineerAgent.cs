@@ -760,9 +760,20 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
     private async Task ProcessOwnReworkAsync(CancellationToken ct)
     {
+        // Drain and batch rework items per PR (same logic as base class loop)
+        var batches = new Dictionary<int, List<ReworkItem>>();
         while (ReworkQueue.TryDequeue(out var rework))
         {
-            await HandleReworkAsync(rework, ct);
+            if (!batches.TryGetValue(rework.PrNumber, out var list))
+            {
+                list = new List<ReworkItem>();
+                batches[rework.PrNumber] = list;
+            }
+            list.Add(rework);
+        }
+        foreach (var batch in batches.Values)
+        {
+            await HandleReworkAsync(batch, ct);
         }
     }
 
@@ -1194,6 +1205,10 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "3. Code quality: error handling, edge cases, naming, structure\n" +
                 "4. Are there any bugs, logic errors, or missing validation?\n" +
                 "5. Test coverage: are there tests, and do they cover key scenarios?\n\n" +
+                "REVIEW PHILOSOPHY: Be pragmatic, not pedantic. Only request changes for issues " +
+                "that are both significant AND fixable within a reasonable code change. Minor " +
+                "style preferences or cosmetic issues should be noted as suggestions in an APPROVE " +
+                "verdict. If a problem would require a complete rewrite, APPROVE with caveats.\n\n" +
                 "End your review with exactly one of:\n" +
                 "VERDICT: APPROVE\n" +
                 "VERDICT: REQUEST_CHANGES");
