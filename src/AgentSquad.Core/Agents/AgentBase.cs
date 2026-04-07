@@ -1,4 +1,6 @@
 using AgentSquad.Core.AI;
+using AgentSquad.Core.Diagnostics;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Core.Agents;
@@ -9,13 +11,16 @@ public abstract class AgentBase : IAgent, IDisposable
     private readonly object _errorLock = new();
     private AgentStatus _status = AgentStatus.Requested;
     private string? _statusReason;
+    private AgentDiagnostic? _currentDiagnostic;
     private bool _disposed;
     private readonly List<AgentLogEntry> _recentErrors = new();
+    private string? _cachedMemorySummary;
 
-    protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger)
+    protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger, AgentMemoryStore? memoryStore = null)
     {
         Identity = identity ?? throw new ArgumentNullException(nameof(identity));
         Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        MemoryStore = memoryStore;
         LifetimeCts = new CancellationTokenSource();
     }
 
@@ -37,6 +42,12 @@ public abstract class AgentBase : IAgent, IDisposable
         get { lock (_errorLock) { return _recentErrors.ToList(); } }
     }
 
+    /// <summary>Gets the current self-diagnostic snapshot.</summary>
+    public AgentDiagnostic? CurrentDiagnostic
+    {
+        get { lock (_statusLock) { return _currentDiagnostic; } }
+    }
+
     /// <summary>Clears all tracked errors/warnings.</summary>
     public void ClearErrors()
     {
@@ -47,9 +58,53 @@ public abstract class AgentBase : IAgent, IDisposable
     public event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
     public event EventHandler? ErrorsChanged;
     public event EventHandler<AgentActivityEventArgs>? ActivityLogged;
+    public event EventHandler<DiagnosticChangedEventArgs>? DiagnosticChanged;
 
     protected ILogger<AgentBase> Logger { get; }
     protected CancellationTokenSource LifetimeCts { get; }
+
+    /// <summary>Persistent memory store, available to all agents.</summary>
+    protected AgentMemoryStore? MemoryStore { get; }
+
+    /// <summary>
+    /// Record a memory entry that persists across AI calls and process restarts.
+    /// This builds the agent's long-term context so each AI call can include
+    /// relevant history of what the agent has done and learned.
+    /// </summary>
+    protected async Task RememberAsync(
+        MemoryType type,
+        string summary,
+        string? details = null,
+        CancellationToken ct = default)
+    {
+        if (MemoryStore is null) return;
+        try
+        {
+            await MemoryStore.StoreAsync(Identity.Id, type, summary, details, ct);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to store memory for {AgentId}", Identity.Id);
+        }
+    }
+
+    /// <summary>
+    /// Get formatted memory context for inclusion in AI prompts.
+    /// Returns empty string if no memories exist or store is unavailable.
+    /// </summary>
+    protected async Task<string> GetMemoryContextAsync(int maxEntries = 20, CancellationToken ct = default)
+    {
+        if (MemoryStore is null) return "";
+        try
+        {
+            return await MemoryStore.GetMemoryContextAsync(Identity.Id, maxEntries, ct);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load memory context for {AgentId}", Identity.Id);
+            return "";
+        }
+    }
 
     public async Task InitializeAsync(CancellationToken ct = default)
     {
@@ -116,6 +171,9 @@ public abstract class AgentBase : IAgent, IDisposable
             NewStatus = newStatus,
             Reason = reason
         });
+
+        // Refresh diagnostic on every status update to keep it in sync
+        RefreshDiagnostic();
     }
 
     /// <summary>Record an error or warning that will be visible in the dashboard.</summary>
@@ -152,6 +210,89 @@ public abstract class AgentBase : IAgent, IDisposable
             EventType = eventType,
             Details = details
         });
+    }
+
+    /// <summary>
+    /// Refresh the agent's self-diagnostic by evaluating current state against role expectations.
+    /// Uses cached memory summary if available (call RefreshDiagnosticWithMemoryAsync periodically
+    /// to update the cache). Called from UpdateStatus on every status change — lightweight (no I/O).
+    /// </summary>
+    protected void RefreshDiagnostic()
+    {
+        var diagnostic = RoleExpectations.Evaluate(
+            Identity.Role, Status, StatusReason, Identity.AssignedPullRequest,
+            _cachedMemorySummary);
+
+        AgentDiagnostic? previous;
+        lock (_statusLock)
+        {
+            previous = _currentDiagnostic;
+            _currentDiagnostic = diagnostic;
+        }
+
+        // Only fire event if the summary actually changed (avoid noise)
+        if (previous?.Summary != diagnostic.Summary || previous?.IsCompliant != diagnostic.IsCompliant)
+        {
+            DiagnosticChanged?.Invoke(this, new DiagnosticChangedEventArgs
+            {
+                AgentId = Identity.Id,
+                Diagnostic = diagnostic
+            });
+
+            if (!diagnostic.IsCompliant)
+            {
+                Logger.LogWarning(
+                    "Agent {AgentId} self-diagnostic NON-COMPLIANT: {Issue}",
+                    Identity.Id, diagnostic.ComplianceIssue ?? diagnostic.Summary);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Async version that loads agent memory before evaluating diagnostics.
+    /// Call this periodically in the agent loop (e.g., once per iteration) to
+    /// keep the diagnostic memory-aware. The loaded memory is cached so that
+    /// even the sync RefreshDiagnostic() path benefits from it.
+    /// </summary>
+    protected async Task RefreshDiagnosticWithMemoryAsync(CancellationToken ct = default)
+    {
+        if (MemoryStore is not null)
+        {
+            try
+            {
+                // Load recent memories and format as a compact summary
+                var memories = await MemoryStore.GetRecentAsync(Identity.Id, count: 10, ct: ct);
+                if (memories.Count > 0)
+                {
+                    var lines = new List<string>(memories.Count);
+                    for (int i = memories.Count - 1; i >= 0; i--)
+                    {
+                        var m = memories[i];
+                        var tag = m.Type switch
+                        {
+                            Persistence.MemoryType.Action => "DID",
+                            Persistence.MemoryType.Decision => "DECIDED",
+                            Persistence.MemoryType.Learning => "LEARNED",
+                            Persistence.MemoryType.Instruction => "TOLD",
+                            _ => "NOTE"
+                        };
+                        lines.Add($"• [{tag}] {m.Summary}");
+                    }
+                    _cachedMemorySummary = string.Join('\n', lines);
+                }
+                else
+                {
+                    _cachedMemorySummary = null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to load memory for diagnostics");
+            }
+        }
+
+        // Now refresh with the updated cache
+        RefreshDiagnostic();
     }
 
     protected virtual Task OnInitializeAsync(CancellationToken ct) => Task.CompletedTask;

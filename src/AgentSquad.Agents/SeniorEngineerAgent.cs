@@ -25,10 +25,11 @@ public class SeniorEngineerAgent : EngineerAgentBase
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<SeniorEngineerAgent> logger)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger)
     {
     }
 

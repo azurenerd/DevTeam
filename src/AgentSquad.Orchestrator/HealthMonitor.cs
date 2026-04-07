@@ -13,6 +13,8 @@ public class AgentHealthSnapshot
     public int TotalAgents { get; init; }
     public TimeSpan? LongestRunningTask { get; init; }
     public string? LongestRunningAgentId { get; init; }
+    public int NonCompliantCount { get; init; }
+    public List<string> NonCompliantAgentIds { get; init; } = [];
 }
 
 public class AgentStuckEventArgs : EventArgs
@@ -75,6 +77,13 @@ public class HealthMonitor : IHostedService, IDisposable
         TimeSpan? longestRunning = null;
         string? longestAgentId = null;
         var now = DateTime.UtcNow;
+        var nonCompliantIds = new List<string>();
+
+        foreach (var agent in agents)
+        {
+            if (agent.CurrentDiagnostic is { IsCompliant: false })
+                nonCompliantIds.Add(agent.Identity.Id);
+        }
 
         foreach (var kvp in _workingStartTimes)
         {
@@ -91,7 +100,9 @@ public class HealthMonitor : IHostedService, IDisposable
             StatusCounts = statusCounts,
             TotalAgents = agents.Count,
             LongestRunningTask = longestRunning,
-            LongestRunningAgentId = longestAgentId
+            LongestRunningAgentId = longestAgentId,
+            NonCompliantCount = nonCompliantIds.Count,
+            NonCompliantAgentIds = nonCompliantIds
         };
     }
 

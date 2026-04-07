@@ -1,3 +1,5 @@
+using AgentSquad.Core.Diagnostics;
+
 namespace AgentSquad.Core.Agents;
 
 public interface IAgent
@@ -5,6 +7,7 @@ public interface IAgent
     AgentIdentity Identity { get; }
     AgentStatus Status { get; }
     string? StatusReason { get; }
+    AgentDiagnostic? CurrentDiagnostic { get; }
 
     Task InitializeAsync(CancellationToken ct = default);
     Task StartAsync(CancellationToken ct = default);
@@ -14,6 +17,7 @@ public interface IAgent
     event EventHandler<AgentStatusChangedEventArgs>? StatusChanged;
     event EventHandler? ErrorsChanged;
     event EventHandler<AgentActivityEventArgs>? ActivityLogged;
+    event EventHandler<DiagnosticChangedEventArgs>? DiagnosticChanged;
 
     IReadOnlyList<AgentLogEntry> RecentErrors { get; }
     void ClearErrors();

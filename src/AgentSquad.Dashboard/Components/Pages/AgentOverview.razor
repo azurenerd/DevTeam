@@ -1,6 +1,7 @@
 @page "/"
 @rendermode InteractiveServer
 @using AgentSquad.Core.Agents
+@using AgentSquad.Core.Diagnostics
 @using AgentSquad.Dashboard.Services
 @using Microsoft.Extensions.Logging
 @implements IDisposable
@@ -19,6 +20,11 @@
         <span class="header-badge">
             🤖 @_agents.Count Agents
         </span>
+        @{ var ncCount = _agents.Count(a => !a.DiagnosticCompliant); }
+        @if (ncCount > 0)
+        {
+            <span class="header-badge danger">⚠ @ncCount Non-Compliant</span>
+        }
     </div>
 </div>
 
@@ -96,6 +102,18 @@ else
                             <span class="detail-value task-idle">Idle</span>
                         }
                     </div>
+
+                    @* Diagnostic justification *@
+                    @if (!string.IsNullOrEmpty(agent.DiagnosticSummary))
+                    {
+                        <div class="agent-detail diagnostic-row" title="@agent.DiagnosticJustification">
+                            <span class="detail-label">@(agent.DiagnosticCompliant ? "✅" : "⚠️") Why</span>
+                            <span class="detail-value diagnostic-value @(agent.DiagnosticCompliant ? "" : "non-compliant-text")">
+                                @TruncateDiagnostic(agent.DiagnosticSummary)
+                            </span>
+                        </div>
+                    }
+
                     <div class="agent-detail" @onclick:stopPropagation="true">
                         <span class="detail-label">Model</span>
                         @if (_editingModelAgentId == agent.Id)
@@ -128,6 +146,9 @@ else
                             <span class="error-badge">⚠ @agent.ErrorCount error@(agent.ErrorCount != 1 ? "s" : "")</span>
                         </div>
                     }
+                    <div class="agent-actions" @onclick:stopPropagation="true">
+                        <button class="action-btn chat-btn" @onclick="() => OpenChat(agent.Id)" title="Chat with this agent">💬 Chat</button>
+                    </div>
                 </div>
             </div>
         }
@@ -175,6 +196,77 @@ else
     </div>
 }
 
+@* Chat Modal *@
+@if (_showChatModal && _chatAgentId is not null)
+{
+    <div class="modal-overlay" @onclick="CloseChat">
+        <div class="chat-modal" @onclick:stopPropagation="true">
+            <div class="chat-modal-header">
+                <div class="chat-header-left">
+                    <h3>💬 @_chatAgentName</h3>
+                    @if (_chatAgent is not null && !string.IsNullOrEmpty(_chatAgent.DiagnosticSummary))
+                    {
+                        <span class="chat-diag-badge @(_chatAgent.DiagnosticCompliant ? "compliant" : "non-compliant")"
+                              title="@_chatAgent.DiagnosticJustification">
+                            @(_chatAgent.DiagnosticCompliant ? "✅" : "⚠️") @_chatAgent.DiagnosticSummary
+                        </span>
+                    }
+                </div>
+                <button class="modal-close" @onclick="CloseChat">✕</button>
+            </div>
+            <div class="chat-modal-body">
+                @if (_chatMessages.Count == 0 && !_chatSending)
+                {
+                    <div class="chat-empty">
+                        <div class="chat-empty-icon">💬</div>
+                        <div class="chat-empty-text">Ask @_chatAgentName anything</div>
+                        <div class="chat-empty-examples">
+                            <div class="chat-example" @onclick='() => SetChatInput("What are you currently working on and why?")'>
+                                "What are you currently working on and why?"
+                            </div>
+                            <div class="chat-example" @onclick='() => SetChatInput("Explain your last decision in detail.")'>
+                                "Explain your last decision in detail."
+                            </div>
+                            <div class="chat-example" @onclick='() => SetChatInput("What should you be doing right now according to the scenarios?")'>
+                                "What should you be doing right now?"
+                            </div>
+                        </div>
+                    </div>
+                }
+                @foreach (var msg in _chatMessages)
+                {
+                    <div class="chat-message @(msg.Role == "user" ? "chat-user" : "chat-assistant")">
+                        <div class="chat-msg-header">
+                            <span class="chat-role">@(msg.Role == "user" ? "👤 You" : $"🤖 {_chatAgentName}")</span>
+                            <span class="chat-time">@msg.Timestamp.ToLocalTime().ToString("HH:mm:ss")</span>
+                        </div>
+                        <div class="chat-msg-body">@msg.Content</div>
+                    </div>
+                }
+                @if (_chatSending)
+                {
+                    <div class="chat-message chat-assistant">
+                        <div class="chat-msg-header">
+                            <span class="chat-role">🤖 @_chatAgentName</span>
+                        </div>
+                        <div class="chat-msg-body chat-typing">Thinking…</div>
+                    </div>
+                }
+            </div>
+            <div class="chat-modal-footer">
+                <input class="chat-input" type="text" placeholder="Ask a question or give an instruction…"
+                       @bind="_chatInput" @bind:event="oninput"
+                       @onkeydown="OnChatKeyDown"
+                       disabled="@_chatSending" />
+                <button class="chat-send-btn" @onclick="SendChat"
+                        disabled="@(_chatSending || string.IsNullOrWhiteSpace(_chatInput))">
+                    @(_chatSending ? "⏳" : "➤")
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     private List<AgentSnapshot> _agents = [];
     private string? _selectedAgentId;
@@ -190,6 +282,15 @@ else
     // Model editing state
     private string? _editingModelAgentId;
     private IReadOnlyList<string> _availableModels = [];
+
+    // Chat modal state
+    private bool _showChatModal;
+    private string? _chatAgentId;
+    private string? _chatAgentName;
+    private AgentSnapshot? _chatAgent;
+    private List<AgentChatMessage> _chatMessages = [];
+    private string _chatInput = "";
+    private bool _chatSending;
 
     protected override void OnInitialized()
     {
@@ -262,6 +363,9 @@ else
     private static string TruncateTask(string text) =>
         text.Length <= 40 ? text : string.Concat(text.AsSpan(0, 37), "...");
 
+    private static string TruncateDiagnostic(string text) =>
+        text.Length <= 80 ? text : string.Concat(text.AsSpan(0, 77), "...");
+
     private void OnModelSelected(string agentId, ChangeEventArgs e)
     {
         var newModel = e.Value?.ToString();
@@ -298,6 +402,70 @@ else
             _errorEntries = [];
             _showErrorModal = false;
             _errorModalAgentId = null;
+        }
+    }
+
+    // Chat methods
+    private void OpenChat(string agentId)
+    {
+        var agent = _agents.FirstOrDefault(a => a.Id == agentId);
+        if (agent is null) return;
+
+        _chatAgentId = agentId;
+        _chatAgentName = agent.DisplayName;
+        _chatAgent = agent;
+        _chatMessages = DataService.GetAgentChatHistory(agentId).ToList();
+        _chatInput = "";
+        _chatSending = false;
+        _showChatModal = true;
+    }
+
+    private void CloseChat()
+    {
+        _showChatModal = false;
+        _chatAgentId = null;
+    }
+
+    private void SetChatInput(string text)
+    {
+        _chatInput = text;
+    }
+
+    private async Task OnChatKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter" && !_chatSending && !string.IsNullOrWhiteSpace(_chatInput))
+        {
+            await SendChat();
+        }
+    }
+
+    private async Task SendChat()
+    {
+        if (_chatAgentId is null || string.IsNullOrWhiteSpace(_chatInput) || _chatSending) return;
+
+        var message = _chatInput.Trim();
+        _chatInput = "";
+        _chatSending = true;
+        StateHasChanged();
+
+        try
+        {
+            await DataService.SendAgentChatAsync(_chatAgentId, message);
+            _chatMessages = DataService.GetAgentChatHistory(_chatAgentId).ToList();
+        }
+        catch (Exception ex)
+        {
+            _chatMessages.Add(new AgentChatMessage
+            {
+                Role = "assistant",
+                Content = $"Error: {ex.Message}",
+                Timestamp = DateTime.UtcNow
+            });
+        }
+        finally
+        {
+            _chatSending = false;
+            StateHasChanged();
         }
     }
 

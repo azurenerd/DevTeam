@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Diagnostics;
 using AgentSquad.Core.Persistence;
 using AgentSquad.Dashboard.Hubs;
 using AgentSquad.Orchestrator;
@@ -21,6 +22,13 @@ public sealed record AgentSnapshot
     public DateTime LastStatusChange { get; set; } = DateTime.UtcNow;
     public int ErrorCount { get; init; }
 
+    // Self-diagnostic
+    public string? DiagnosticSummary { get; init; }
+    public string? DiagnosticJustification { get; init; }
+    public bool DiagnosticCompliant { get; init; } = true;
+    public string? DiagnosticComplianceIssue { get; init; }
+    public string? DiagnosticScenarioRef { get; init; }
+
     // Estimated usage & cost (MSRP)
     public int EstPromptTokens { get; init; }
     public int EstCompletionTokens { get; init; }
@@ -36,6 +44,7 @@ public sealed class DashboardDataService : BackgroundService
     private readonly DeadlockDetector _deadlockDetector;
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentStateStore _stateStore;
+    private readonly AgentChatService _chatService;
     private readonly IHubContext<AgentHub> _hubContext;
     private readonly ILogger<DashboardDataService> _logger;
 
@@ -52,6 +61,7 @@ public sealed class DashboardDataService : BackgroundService
         DeadlockDetector deadlockDetector,
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
+        AgentChatService chatService,
         IHubContext<AgentHub> hubContext,
         ILogger<DashboardDataService> logger)
     {
@@ -60,6 +70,7 @@ public sealed class DashboardDataService : BackgroundService
         _deadlockDetector = deadlockDetector;
         _modelRegistry = modelRegistry;
         _stateStore = stateStore;
+        _chatService = chatService;
         _hubContext = hubContext;
         _logger = logger;
     }
@@ -276,6 +287,36 @@ public sealed class DashboardDataService : BackgroundService
     {
         agent.ErrorsChanged += OnAgentErrorsChanged;
         agent.ActivityLogged += OnAgentActivityLogged;
+        agent.DiagnosticChanged += OnAgentDiagnosticChanged;
+    }
+
+    private void OnAgentDiagnosticChanged(object? sender, DiagnosticChangedEventArgs e)
+    {
+        lock (_cacheLock)
+        {
+            if (_agentCache.TryGetValue(e.AgentId, out var snapshot))
+            {
+                _agentCache[e.AgentId] = snapshot with
+                {
+                    DiagnosticSummary = e.Diagnostic.Summary,
+                    DiagnosticJustification = e.Diagnostic.Justification,
+                    DiagnosticCompliant = e.Diagnostic.IsCompliant,
+                    DiagnosticComplianceIssue = e.Diagnostic.ComplianceIssue,
+                    DiagnosticScenarioRef = e.Diagnostic.ScenarioRef
+                };
+            }
+        }
+
+        _ = _hubContext.Clients.All.SendAsync("AgentDiagnosticChanged", new
+        {
+            e.AgentId,
+            e.Diagnostic.Summary,
+            e.Diagnostic.Justification,
+            e.Diagnostic.IsCompliant,
+            e.Diagnostic.ComplianceIssue,
+            e.Diagnostic.ScenarioRef
+        });
+        NotifyStateChanged();
     }
 
     private void OnAgentActivityLogged(object? sender, AgentActivityEventArgs e)
@@ -326,6 +367,7 @@ public sealed class DashboardDataService : BackgroundService
     private AgentSnapshot ToSnapshot(IAgent agent)
     {
         var usage = _modelRegistry.UsageTracker.GetStats(agent.Identity.Id);
+        var diag = agent.CurrentDiagnostic;
         return new()
         {
             Id = agent.Identity.Id,
@@ -339,6 +381,11 @@ public sealed class DashboardDataService : BackgroundService
             ActiveModel = _modelRegistry.GetEffectiveModel(agent.Identity.Id),
             LastStatusChange = DateTime.UtcNow,
             ErrorCount = agent.RecentErrors.Count,
+            DiagnosticSummary = diag?.Summary,
+            DiagnosticJustification = diag?.Justification,
+            DiagnosticCompliant = diag?.IsCompliant ?? true,
+            DiagnosticComplianceIssue = diag?.ComplianceIssue,
+            DiagnosticScenarioRef = diag?.ScenarioRef,
             EstPromptTokens = usage.PromptTokens,
             EstCompletionTokens = usage.CompletionTokens,
             AiCalls = usage.TotalCalls,
@@ -364,6 +411,30 @@ public sealed class DashboardDataService : BackgroundService
             }
         }
     }
+
+    /// <summary>Send a chat message to an agent and get an AI-generated response.</summary>
+    public async Task<AgentChatMessage> SendAgentChatAsync(
+        string agentId, string message, CancellationToken ct = default)
+    {
+        IAgent? agent;
+        lock (_cacheLock) { _trackedAgents.TryGetValue(agentId, out agent); }
+
+        if (agent is null)
+            return new AgentChatMessage
+            {
+                Role = "assistant",
+                Content = "⚠️ Agent not found or no longer registered."
+            };
+
+        return await _chatService.SendMessageAsync(agent, message, ct);
+    }
+
+    /// <summary>Get the chat history for an agent.</summary>
+    public IReadOnlyList<AgentChatMessage> GetAgentChatHistory(string agentId) =>
+        _chatService.GetHistory(agentId);
+
+    /// <summary>Clear the chat history for an agent.</summary>
+    public void ClearAgentChat(string agentId) => _chatService.ClearHistory(agentId);
 
     // Observable event for Blazor components to subscribe to for re-rendering
     public event Action? OnChange;

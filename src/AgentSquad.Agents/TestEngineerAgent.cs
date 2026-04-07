@@ -52,9 +52,10 @@ public class TestEngineerAgent : AgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<AgentBase> logger)
-        : base(identity, logger)
+        : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -95,6 +96,8 @@ public class TestEngineerAgent : AgentBase
 
                 // Priority 3: Scan for new merged PRs to test
                 await ScanMergedPRsForTestingAsync(ct);
+
+                await RefreshDiagnosticWithMemoryAsync(ct);
 
                 // Poll less frequently than other agents
                 var pollInterval = TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds * 3);
@@ -238,6 +241,9 @@ public class TestEngineerAgent : AgentBase
             "Created test PR #{TestPR} with {Count} test files for merged PR #{SourcePR}",
             testPrNumber, testFiles.Count, pr.Number);
         LogActivity("task", $"✅ Created test PR #{testPrNumber} with {testFiles.Count} test files for PR #{pr.Number}");
+        await RememberAsync(MemoryType.Action,
+            $"Created test PR #{testPrNumber} with {testFiles.Count} test files for merged PR #{pr.Number}: {pr.Title}",
+            ct: ct);
 
         // Apply "tested" label to the source PR so we don't re-process it on restart
         try
@@ -290,6 +296,7 @@ public class TestEngineerAgent : AgentBase
         var businessContext = await GatherBusinessContextAsync(pr, ct);
 
         var history = new ChatHistory();
+        var memoryContext = await GetMemoryContextAsync(ct: ct);
         history.AddSystemMessage(
             $"You are an expert test engineer writing tests for a {techStack} project.\n\n" +
             "Your job is to generate REAL, RUNNABLE test code — not documentation or test plans.\n" +
@@ -312,7 +319,8 @@ public class TestEngineerAgent : AgentBase
             "- Prioritize testing business behavior over implementation details\n\n" +
             "Output each test file using this exact format:\n\n" +
             "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
-            "Every file MUST use the FILE: marker format so it can be parsed and committed.");
+            "Every file MUST use the FILE: marker format so it can be parsed and committed." +
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
         // Build source file context
         var sourceContext = new System.Text.StringBuilder();
@@ -567,6 +575,9 @@ public class TestEngineerAgent : AgentBase
                     }, ct);
 
                     Logger.LogInformation("TestEngineer submitted rework for PR #{PrNumber}, re-requesting review", pr.Number);
+                    await RememberAsync(MemoryType.Action,
+                        $"Addressed review feedback on test PR #{pr.Number} from {rework.Reviewer}",
+                        TruncateForMemory(rework.Feedback), ct);
                 }
             }
             catch (Exception ex)
@@ -639,6 +650,15 @@ public class TestEngineerAgent : AgentBase
         {
             Logger.LogWarning(ex, "Failed to recover test PRs");
         }
+    }
+
+    private static string TruncateForMemory(string text, int maxLength = 300)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        if (text.Length <= maxLength) return text;
+        var cut = text[..maxLength];
+        var lastPeriod = cut.LastIndexOf('.');
+        return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
     }
 
     #endregion

@@ -51,8 +51,9 @@ public abstract class EngineerAgentBase : AgentBase
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
         AgentSquadConfig config,
+        AgentMemoryStore memoryStore,
         ILogger<AgentBase> logger)
-        : base(identity, logger)
+        : base(identity, logger, memoryStore)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         GitHub = github ?? throw new ArgumentNullException(nameof(github));
@@ -213,6 +214,9 @@ public abstract class EngineerAgentBase : AgentBase
 
                 await CheckForIssuesAsync(ct);
 
+                // Refresh diagnostic with memory context each loop iteration
+                await RefreshDiagnosticWithMemoryAsync(ct);
+
                 await Task.Delay(
                     TimeSpan.FromSeconds(Config.Limits.GitHubPollIntervalSeconds), ct);
             }
@@ -294,6 +298,7 @@ public abstract class EngineerAgentBase : AgentBase
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             // Use AI to understand the Issue and plan approach
+            var memoryContext = await GetMemoryContextAsync(ct: ct);
             var planHistory = new ChatHistory();
             planHistory.AddSystemMessage(
                 $"You are a {GetRoleDisplayName()} analyzing a GitHub Issue (User Story) before starting work. " +
@@ -305,7 +310,8 @@ public abstract class EngineerAgentBase : AgentBase
                 "to complete this task. Step 1 should be scaffolding (project structure, config, boilerplate). " +
                 "Each step should be a self-contained unit of committable work. 3-6 steps total.\n" +
                 "4. Any questions you have — if the requirements are UNCLEAR, list them. " +
-                "If you understand everything well enough to proceed, say 'NO_QUESTIONS'.");
+                "If you understand everything well enough to proceed, say 'NO_QUESTIONS'." +
+                (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
             planHistory.AddUserMessage(
                 $"## PM Specification\n{pmSpecDoc}\n\n" +
@@ -345,6 +351,10 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogInformation("{Role} {Name} created PR #{PrNumber} for issue #{IssueNumber}",
                 Identity.Role, Identity.DisplayName, pr.Number, issue.Number);
             LogActivity("github", $"Created PR #{pr.Number} for issue #{issue.Number}: {issue.Title}");
+
+            await RememberAsync(MemoryType.Action,
+                $"Created PR #{pr.Number} for issue #{issue.Number}: {issue.Title}",
+                $"Branch: {branchName}. Plan: {TruncateForMemory(planContent)}", ct);
 
             await ImplementAndCommitAsync(pr, issue, ct);
 
@@ -469,6 +479,10 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogInformation("{Role} {Name} committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
                     Identity.Role, Identity.DisplayName, codeFiles.Count, stepNumber, steps.Count, pr.Number);
                 LogActivity("task", $"✅ Step {stepNumber}/{steps.Count} committed ({codeFiles.Count} files): {Truncate(step, 80)}");
+
+                await RememberAsync(MemoryType.Action,
+                    $"PR #{pr.Number}: Committed step {stepNumber}/{steps.Count} ({codeFiles.Count} files)",
+                    Truncate(step, 200), ct);
 
                 // Checkpoint progress so we can resume after a crash
                 await CheckpointTaskProgressAsync(pr.Number, CurrentIssueNumber, stepNumber, ct);
@@ -718,6 +732,17 @@ public abstract class EngineerAgentBase : AgentBase
         return text[..maxLength] + "...";
     }
 
+    /// <summary>Truncate text for memory storage (keep it concise but useful).</summary>
+    protected static string TruncateForMemory(string text, int maxLength = 300)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        // Take first N chars, cut at last sentence boundary
+        if (text.Length <= maxLength) return text;
+        var cut = text[..maxLength];
+        var lastPeriod = cut.LastIndexOf('.');
+        return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
+    }
+
     /// <summary>
     /// Commits code files to PR, marks ready for review, notifies reviewers.
     /// </summary>
@@ -846,9 +871,11 @@ public abstract class EngineerAgentBase : AgentBase
             var architectureDoc = await GetArchitectureForContextAsync(ct);
             var pmSpecDoc = await GetPMSpecForContextAsync(ct);
             var techStack = Config.Project.TechStack;
+            var reworkMemory = await GetMemoryContextAsync(ct: ct);
 
             var history = new ChatHistory();
-            history.AddSystemMessage(GetReworkSystemPrompt(techStack));
+            history.AddSystemMessage(GetReworkSystemPrompt(techStack) +
+                (string.IsNullOrEmpty(reworkMemory) ? "" : $"\n\n{reworkMemory}"));
 
             history.AddUserMessage(
                 $"## PR #{rework.PrNumber}: {rework.PrTitle}\n" +
@@ -900,6 +927,10 @@ public abstract class EngineerAgentBase : AgentBase
 
                 Logger.LogInformation("{Role} {Name} submitted rework for PR #{PrNumber}, re-requesting review",
                     Identity.Role, Identity.DisplayName, pr.Number);
+
+                await RememberAsync(MemoryType.Action,
+                    $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{Config.Limits.MaxReworkCycles})",
+                    $"Feedback from {allReviewers}. Changes: {TruncateForMemory(updatedImpl)}", ct);
             }
         }
         catch (Exception ex)

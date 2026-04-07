@@ -39,9 +39,10 @@ public class ArchitectAgent : AgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<ArchitectAgent> logger)
-        : base(identity, logger)
+        : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -111,6 +112,8 @@ public class ArchitectAgent : AgentBase
                 {
                     UpdateStatus(AgentStatus.Idle, "Waiting for PMSpec to be ready");
                 }
+
+                await RefreshDiagnosticWithMemoryAsync(ct);
 
                 await Task.Delay(
                     TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds), ct);
@@ -248,6 +251,7 @@ public class ArchitectAgent : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var history = new ChatHistory();
+        var memoryContext = await GetMemoryContextAsync(ct: ct);
         history.AddSystemMessage(
             "You are a senior software architect on a development team. " +
             "Your job is to design a complete, well-structured system architecture based on " +
@@ -257,7 +261,8 @@ public class ArchitectAgent : AgentBase
             "Focus on producing actionable architecture that engineers can implement directly.\n\n" +
             $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
             "Your architecture MUST use this stack. Design all components, patterns, and " +
-            "infrastructure around this technology. Do NOT recommend or use alternative stacks.");
+            "infrastructure around this technology. Do NOT recommend or use alternative stacks." +
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
         // Turn 1: Identify key architectural decisions
         history.AddUserMessage(
@@ -278,6 +283,9 @@ public class ArchitectAgent : AgentBase
         history.AddAssistantMessage(decisionsResponse.Content ?? "");
 
         Logger.LogDebug("Architectural decisions identified for {TaskId}", directive.TaskId);
+        await RememberAsync(MemoryType.Decision,
+            $"Key architectural decisions for '{directive.Title}'",
+            TruncateForMemory(decisionsResponse.Content ?? ""), ct);
 
         // Turn 2: Design system components and interactions
         UpdateStatus(AgentStatus.Working, "Designing (2/5): Components & interactions");
@@ -371,6 +379,9 @@ public class ArchitectAgent : AgentBase
 
         Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);
         LogActivity("task", $"✅ Architecture.md merged: {directive.Title}");
+        await RememberAsync(MemoryType.Action,
+            $"Created and merged Architecture.md for '{directive.Title}'",
+            TruncateForMemory(architectureDoc), ct);
 
         // Explicitly close the related issue
         if (relatedIssue.HasValue)
@@ -463,6 +474,9 @@ public class ArchitectAgent : AgentBase
                         pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct);
                     Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
                     LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title}");
+                    await RememberAsync(MemoryType.Decision,
+                        $"Architecture review approved PR #{pr.Number}: {pr.Title}",
+                        TruncateForMemory(reasoning), ct);
                 }
                 else if (verdict == "REWORK")
                 {
@@ -470,6 +484,9 @@ public class ArchitectAgent : AgentBase
                         pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct);
                     Logger.LogInformation("Architect requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
+                    await RememberAsync(MemoryType.Decision,
+                        $"Architecture review requested changes on PR #{pr.Number}: {pr.Title}",
+                        TruncateForMemory(reasoning), ct);
 
                     // Notify the PR author via bus so they can start rework
                     await _messageBus.PublishAsync(new ChangesRequestedMessage
@@ -606,6 +623,15 @@ public class ArchitectAgent : AgentBase
                 pr.Number);
             return ("UNKNOWN", "Architecture review failed due to an internal error.");
         }
+    }
+
+    private static string TruncateForMemory(string text, int maxLength = 300)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        if (text.Length <= maxLength) return text;
+        var cut = text[..maxLength];
+        var lastPeriod = cut.LastIndexOf('.');
+        return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
     }
 
     #endregion

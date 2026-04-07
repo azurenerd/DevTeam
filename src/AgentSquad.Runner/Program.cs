@@ -20,11 +20,14 @@ builder.Services.Configure<LimitsConfig>(
 // Core services
 builder.Services.AddInProcessMessageBus();
 builder.Services.AddSingleton<AgentSquad.Core.AI.AgentUsageTracker>();
+builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.RequirementsCache>();
+builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.AgentChatService>();
 builder.Services.AddSemanticKernelModels();
 builder.Services.AddGitHubIntegration();
 
 // Persistence
 builder.Services.AddSingleton<AgentStateStore>();
+builder.Services.AddSingleton<AgentMemoryStore>();
 builder.Services.AddSingleton<ProjectFileManager>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;

@@ -70,6 +70,7 @@ public class SystemBootstrapTests : IDisposable
         // Persistence
         var testDbPath = Path.Combine(Path.GetTempPath(), $"agentsquad-test-{Guid.NewGuid():N}.db");
         services.AddSingleton(new AgentStateStore(testDbPath));
+        services.AddSingleton(new AgentMemoryStore(testDbPath));
         services.AddSingleton<ProjectFileManager>(sp =>
             new ProjectFileManager(
                 sp.GetRequiredService<IGitHubService>(),

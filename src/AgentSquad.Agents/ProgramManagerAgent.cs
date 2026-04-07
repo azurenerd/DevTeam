@@ -48,9 +48,10 @@ public class ProgramManagerAgent : AgentBase
         ModelRegistry modelRegistry,
         AgentSpawnManager spawnManager,
         AgentRegistry registry,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<ProgramManagerAgent> logger)
-        : base(identity, logger)
+        : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -103,6 +104,8 @@ public class ProgramManagerAgent : AgentBase
                 await ProcessClarificationRequestsAsync(ct);
                 await ReviewPullRequestsAsync(ct);
                 await UpdateProjectTrackingAsync(ct);
+
+                await RefreshDiagnosticWithMemoryAsync(ct);
 
                 await Task.Delay(
                     TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds), ct);
@@ -651,6 +654,9 @@ public class ProgramManagerAgent : AgentBase
                         await _github.AddIssueCommentAsync(issue.Number,
                             $"🚀 **{requestedRole} '{spawnedIdentity.DisplayName}' is now online** " +
                             "and ready for task assignment.", ct);
+                        await RememberAsync(MemoryType.Action,
+                            $"Hired {requestedRole} '{spawnedIdentity.DisplayName}' via resource request #{issue.Number}",
+                            ct: ct);
 
                         await _github.CloseIssueAsync(issue.Number, ct);
                     }
@@ -778,6 +784,9 @@ public class ProgramManagerAgent : AgentBase
                     {
                         Logger.LogInformation("PM approved and merged PR #{Number}", pr.Number);
                         LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
+                        await RememberAsync(MemoryType.Decision,
+                            $"Approved and merged PR #{pr.Number}: {pr.Title}",
+                            TruncateForMemory(reviewBody), ct);
                     }
                     else
                     {
@@ -790,6 +799,9 @@ public class ProgramManagerAgent : AgentBase
                     await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
+                    await RememberAsync(MemoryType.Decision,
+                        $"Requested changes on PR #{pr.Number}: {pr.Title}",
+                        TruncateForMemory(reviewBody), ct);
 
                     // Notify the author engineer to rework
                     await _messageBus.PublishAsync(new ChangesRequestedMessage
@@ -867,6 +879,9 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogInformation(
                     "Spawned {Role} '{Name}' for bus resource request from {Agent}",
                     message.RequestedRole, spawnedIdentity.DisplayName, message.FromAgentId);
+                await RememberAsync(MemoryType.Action,
+                    $"Hired {message.RequestedRole} '{spawnedIdentity.DisplayName}' via bus request from {message.FromAgentId}",
+                    ct: ct);
 
                 // Track in TeamMembers.md for persistence across restarts
                 await _projectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
@@ -1017,13 +1032,15 @@ public class ProgramManagerAgent : AgentBase
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
+            var memoryContext = await GetMemoryContextAsync(ct: ct);
 
             var history = new ChatHistory();
             history.AddSystemMessage(
                 "You are a Program Manager creating a formal product specification document. " +
                 "Your goal is to translate research findings and a project description into a " +
                 "clear, actionable specification that architects and engineers can use to design " +
-                "and build the system. Be thorough, specific, and business-focused.");
+                "and build the system. Be thorough, specific, and business-focused." +
+                (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
             // Turn 1: Analyze and identify business goals, user stories, success criteria
             history.AddUserMessage(
@@ -1087,6 +1104,9 @@ public class ProgramManagerAgent : AgentBase
                 ct);
             Logger.LogInformation("PMSpec.md PR created and merged for project {ProjectName}", projectName);
             LogActivity("task", $"📝 PMSpec.md created and merged for {projectName}");
+            await RememberAsync(MemoryType.Action,
+                $"Created and merged PMSpec.md for project '{projectName}'",
+                TruncateForMemory(pmSpecDoc), ct);
 
             // Notify all agents that PMSpec is ready — Architect will pick this up
             await _messageBus.PublishAsync(new StatusUpdateMessage
@@ -1221,6 +1241,8 @@ public class ProgramManagerAgent : AgentBase
             _userStoryIssuesCreated = true;
             Logger.LogInformation("Created {Count} User Story Issues from PMSpec", issueCount);
             LogActivity("task", $"📌 Created {issueCount} User Story Issues from PMSpec");
+            await RememberAsync(MemoryType.Action,
+                $"Created {issueCount} user story issues from PMSpec for task tracking", ct: ct);
 
             // Notify PE that planning issues are ready
             await _messageBus.PublishAsync(new PlanningCompleteMessage
@@ -1508,6 +1530,15 @@ public class ProgramManagerAgent : AgentBase
         }
 
         return string.Join('\n', result).Trim();
+    }
+
+    private static string TruncateForMemory(string text, int maxLength = 300)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        if (text.Length <= maxLength) return text;
+        var cut = text[..maxLength];
+        var lastPeriod = cut.LastIndexOf('.');
+        return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
     }
 
     #endregion

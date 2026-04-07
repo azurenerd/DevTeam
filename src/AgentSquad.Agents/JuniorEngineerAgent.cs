@@ -27,10 +27,11 @@ public class JuniorEngineerAgent : EngineerAgentBase
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<JuniorEngineerAgent> logger)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger)
     {
     }
 

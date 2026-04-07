@@ -44,10 +44,11 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         ModelRegistry modelRegistry,
         AgentStateStore stateStore,
         AgentRegistry registry,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<PrincipalEngineerAgent> logger)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
     }
@@ -345,6 +346,11 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         Logger.LogInformation("Engineering plan created with {Count} tasks from {IssueCount} issues",
             _taskBacklog.Count, enhancementIssues.Count);
         LogActivity("task", $"📋 Engineering plan created: {_taskBacklog.Count} tasks from {enhancementIssues.Count} issues");
+
+        var taskSummary = string.Join(", ", _taskBacklog.Select(t => $"{t.Id}:{t.Name}({t.Complexity})"));
+        await RememberAsync(MemoryType.Decision,
+            $"Created engineering plan with {_taskBacklog.Count} tasks from {enhancementIssues.Count} issues",
+            $"Tasks: {TruncateForMemory(taskSummary)}", ct);
 
         var planDoc = BuildEngineeringPlanMarkdown();
         await ProjectFiles.UpdateEngineeringPlanAsync(planDoc, ct);
@@ -726,6 +732,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     {
                         Logger.LogInformation("PE approved and merged PR #{Number}", pr.Number);
                         LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
+
+                        await RememberAsync(MemoryType.Action,
+                            $"Reviewed and approved+merged PR #{pr.Number}: {pr.Title}", ct: ct);
                     }
                     else
                     {
@@ -738,6 +747,10 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     await PrWorkflow.RequestChangesAsync(pr.Number, "PrincipalEngineer", reviewBody, ct);
                     Logger.LogInformation("PE requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
+
+                    await RememberAsync(MemoryType.Decision,
+                        $"Requested changes on PR #{pr.Number}: {pr.Title}",
+                        TruncateForMemory(reviewBody), ct);
 
                     await MessageBus.PublishAsync(new ChangesRequestedMessage
                     {

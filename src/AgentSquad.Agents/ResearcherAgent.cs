@@ -29,9 +29,10 @@ public class ResearcherAgent : AgentBase
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
+        AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<ResearcherAgent> logger)
-        : base(identity, logger)
+        : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -134,6 +135,9 @@ public class ResearcherAgent : AgentBase
 
                         Logger.LogInformation("Research.md PR created and merged for '{Topic}'", directive.Topic);
                         LogActivity("task", $"✅ Research.md merged: {directive.Topic}");
+                        await RememberAsync(MemoryType.Action,
+                            $"Completed research and merged Research.md for '{directive.Topic}'",
+                            TruncateForMemory(research.Summary), ct);
                         currentDirective = null; // Don't re-enqueue on success
 
                         // Explicitly close the related issue (don't rely on "Closes #X" in PR body)
@@ -168,6 +172,7 @@ public class ResearcherAgent : AgentBase
                 else
                 {
                     UpdateStatus(AgentStatus.Idle, "Waiting for research directives");
+                    await RefreshDiagnosticWithMemoryAsync(ct);
                     await Task.Delay(5000, ct);
                 }
             }
@@ -232,6 +237,7 @@ public class ResearcherAgent : AgentBase
         // Turn 1: Break down the research topic into sub-questions
         UpdateStatus(AgentStatus.Working, "Researching (1/3): Identifying sub-questions");
         var history = new ChatHistory();
+        var memoryContext = await GetMemoryContextAsync(ct: ct);
         history.AddSystemMessage(
             "You are a senior technical researcher on a software development team. " +
             "Your job is to perform deep, thorough research on assigned topics and produce structured, " +
@@ -242,7 +248,8 @@ public class ResearcherAgent : AgentBase
             $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
             "Your research MUST target this stack. Recommend libraries, patterns, and tools that are " +
             "native to or compatible with this stack. Do NOT recommend alternative tech stacks — " +
-            "the decision is final.");
+            "the decision is final." +
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
         history.AddUserMessage(
             $"I need you to research the following topic for our software project.\n\n" +
@@ -300,6 +307,9 @@ public class ResearcherAgent : AgentBase
         var synthesisContent = synthesisResponse.Content ?? "";
 
         Logger.LogDebug("Research synthesis complete for {Topic}", directive.Topic);
+        await RememberAsync(MemoryType.Decision,
+            $"Technology evaluation decisions for '{directive.Topic}'",
+            TruncateForMemory(synthesisContent), ct);
 
         return ParseResearchResult(synthesisContent, analysisResponse.Content ?? "");
     }
@@ -482,6 +492,15 @@ public class ResearcherAgent : AgentBase
         }
 
         return sb.ToString().TrimEnd();
+    }
+
+    private static string TruncateForMemory(string text, int maxLength = 300)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        if (text.Length <= maxLength) return text;
+        var cut = text[..maxLength];
+        var lastPeriod = cut.LastIndexOf('.');
+        return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
     }
 
     #endregion
