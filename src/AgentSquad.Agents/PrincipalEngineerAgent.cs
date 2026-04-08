@@ -810,6 +810,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                         Logger.LogInformation("PE approved and merged PR #{Number}", pr.Number);
                         LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
 
+                        // Mark the corresponding backlog task as Done so downstream dependencies unblock
+                        MarkEngineerTaskDone(pr);
+
                         await RememberAsync(MemoryType.Action,
                             $"Reviewed and approved+merged PR #{pr.Number}: {pr.Title}", ct: ct);
                     }
@@ -1818,6 +1821,52 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 return task;
         }
         return null;
+    }
+
+    /// <summary>
+    /// After merging an engineer's PR, find the corresponding backlog task and mark it Done.
+    /// Searches by PR number, then by task name parsed from the PR title, then by issue number.
+    /// </summary>
+    private void MarkEngineerTaskDone(AgentPullRequest pr)
+    {
+        // Try by PR number first
+        var idx = _taskBacklog.FindIndex(t => t.PullRequestNumber == pr.Number);
+
+        // Fallback: match by task name from PR title
+        if (idx < 0)
+        {
+            var taskName = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title);
+            if (taskName is not null)
+                idx = _taskBacklog.FindIndex(t =>
+                    string.Equals(t.Name, taskName, StringComparison.OrdinalIgnoreCase));
+        }
+
+        // Fallback: match by issue number from agent assignments
+        if (idx < 0)
+        {
+            foreach (var (agentId, issueNum) in _agentAssignments)
+            {
+                var taskIdx = _taskBacklog.FindIndex(t => t.IssueNumber == issueNum);
+                if (taskIdx >= 0 && !IsTaskDone(_taskBacklog[taskIdx]))
+                {
+                    idx = taskIdx;
+                    break;
+                }
+            }
+        }
+
+        if (idx >= 0)
+        {
+            var task = _taskBacklog[idx];
+            _taskBacklog[idx] = task with { Status = "Done", PullRequestNumber = pr.Number };
+            Logger.LogInformation("Marked engineer task {TaskId} '{TaskName}' as Done (PR #{PrNumber} merged)",
+                task.Id, task.Name, pr.Number);
+        }
+        else
+        {
+            Logger.LogWarning("Could not find backlog task for merged PR #{PrNumber} ({Title})",
+                pr.Number, pr.Title);
+        }
     }
 
     private static bool IsTaskDone(EngineeringTask task) =>
