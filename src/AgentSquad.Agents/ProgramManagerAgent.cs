@@ -1389,9 +1389,9 @@ public class ProgramManagerAgent : AgentBase
 
         try
         {
-            // Idempotency: check if enhancement issues already exist
+            // Idempotency: check if enhancement issues already exist (open OR closed)
             var existingEnhancements = await _github.GetIssuesByLabelAsync(
-                IssueWorkflow.Labels.Enhancement, ct);
+                IssueWorkflow.Labels.Enhancement, "all", ct);
             if (existingEnhancements.Count > 0)
             {
                 Logger.LogInformation(
