@@ -986,6 +986,78 @@ public class GitHubService : IGitHubService
         }
     }
 
+    // Sub-Issues & Dependencies (raw REST API — not yet in Octokit.net)
+
+    public async Task<bool> AddSubIssueAsync(int parentIssueNumber, long childIssueGitHubId, CancellationToken ct = default)
+    {
+        try
+        {
+            var uri = new Uri($"repos/{_owner}/{_repo}/issues/{parentIssueNumber}/sub_issues", UriKind.Relative);
+            await _client.Connection.Post<object>(uri, new { sub_issue_id = childIssueGitHubId }, "application/json", "application/vnd.github+json");
+            _logger.LogInformation("Linked issue (ID {ChildId}) as sub-issue of #{ParentNumber}",
+                childIssueGitHubId, parentIssueNumber);
+            return true;
+        }
+        catch (ApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+        {
+            // 422 may mean the sub-issue link already exists
+            _logger.LogDebug("Sub-issue link may already exist for #{ParentNumber} ← ID {ChildId}: {Message}",
+                parentIssueNumber, childIssueGitHubId, ex.Message);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to add sub-issue link: #{ParentNumber} ← ID {ChildId}",
+                parentIssueNumber, childIssueGitHubId);
+            return false;
+        }
+    }
+
+    public async Task<IReadOnlyList<AgentIssue>> GetSubIssuesAsync(int parentIssueNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            var uri = new Uri($"repos/{_owner}/{_repo}/issues/{parentIssueNumber}/sub_issues?per_page=100", UriKind.Relative);
+            var response = await _client.Connection.Get<List<Issue>>(uri, null);
+            if (response.Body is List<Issue> issues)
+                return issues.Select(i => MapIssue(i)).ToList();
+
+            // Fallback: parse raw JSON if Octokit can't deserialize directly
+            _logger.LogDebug("Sub-issues response for #{Number} returned non-list type, returning empty",
+                parentIssueNumber);
+            return Array.Empty<AgentIssue>();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to get sub-issues for #{Number}", parentIssueNumber);
+            return Array.Empty<AgentIssue>();
+        }
+    }
+
+    public async Task<bool> AddIssueDependencyAsync(int blockedIssueNumber, long blockingIssueGitHubId, CancellationToken ct = default)
+    {
+        try
+        {
+            var uri = new Uri($"repos/{_owner}/{_repo}/issues/{blockedIssueNumber}/dependencies/blocked_by", UriKind.Relative);
+            await _client.Connection.Post<object>(uri, new { issue_id = blockingIssueGitHubId }, "application/json", "application/vnd.github+json");
+            _logger.LogInformation("Added blocked-by dependency: #{BlockedNumber} is blocked by ID {BlockingId}",
+                blockedIssueNumber, blockingIssueGitHubId);
+            return true;
+        }
+        catch (ApiException ex) when (ex.StatusCode == System.Net.HttpStatusCode.UnprocessableEntity)
+        {
+            _logger.LogDebug("Dependency link may already exist for #{BlockedNumber} blocked-by ID {BlockingId}: {Message}",
+                blockedIssueNumber, blockingIssueGitHubId, ex.Message);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to add dependency: #{BlockedNumber} blocked-by ID {BlockingId}",
+                blockedIssueNumber, blockingIssueGitHubId);
+            return false;
+        }
+    }
+
     // Mapping helpers
 
     private async Task<List<string>> GetReviewCommentsAsync(int prNumber)
@@ -1030,6 +1102,7 @@ public class GitHubService : IGitHubService
         var agentName = ExtractAgentName(issue.Title);
         return new AgentIssue
         {
+            GitHubId = issue.Id,
             Number = issue.Number,
             Title = issue.Title,
             Body = issue.Body ?? "",

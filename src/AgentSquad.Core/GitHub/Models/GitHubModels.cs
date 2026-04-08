@@ -22,6 +22,8 @@ public record AgentPullRequest
 
 public record AgentIssue
 {
+    /// <summary>GitHub internal ID (different from Number). Required for sub-issue and dependency APIs.</summary>
+    public long GitHubId { get; init; }
     public int Number { get; init; }
     public string Title { get; init; } = "";
     public string Body { get; init; } = "";

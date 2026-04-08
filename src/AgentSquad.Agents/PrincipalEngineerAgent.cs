@@ -409,8 +409,11 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             }
         }
 
-        // Reload to pick up dependency info from updated issue bodies
+        // Reload to pick up dependency info from updated issue bodies, then create GitHub links
         await _taskManager.LoadTasksAsync(ct);
+
+        // Create native GitHub blocked-by dependency links between tasks
+        await _taskManager.LinkTaskDependenciesAsync(_taskManager.Tasks.ToList(), ct);
 
         Logger.LogInformation("Engineering plan created with {Count} tasks from {IssueCount} issues",
             _taskManager.TotalCount, enhancementIssues.Count);
@@ -1847,24 +1850,22 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         // Close any remaining open engineering task issues
         await _taskManager.CloseAllRemainingTaskIssuesAsync(ct);
 
-        // Close remaining open enhancement (user story) issues — pipeline is complete
+        // Notify PM to review enhancement issues — PM owns the lifecycle of user stories
         try
         {
-            var openIssues = await GitHub.GetOpenIssuesAsync(ct);
-            foreach (var issue in openIssues)
+            await MessageBus.PublishAsync(new StatusUpdateMessage
             {
-                if (issue.Labels.Any(l => string.Equals(l, "enhancement", StringComparison.OrdinalIgnoreCase)))
-                {
-                    await GitHub.AddIssueCommentAsync(issue.Number,
-                        "✅ Closing — all engineering work for this user story has been delivered and merged.", ct);
-                    await GitHub.CloseIssueAsync(issue.Number, ct);
-                    Logger.LogInformation("Closed user story issue #{Number}: {Title}", issue.Number, issue.Title);
-                }
-            }
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "StatusUpdate",
+                NewStatus = AgentStatus.Idle,
+                CurrentTask = "AllTasksComplete",
+                Details = "All engineering tasks are complete and merged. PM should review enhancement issues for final acceptance."
+            }, ct);
         }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Failed to close remaining enhancement issues during pipeline completion");
+            Logger.LogWarning(ex, "Failed to notify PM about engineering completion");
         }
 
         UpdateStatus(AgentStatus.Idle, "Engineering complete");
@@ -2312,6 +2313,8 @@ internal record EngineeringTask
     public string? AssignedTo { get; init; }
     public int? PullRequestNumber { get; init; }
     public int? IssueNumber { get; init; }
+    /// <summary>GitHub internal ID (not the issue number). Required for sub-issue and dependency APIs.</summary>
+    public long? GitHubId { get; init; }
     public string? IssueUrl { get; init; }
     public List<string> Dependencies { get; init; } = new();
     /// <summary>Issue numbers this task depends on (parsed from issue body "Depends On").</summary>

@@ -83,6 +83,25 @@ public interface IGitHubService
     /// </summary>
     Task<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>> GetPullRequestCommitsWithDatesAsync(int prNumber, CancellationToken ct = default);
 
+    // Sub-Issues (parent-child hierarchy)
+    /// <summary>
+    /// Add an issue as a sub-issue (child) of another issue using GitHub's Sub-Issues API.
+    /// This creates native parent-child hierarchy visible in the GitHub UI.
+    /// </summary>
+    Task<bool> AddSubIssueAsync(int parentIssueNumber, long childIssueGitHubId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Get all sub-issues of a parent issue. Returns both open and closed sub-issues.
+    /// </summary>
+    Task<IReadOnlyList<AgentIssue>> GetSubIssuesAsync(int parentIssueNumber, CancellationToken ct = default);
+
+    // Issue Dependencies (blocked-by relationships)
+    /// <summary>
+    /// Add a "blocked by" dependency between two issues using GitHub's Dependencies API.
+    /// The issue identified by blockedIssueNumber is blocked by the issue identified by blockingIssueGitHubId.
+    /// </summary>
+    Task<bool> AddIssueDependencyAsync(int blockedIssueNumber, long blockingIssueGitHubId, CancellationToken ct = default);
+
     // Rate Limiting
     Task<GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default);
 }

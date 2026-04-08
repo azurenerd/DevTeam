@@ -35,6 +35,7 @@ public class ProgramManagerAgent : AgentBase
     private string? _currentPhase;
     private bool _pmSpecCreated;
     private bool _userStoryIssuesCreated;
+    private readonly HashSet<int> _reviewedEnhancementIssues = new();
 
     private readonly List<IDisposable> _subscriptions = new();
 
@@ -103,6 +104,7 @@ public class ProgramManagerAgent : AgentBase
                 await HandleBlockersAsync(ct);
                 await ProcessClarificationRequestsAsync(ct);
                 await ReviewPullRequestsAsync(ct);
+                await ReviewEnhancementIssueCompletionAsync(ct);
                 await UpdateProjectTrackingAsync(ct);
 
                 await RefreshDiagnosticWithMemoryAsync(ct);
@@ -956,6 +958,115 @@ public class ProgramManagerAgent : AgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to review pull requests");
+        }
+    }
+
+    /// <summary>
+    /// Periodically review open enhancement (user story) issues that the PM created.
+    /// When all sub-issues (engineering tasks) for an enhancement are closed, the PM does
+    /// a final acceptance review against the original acceptance criteria and decides
+    /// whether to close the issue or request additional work.
+    /// </summary>
+    private async Task ReviewEnhancementIssueCompletionAsync(CancellationToken ct)
+    {
+        try
+        {
+            var openIssues = await _github.GetOpenIssuesAsync(ct);
+            var enhancementIssues = openIssues
+                .Where(i => i.Labels.Any(l => string.Equals(l, "enhancement", StringComparison.OrdinalIgnoreCase)))
+                .Where(i => !_reviewedEnhancementIssues.Contains(i.Number))
+                .ToList();
+
+            if (enhancementIssues.Count == 0)
+                return;
+
+            foreach (var issue in enhancementIssues)
+            {
+                // Check sub-issues via GitHub's Sub-Issues API
+                var subIssues = await _github.GetSubIssuesAsync(issue.Number, ct);
+
+                if (subIssues.Count == 0)
+                    continue; // No engineering tasks linked yet — skip
+
+                var allClosed = subIssues.All(s =>
+                    string.Equals(s.State, "closed", StringComparison.OrdinalIgnoreCase));
+
+                if (!allClosed)
+                    continue; // Not all tasks done yet — check again next loop
+
+                // All sub-issues are closed → PM does final acceptance review
+                Logger.LogInformation(
+                    "All {Count} sub-issues for enhancement #{Number} are closed. Starting final acceptance review.",
+                    subIssues.Count, issue.Number);
+
+                var closedSummary = string.Join("\n", subIssues.Select(s =>
+                    $"  - #{s.Number}: {s.Title} (closed)"));
+
+                var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+                var chat = kernel.GetRequiredService<IChatCompletionService>();
+                var history = new ChatHistory();
+
+                history.AddSystemMessage(
+                    "You are a Program Manager reviewing whether a user story has been fully delivered. " +
+                    "All engineering tasks have been completed and merged. Review the original acceptance " +
+                    "criteria and the completed tasks. If all criteria are met, respond with APPROVED and " +
+                    "a brief summary. If gaps remain, respond with NEEDS_MORE_WORK and describe what's missing.");
+
+                history.AddUserMessage(
+                    $"## Enhancement Issue #{issue.Number}: {issue.Title}\n\n" +
+                    $"### Original Specification\n{issue.Body}\n\n" +
+                    $"### Completed Engineering Tasks\n{closedSummary}\n\n" +
+                    "Review the acceptance criteria above. Are all criteria addressed by the completed tasks? " +
+                    "Start your response with either APPROVED or NEEDS_MORE_WORK.");
+
+                var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                var responseText = response.Content ?? "";
+
+                if (responseText.Contains("APPROVED", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Clean response for the closing comment
+                    var summaryText = responseText
+                        .Replace("APPROVED", "").Replace("approved", "")
+                        .Trim().TrimStart('-', ':', ' ', '\n');
+
+                    await _github.AddIssueCommentAsync(issue.Number,
+                        $"✅ **PM Final Review — APPROVED**\n\n" +
+                        $"All {subIssues.Count} engineering tasks have been delivered and merged.\n\n" +
+                        $"{summaryText}\n\n" +
+                        $"Closing this user story as complete.",
+                        ct);
+                    await _github.CloseIssueAsync(issue.Number, ct);
+                    _reviewedEnhancementIssues.Add(issue.Number);
+
+                    Logger.LogInformation("PM approved and closed enhancement issue #{Number}: {Title}",
+                        issue.Number, issue.Title);
+                    LogActivity("review", $"✅ Approved and closed user story #{issue.Number}: {issue.Title}");
+                }
+                else
+                {
+                    // PM found gaps — comment but don't close
+                    var gapText = responseText
+                        .Replace("NEEDS_MORE_WORK", "").Replace("needs_more_work", "")
+                        .Trim().TrimStart('-', ':', ' ', '\n');
+
+                    await _github.AddIssueCommentAsync(issue.Number,
+                        $"🔍 **PM Final Review — Additional Work Needed**\n\n" +
+                        $"All {subIssues.Count} engineering tasks are closed, but gaps remain:\n\n" +
+                        $"{gapText}\n\n" +
+                        $"Keeping this issue open for further engineering work.",
+                        ct);
+                    _reviewedEnhancementIssues.Add(issue.Number);
+
+                    Logger.LogInformation(
+                        "PM flagged enhancement issue #{Number} as needing more work: {Title}",
+                        issue.Number, issue.Title);
+                    LogActivity("review", $"🔍 Enhancement #{issue.Number} needs more work: {issue.Title}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Error reviewing enhancement issue completion");
         }
     }
 
