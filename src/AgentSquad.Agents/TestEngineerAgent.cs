@@ -720,6 +720,32 @@ public class TestEngineerAgent : AgentBase
                     return;
                 }
 
+                // PR exists but isn't ready-for-review and has no pending feedback.
+                // This happens if the runner was killed after creating the PR but before marking it ready.
+                if (pr.Labels.Contains("in-progress", StringComparer.OrdinalIgnoreCase))
+                {
+                    var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
+                    if (changedFiles.Count > 0)
+                    {
+                        Logger.LogInformation(
+                            "TestEngineer recovering PR #{PrNumber} — has {FileCount} files but not ready-for-review. Marking ready.",
+                            pr.Number, changedFiles.Count);
+                        await SyncBranchWithMainAsync(pr.Number, ct);
+                        await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+                        await _messageBus.PublishAsync(new ReviewRequestMessage
+                        {
+                            FromAgentId = Identity.Id,
+                            ToAgentId = "*",
+                            MessageType = "ReviewRequest",
+                            PrNumber = pr.Number,
+                            PrTitle = pr.Title,
+                            ReviewType = "Recovery"
+                        }, ct);
+                        UpdateStatus(AgentStatus.Idle, $"Test PR #{pr.Number} recovered and ready for review");
+                        return;
+                    }
+                }
+
                 break;
             }
         }

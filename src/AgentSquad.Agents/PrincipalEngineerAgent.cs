@@ -1847,6 +1847,26 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         // Close any remaining open engineering task issues
         await _taskManager.CloseAllRemainingTaskIssuesAsync(ct);
 
+        // Close remaining open enhancement (user story) issues — pipeline is complete
+        try
+        {
+            var openIssues = await GitHub.GetOpenIssuesAsync(ct);
+            foreach (var issue in openIssues)
+            {
+                if (issue.Labels.Any(l => string.Equals(l, "enhancement", StringComparison.OrdinalIgnoreCase)))
+                {
+                    await GitHub.AddIssueCommentAsync(issue.Number,
+                        "✅ Closing — all engineering work for this user story has been delivered and merged.", ct);
+                    await GitHub.CloseIssueAsync(issue.Number, ct);
+                    Logger.LogInformation("Closed user story issue #{Number}: {Title}", issue.Number, issue.Title);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to close remaining enhancement issues during pipeline completion");
+        }
+
         UpdateStatus(AgentStatus.Idle, "Engineering complete");
         LogActivity("system", "🏁 Engineering phase complete — all tasks done and integrated");
 
