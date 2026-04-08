@@ -1168,11 +1168,25 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             var mergedPrNumbers = myMergedPrs.Select(pr => pr.Number).ToHashSet();
+            var openPrNumbers = openPrs.Select(pr => pr.Number).ToHashSet();
 
             var reconciled = 0;
             for (var i = 0; i < _taskBacklog.Count; i++)
             {
                 var task = _taskBacklog[i];
+
+                // Handle "Assigned" tasks whose engineers haven't started (no PR yet)
+                // Reset to Pending so the PE can re-assign or self-assign
+                if (string.Equals(task.Status, "Assigned", StringComparison.OrdinalIgnoreCase)
+                    && !task.PullRequestNumber.HasValue)
+                {
+                    _taskBacklog[i] = task with { Status = "Pending", AssignedTo = null };
+                    Logger.LogInformation("Reconciled task {TaskId} '{TaskName}' to Pending (was Assigned, no PR)",
+                        task.Id, task.Name);
+                    reconciled++;
+                    continue;
+                }
+
                 if (!string.Equals(task.Status, "InProgress", StringComparison.OrdinalIgnoreCase))
                     continue;
 
@@ -1185,6 +1199,17 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     _taskBacklog[i] = task with { Status = "Done" };
                     Logger.LogInformation("Reconciled task {TaskId} '{TaskName}' to Done (PR merged)",
                         task.Id, task.Name);
+                    reconciled++;
+                }
+                // PR number set but PR is closed (not merged) and not open — reset to Pending
+                else if (task.PullRequestNumber.HasValue
+                    && !openPrNumbers.Contains(task.PullRequestNumber.Value)
+                    && !mergedPrNumbers.Contains(task.PullRequestNumber.Value))
+                {
+                    _taskBacklog[i] = task with { Status = "Pending", PullRequestNumber = null, AssignedTo = null };
+                    Logger.LogInformation(
+                        "Reconciled task {TaskId} '{TaskName}' to Pending (PR #{PrNumber} closed without merge)",
+                        task.Id, task.Name, task.PullRequestNumber);
                     reconciled++;
                 }
                 else if (!task.PullRequestNumber.HasValue
