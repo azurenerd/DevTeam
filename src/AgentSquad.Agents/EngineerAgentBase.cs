@@ -302,8 +302,21 @@ public abstract class EngineerAgentBase : AgentBase
             }
             else
             {
-                Logger.LogWarning("{Role} {Name} PR #{PrNumber} branch sync failed — possible merge conflict",
+                // Standard merge-update failed (content conflict) — force-rebase onto main
+                Logger.LogWarning("{Role} {Name} PR #{PrNumber} branch sync failed — attempting force-rebase onto main",
                     Identity.Role, Identity.DisplayName, prNumber);
+
+                var rebased = await GitHub.RebaseBranchOnMainAsync(prNumber, ct);
+                if (rebased)
+                {
+                    Logger.LogInformation("{Role} {Name} force-rebased PR #{PrNumber} onto main — conflicts resolved",
+                        Identity.Role, Identity.DisplayName, prNumber);
+                }
+                else
+                {
+                    Logger.LogWarning("{Role} {Name} force-rebase failed for PR #{PrNumber} — PR may need close-and-recreate",
+                        Identity.Role, Identity.DisplayName, prNumber);
+                }
             }
         }
         catch (Exception ex)

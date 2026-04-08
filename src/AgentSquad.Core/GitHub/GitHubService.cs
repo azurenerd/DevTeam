@@ -747,6 +747,122 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<bool> RebaseBranchOnMainAsync(int prNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            // 1. Get the PR to find its branch name
+            var pr = await _client.PullRequest.Get(_owner, _repo, prNumber);
+            var branchName = pr.Head.Ref;
+
+            // 2. Get all files changed in this PR (includes status: added, modified, removed)
+            var prFiles = await _client.PullRequest.Files(_owner, _repo, prNumber);
+            if (prFiles.Count == 0)
+            {
+                _logger.LogWarning("PR #{PrNumber} has no changed files — nothing to rebase", prNumber);
+                return false;
+            }
+
+            // 3. Read current content of each non-removed file from the PR branch
+            var filesToCommit = new List<(string Path, string Content)>();
+            var filesToRemove = new List<string>();
+
+            foreach (var file in prFiles)
+            {
+                if (string.Equals(file.Status, "removed", StringComparison.OrdinalIgnoreCase))
+                {
+                    filesToRemove.Add(file.FileName);
+                    continue;
+                }
+
+                try
+                {
+                    var content = await GetFileContentAsync(file.FileName, branchName, ct);
+                    if (content is not null)
+                    {
+                        filesToCommit.Add((file.FileName, content));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to read {File} from branch {Branch} during rebase — skipping",
+                        file.FileName, branchName);
+                }
+            }
+
+            if (filesToCommit.Count == 0 && filesToRemove.Count == 0)
+            {
+                _logger.LogWarning("PR #{PrNumber} rebase found no files to commit", prNumber);
+                return false;
+            }
+
+            // 4. Force-reset the branch to main's HEAD
+            var mainRef = await _client.Git.Reference.Get(_owner, _repo, "heads/main");
+            var mainCommitSha = mainRef.Object.Sha;
+
+            await _client.Git.Reference.Update(_owner, _repo, $"heads/{branchName}",
+                new ReferenceUpdate(mainCommitSha, true)); // force update
+
+            _logger.LogInformation(
+                "Reset branch {Branch} to main HEAD ({Sha}) for PR #{PrNumber} rebase",
+                branchName, mainCommitSha[..7], prNumber);
+
+            // 5. Re-commit all the PR's files on top of the fresh main
+            //    Use main's tree as the base and overlay the PR's files
+            var mainCommit = await _client.Git.Commit.Get(_owner, _repo, mainCommitSha);
+
+            var treeItems = new List<NewTreeItem>();
+            foreach (var (path, content) in filesToCommit)
+            {
+                var blob = new NewBlob { Content = content, Encoding = EncodingType.Utf8 };
+                var blobResult = await _client.Git.Blob.Create(_owner, _repo, blob);
+
+                treeItems.Add(new NewTreeItem
+                {
+                    Path = path,
+                    Mode = "100644",
+                    Type = TreeType.Blob,
+                    Sha = blobResult.Sha
+                });
+            }
+
+            // Handle removed files by setting their SHA to null (deletes from tree)
+            foreach (var removedPath in filesToRemove)
+            {
+                treeItems.Add(new NewTreeItem
+                {
+                    Path = removedPath,
+                    Mode = "100644",
+                    Type = TreeType.Blob,
+                    Sha = null // null SHA = delete this file
+                });
+            }
+
+            var newTree = new NewTree { BaseTree = mainCommit.Tree.Sha };
+            foreach (var item in treeItems)
+                newTree.Tree.Add(item);
+
+            var treeResult = await _client.Git.Tree.Create(_owner, _repo, newTree);
+
+            var newCommit = new NewCommit($"Rebase: {pr.Title}", treeResult.Sha, mainCommitSha);
+            var commitResult = await _client.Git.Commit.Create(_owner, _repo, newCommit);
+
+            // 6. Update branch to point to the new commit
+            await _client.Git.Reference.Update(_owner, _repo, $"heads/{branchName}",
+                new ReferenceUpdate(commitResult.Sha));
+
+            _logger.LogInformation(
+                "Rebased PR #{PrNumber} ({FileCount} files) onto main — branch {Branch} is now conflict-free",
+                prNumber, filesToCommit.Count, branchName);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to rebase PR #{PrNumber} branch onto main", prNumber);
+            return false;
+        }
+    }
+
     // Rate Limiting
 
     public async Task<Models.GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default)

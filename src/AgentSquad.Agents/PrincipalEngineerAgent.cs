@@ -973,6 +973,13 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     {
                         Logger.LogWarning("PE PR #{PrNumber} not mergeable, syncing branch with main", pr.Number);
                         var synced = await GitHub.UpdatePullRequestBranchAsync(pr.Number, ct);
+                        if (!synced)
+                        {
+                            // Standard sync failed — try force-rebase onto main
+                            Logger.LogWarning("PE PR #{PrNumber} branch sync failed — attempting force-rebase", pr.Number);
+                            synced = await GitHub.RebaseBranchOnMainAsync(pr.Number, ct);
+                        }
+
                         if (synced)
                         {
                             await Task.Delay(5000, ct);

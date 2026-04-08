@@ -581,6 +581,13 @@ public partial class PullRequestWorkflow
                 // Branch is behind main or has conflicts — try to update
                 _logger.LogWarning("PR #{Number} not mergeable, attempting branch update", prNumber);
                 var updated = await _github.UpdatePullRequestBranchAsync(prNumber, ct);
+                if (!updated)
+                {
+                    // Standard merge-update failed — try force-rebase onto main
+                    _logger.LogWarning("PR #{Number} branch update failed — attempting force-rebase onto main", prNumber);
+                    updated = await _github.RebaseBranchOnMainAsync(prNumber, ct);
+                }
+
                 if (updated)
                 {
                     // Wait briefly for GitHub to process the merge commit
@@ -601,7 +608,7 @@ public partial class PullRequestWorkflow
                 }
                 else
                 {
-                    _logger.LogWarning("PR #{Number} branch update failed — merge conflicts require manual resolution", prNumber);
+                    _logger.LogWarning("PR #{Number} branch update and rebase both failed — merge conflicts require manual resolution", prNumber);
                     await _github.AddPullRequestCommentAsync(prNumber,
                         $"⚠️ **Merge blocked** — PR has conflicts with `main` that require resolution. " +
                         $"The engineer should rebase and resolve conflicts.", ct);

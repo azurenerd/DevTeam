@@ -54,6 +54,14 @@ public interface IGitHubService
     /// </summary>
     Task<bool> UpdatePullRequestBranchAsync(int prNumber, CancellationToken ct = default);
 
+    /// <summary>
+    /// Force-rebase a PR branch onto main by: reading all changed files from the branch,
+    /// resetting the branch ref to main HEAD, and re-committing the files on top.
+    /// This eliminates merge conflicts caused by parallel branches diverging from main.
+    /// Returns true if successful, false if no files to rebase or an error occurred.
+    /// </summary>
+    Task<bool> RebaseBranchOnMainAsync(int prNumber, CancellationToken ct = default);
+
     // PR file inspection
     Task<IReadOnlyList<AgentPullRequest>> GetMergedPullRequestsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPullRequestChangedFilesAsync(int prNumber, CancellationToken ct = default);
