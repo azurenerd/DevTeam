@@ -130,7 +130,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     var pending = _taskManager.PendingCount;
                     var done = _taskManager.DoneCount;
                     var total = _taskManager.TotalCount;
-                    UpdateStatus(AgentStatus.Working,
+                    var hasWork = pending > 0 || _reviewQueue.Count > 0 || !_allTasksComplete || !_integrationPrCreated;
+                    UpdateStatus(hasWork ? AgentStatus.Working : AgentStatus.Idle,
                         $"Orchestrating tasks ({done}/{total} done, {pending} pending, {_reviewQueue.Count} PRs queued)");
 
                     // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
