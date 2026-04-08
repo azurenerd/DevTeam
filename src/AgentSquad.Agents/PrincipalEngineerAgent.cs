@@ -29,6 +29,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private bool _architectureReady;
     private bool _resourceRequestPending;
     private bool _recoveredReviewPRs;
+    private bool _recoveredInProgressPR;
     private DateTime _lastResourceRequestTime = DateTime.MinValue;
     private static readonly TimeSpan SpawnCooldown = TimeSpan.FromSeconds(45);
     private bool _allTasksComplete;
@@ -134,10 +135,18 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
                     // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
                     await RecoverReadyForReviewPRsAsync(ct);
+                    // Recovery: detect and resume our own in-progress PRs from prior runs
+                    await RecoverOwnInProgressPRAsync(ct);
                     // Check if our tracked PR has been merged/closed
                     await CheckOwnPrStatusAsync(ct);
                     // Recovery: finish stuck in-progress PRs that were never marked ready
                     await RecoverStuckInProgressPRAsync(ct);
+                    // Priority 0: Continue work on our own in-progress PR before anything else
+                    if (CurrentPrNumber is not null && !await IsOwnPrReadyForReview(ct))
+                    {
+                        await ContinueOwnPrImplementationAsync(ct);
+                        continue; // Skip reviews until our own PR is done
+                    }
                     // Priority 1: Process rework feedback on our own PRs
                     await ProcessOwnReworkAsync(ct);
 
@@ -1134,6 +1143,230 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to recover ready-for-review PRs");
+        }
+    }
+
+    /// <summary>
+    /// On restart, detect PE's own open in-progress PRs and restore CurrentPrNumber
+    /// so the PE can continue implementation instead of leaving the PR orphaned.
+    /// </summary>
+    private async Task RecoverOwnInProgressPRAsync(CancellationToken ct)
+    {
+        if (_recoveredInProgressPR)
+            return;
+        _recoveredInProgressPR = true;
+
+        // If we already have a tracked PR, nothing to recover
+        if (CurrentPrNumber is not null)
+            return;
+
+        try
+        {
+            var myPRs = await PrWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
+            foreach (var pr in myPRs)
+            {
+                if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Look for in-progress PRs (not ready-for-review — those are handled elsewhere)
+                if (pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                // Found an in-progress PR that belongs to the PE
+                CurrentPrNumber = pr.Number;
+                Identity.AssignedPullRequest = pr.Number.ToString();
+                ActivatePrSession(pr.Number);
+
+                Logger.LogInformation(
+                    "PE recovered own in-progress PR #{PrNumber}: {Title} — will continue implementation",
+                    pr.Number, pr.Title);
+                UpdateStatus(AgentStatus.Working, $"Resuming work on PR #{pr.Number}");
+                break; // Only recover one PR at a time
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to recover own in-progress PR");
+        }
+    }
+
+    /// <summary>
+    /// Check if our currently tracked PR is already ready for review (vs still in progress).
+    /// </summary>
+    private async Task<bool> IsOwnPrReadyForReview(CancellationToken ct)
+    {
+        if (CurrentPrNumber is null)
+            return false;
+
+        try
+        {
+            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            return pr?.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase) == true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Continue implementing our own in-progress PR. Reads existing commits to determine
+    /// what's been done, generates remaining steps, and implements them.
+    /// </summary>
+    private async Task ContinueOwnPrImplementationAsync(CancellationToken ct)
+    {
+        if (CurrentPrNumber is null)
+            return;
+
+        try
+        {
+            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+            {
+                CurrentPrNumber = null;
+                Identity.AssignedPullRequest = null;
+                return;
+            }
+
+            // Find the linked issue for context
+            var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            AgentIssue? sourceIssue = null;
+            if (issueNumber.HasValue)
+                sourceIssue = await GitHub.GetIssueAsync(issueNumber.Value, ct);
+
+            // Get existing files to understand what's already been done
+            var existingFiles = await GetPrFileListAsync(pr.Number, ct);
+
+            Logger.LogInformation(
+                "PE continuing implementation on PR #{PrNumber} (existing files: {Files})",
+                pr.Number, existingFiles?.Split('\n').Length ?? 0);
+
+            var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
+            var pmSpecDoc = await ProjectFiles.GetPMSpecAsync(ct);
+            var techStack = Config.Project.TechStack;
+
+            // Generate implementation steps based on what remains to be done
+            var syntheticIssue = sourceIssue ?? new AgentIssue
+            {
+                Number = issueNumber ?? 0,
+                Title = pr.Title,
+                Body = pr.Body ?? "",
+                State = "open",
+                Labels = new List<string>()
+            };
+
+            var steps = await GenerateImplementationStepsAsync(
+                chat, pr, syntheticIssue, pmSpecDoc, architectureDoc, techStack, ct);
+
+            if (steps.Count == 0)
+            {
+                Logger.LogWarning("PE could not generate remaining steps for PR #{PrNumber}, marking ready", pr.Number);
+                await SyncBranchWithMainAsync(pr.Number, ct);
+                await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+                await MessageBus.PublishAsync(new ReviewRequestMessage
+                {
+                    FromAgentId = Identity.Id,
+                    ToAgentId = "*",
+                    MessageType = "ReviewRequest",
+                    PrNumber = pr.Number,
+                    PrTitle = pr.Title,
+                    ReviewType = "CodeReview"
+                }, ct);
+                return;
+            }
+
+            Logger.LogInformation(
+                "PE generated {Count} implementation steps for continued work on PR #{PrNumber}",
+                steps.Count, pr.Number);
+
+            var completedSteps = new List<string>();
+            for (var i = 0; i < steps.Count; i++)
+            {
+                ct.ThrowIfCancellationRequested();
+                var step = steps[i];
+                var stepNumber = i + 1;
+
+                UpdateStatus(AgentStatus.Working,
+                    $"PR #{pr.Number} step {stepNumber}/{steps.Count}: {Truncate(step, 60)}");
+                Logger.LogInformation(
+                    "PE implementing step {Step}/{Total} for PR #{PrNumber}: {Desc}",
+                    stepNumber, steps.Count, pr.Number, Truncate(step, 100));
+
+                var stepHistory = new ChatHistory();
+                stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
+
+                var ctx = new System.Text.StringBuilder();
+                ctx.AppendLine($"## PM Specification\n{pmSpecDoc}\n");
+                ctx.AppendLine($"## Architecture\n{architectureDoc}\n");
+                if (sourceIssue is not null)
+                    ctx.AppendLine($"## Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}\n");
+                ctx.AppendLine($"## PR Description\n{pr.Body}\n");
+
+                if (!string.IsNullOrEmpty(existingFiles) || completedSteps.Count > 0)
+                {
+                    ctx.AppendLine("## Previously Completed Steps / Existing Files");
+                    if (!string.IsNullOrEmpty(existingFiles))
+                        ctx.AppendLine($"Files already in PR:\n{existingFiles}\n");
+                    for (var j = 0; j < completedSteps.Count; j++)
+                        ctx.AppendLine($"- Step {j + 1}: {completedSteps[j]}");
+                    ctx.AppendLine();
+                }
+
+                ctx.AppendLine($"## Current Step ({stepNumber}/{steps.Count})");
+                ctx.AppendLine(step);
+                ctx.AppendLine();
+                ctx.AppendLine("Implement ONLY this step. Output each file using this format:\n");
+                ctx.AppendLine("FILE: path/to/file.ext\n```language\n<file content>\n```\n");
+                ctx.AppendLine($"Use the {techStack} technology stack. Every file MUST use the FILE: marker format.");
+                if (!string.IsNullOrEmpty(existingFiles) || completedSteps.Count > 0)
+                    ctx.AppendLine("If updating a file from a previous step, include the COMPLETE updated file content.");
+
+                stepHistory.AddUserMessage(ctx.ToString());
+
+                var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
+                var stepImpl = stepResponse.Content?.Trim() ?? "";
+
+                var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(stepImpl);
+                if (codeFiles.Count > 0)
+                {
+                    await PrWorkflow.CommitCodeFilesToPRAsync(
+                        pr.Number, codeFiles, $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}", ct);
+                    Logger.LogInformation(
+                        "PE committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
+                        codeFiles.Count, stepNumber, steps.Count, pr.Number);
+                }
+
+                completedSteps.Add(step);
+            }
+
+            // All steps done — mark ready for review
+            await SyncBranchWithMainAsync(pr.Number, ct);
+            await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+
+            await MessageBus.PublishAsync(new ReviewRequestMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "ReviewRequest",
+                PrNumber = pr.Number,
+                PrTitle = pr.Title,
+                ReviewType = "CodeReview"
+            }, ct);
+
+            Logger.LogInformation(
+                "PE completed continued implementation for PR #{PrNumber}",
+                pr.Number);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to continue own PR #{PrNumber} implementation", CurrentPrNumber);
         }
     }
 
