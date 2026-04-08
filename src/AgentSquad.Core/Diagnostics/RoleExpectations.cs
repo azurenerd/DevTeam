@@ -235,7 +235,7 @@ public static class RoleExpectations
                 Summary = "Idle — check for pending work",
                 Justification = $"PE is idle with reason: \"{reason}\". If there are pending High-complexity " +
                     "tasks in the backlog, PE should be working on them. If all tasks are assigned or complete, " +
-                    "this is correct. Check EngineeringPlan.md for task statuses.",
+                    "this is correct. Check engineering-task issues for task statuses.",
                 IsCompliant = true, // Give benefit of doubt — the loop will check
                 ScenarioRef = "Scenario A step 7"
             };
@@ -245,15 +245,15 @@ public static class RoleExpectations
         {
             if (reasonLower.Contains("engineering plan") || reasonLower.Contains("creating"))
                 return Compliant(
-                    "Working — creating engineering plan",
-                    "PE is creating the engineering plan from Issues, Architecture, and PMSpec. " +
-                    "Per Scenario A step 6, PE reads enhancement issues and creates EngineeringPlan.md.",
+                    "Working — creating engineering task issues",
+                    "PE is decomposing enhancement issues into engineering-task GitHub Issues. " +
+                    "Per Scenario A step 6, PE reads enhancement issues and creates engineering-task issues in GitHub.",
                     "Scenario A step 6");
 
             if (reasonLower.Contains("recovered") && reasonLower.Contains("task"))
                 return Compliant(
-                    "Working — recovered tasks from plan",
-                    "PE recovered existing tasks from EngineeringPlan.md after a restart. " +
+                    "Working — recovered tasks from GitHub issues",
+                    "PE recovered existing tasks from engineering-task GitHub Issues after a restart. " +
                     "Per §14 Idempotency, agents recover state from GitHub artifacts on restart.",
                     "§14 Idempotency");
 
@@ -289,7 +289,7 @@ public static class RoleExpectations
                 return Compliant(
                     "Working — recovery in progress",
                     "PE is recovering from an error or restarting. " +
-                    "Per §14 Idempotency, PE recovers state from EngineeringPlan.md and GitHub.",
+                    "Per §14 Idempotency, PE recovers state from GitHub Issues and PRs.",
                     "§14 Idempotency");
         }
 

@@ -502,11 +502,13 @@ public class ProgramManagerAgent : AgentBase
 
             foreach (var issue in executiveIssues)
             {
-                if (issue.Comments.Count == 0)
+                // GitHub is source of truth: fetch actual comments
+                var comments = await _github.GetIssueCommentsAsync(issue.Number, ct);
+                if (comments.Count == 0)
                     continue;
 
                 // Check the latest comment — if it's from the bot, we've already responded
-                var latestComment = issue.Comments[^1];
+                var latestComment = comments[^1];
                 if (latestComment.Body.StartsWith("⚠️") || latestComment.Body.StartsWith("✅") ||
                     latestComment.Body.StartsWith("🚀") || latestComment.Body.StartsWith("❌"))
                     continue;
@@ -679,20 +681,27 @@ public class ProgramManagerAgent : AgentBase
 
             var resourceIssues = issues.Where(i =>
                 i.Labels.Contains(IssueWorkflow.Labels.ResourceRequest,
-                    StringComparer.OrdinalIgnoreCase)
-                && !_processedIssueIds.Contains(i.Number)).ToList();
+                    StringComparer.OrdinalIgnoreCase)).ToList();
 
             foreach (var issue in resourceIssues)
             {
-                _processedIssueIds.Add(issue.Number);
+                // GitHub is source of truth: fetch actual comments to determine state
+                var comments = await _github.GetIssueCommentsAsync(issue.Number, ct);
+                var lastComment = comments.Count > 0 ? comments[^1] : null;
 
-                // Skip issues that already have a bot response (from prior runs)
-                if (issue.Comments.Count > 0 &&
-                    (issue.Comments[^1].Body.StartsWith("⚠️") ||
-                     issue.Comments[^1].Body.StartsWith("✅") ||
-                     issue.Comments[^1].Body.StartsWith("🚀")))
+                // If the last comment is a ✅ or 🚀 (already fulfilled), close and skip
+                if (lastComment is not null &&
+                    (lastComment.Body.StartsWith("✅") || lastComment.Body.StartsWith("🚀")))
                 {
-                    Logger.LogDebug("Resource request #{Number} already has bot response, skipping", issue.Number);
+                    Logger.LogDebug("Resource request #{Number} already fulfilled, closing", issue.Number);
+                    await _github.CloseIssueAsync(issue.Number, ct);
+                    continue;
+                }
+
+                // If already denied (⚠️), don't re-deny — just skip
+                if (lastComment is not null && lastComment.Body.StartsWith("⚠️"))
+                {
+                    Logger.LogDebug("Resource request #{Number} already denied, skipping", issue.Number);
                     continue;
                 }
 

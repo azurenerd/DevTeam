@@ -174,11 +174,13 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                         await WorkOnOwnTasksAsync(ct);
                         // Priority 3.5: Discover open PRs needing review (in case messages were lost)
                         await DiscoverUnreviewedEngineerPRsAsync(ct);
-                        // Priority 4: Review engineer PRs
-                        await ReviewEngineerPRsAsync(ct);
                         // Priority 5: Check if more engineers are needed
                         await EvaluateResourceNeedsAsync(ct);
                     }
+
+                    // Always review PRs — even after all tasks complete (test PRs still need review)
+                    await DiscoverUnreviewedEngineerPRsAsync(ct);
+                    await ReviewEngineerPRsAsync(ct);
 
                 }
 

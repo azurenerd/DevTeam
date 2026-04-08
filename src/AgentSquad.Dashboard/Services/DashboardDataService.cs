@@ -497,10 +497,10 @@ public sealed class DashboardDataService : BackgroundService
             RecordMilestone("🏛️", "Architecture.md Created",
                 $"{agentName} produced the architecture document", "document", agentName);
         }
-        if (detailsLower.Contains("engineeringplan.md") && !detailsLower.Contains("marker"))
+        if (detailsLower.Contains("engineering plan created") || detailsLower.Contains("engineering-task"))
         {
-            RecordMilestone("📐", "EngineeringPlan.md Created",
-                $"{agentName} produced the engineering plan", "document", agentName);
+            RecordMilestone("📐", "Engineering Tasks Created",
+                $"{agentName} created engineering task issues", "document", agentName);
         }
 
         // Detect issue creation

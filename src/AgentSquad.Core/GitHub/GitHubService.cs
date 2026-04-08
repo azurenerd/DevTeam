@@ -377,6 +377,26 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<Models.IssueComment>> GetIssueCommentsAsync(int issueNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            var comments = await _client.Issue.Comment.GetAllForIssue(_owner, _repo, issueNumber);
+            return comments.Select(c => new Models.IssueComment
+            {
+                Id = c.Id,
+                Author = c.User.Login,
+                Body = c.Body,
+                CreatedAt = c.CreatedAt.UtcDateTime
+            }).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get comments for issue #{Number}", issueNumber);
+            throw;
+        }
+    }
+
     public async Task CloseIssueAsync(int issueNumber, CancellationToken ct = default)
     {
         try
