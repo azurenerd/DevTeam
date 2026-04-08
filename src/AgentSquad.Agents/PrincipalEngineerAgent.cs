@@ -38,6 +38,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private readonly HashSet<int> _forceApprovalPrs = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
     private readonly Dictionary<int, int> _conflictRetryCount = new();
+    private DateTime _lastReviewDiscovery = DateTime.MinValue;
+    private static readonly TimeSpan ReviewDiscoveryInterval = TimeSpan.FromMinutes(2);
 
     public PrincipalEngineerAgent(
         AgentIdentity identity,
@@ -152,6 +154,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                         await AssignTasksToAvailableEngineersAsync(ct);
                         // Priority 3: Work on our own tasks (any complexity)
                         await WorkOnOwnTasksAsync(ct);
+                        // Priority 3.5: Discover open PRs needing review (in case messages were lost)
+                        await DiscoverUnreviewedEngineerPRsAsync(ct);
                         // Priority 4: Review engineer PRs
                         await ReviewEngineerPRsAsync(ct);
                         // Priority 5: Check if more engineers are needed
@@ -727,6 +731,52 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         }
     }
 
+    /// <summary>
+    /// Periodically scan GitHub for open PRs with 'ready-for-review' label that aren't
+    /// in the review queue. This catches PRs whose ReviewRequestMessage was lost on restart.
+    /// </summary>
+    private async Task DiscoverUnreviewedEngineerPRsAsync(CancellationToken ct)
+    {
+        if (DateTime.UtcNow - _lastReviewDiscovery < ReviewDiscoveryInterval)
+            return;
+        _lastReviewDiscovery = DateTime.UtcNow;
+
+        try
+        {
+            var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+            var discovered = 0;
+
+            foreach (var pr in openPRs)
+            {
+                // Only ready-for-review PRs
+                if (!pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                // Skip our own PRs
+                if (pr.Title.StartsWith(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Skip if already reviewed or already queued
+                if (_reviewedPrNumbers.Contains(pr.Number))
+                    continue;
+
+                // Add to review queue
+                _reviewQueue.Enqueue(pr.Number);
+                discovered++;
+                Logger.LogInformation(
+                    "PE discovered unreviewed PR #{Number}: {Title} (ready-for-review)",
+                    pr.Number, pr.Title);
+            }
+
+            if (discovered > 0)
+                Logger.LogInformation("PE discovered {Count} unreviewed engineer PRs", discovered);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to discover unreviewed engineer PRs");
+        }
+    }
+
     private async Task ReviewEngineerPRsAsync(CancellationToken ct)
     {
         try
@@ -836,6 +886,10 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
                 _reviewedPrNumbers.Add(prNumber);
             }
+
+            // Reset status after review loop completes
+            if (prNumbersToReview.Count > 0)
+                UpdateStatus(AgentStatus.Idle, "Review cycle complete, checking tasks");
         }
         catch (Exception ex)
         {
