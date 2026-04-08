@@ -183,31 +183,50 @@ public abstract class EngineerAgentBase : AgentBase
                     }
                     else
                     {
-                        // Track a ready-for-review PR so rework feedback can reach us
-                        var reviewPR = myTasks.FirstOrDefault(pr =>
+                        // Track ready-for-review PRs and check for unaddressed feedback
+                        var reviewPRs = myTasks.Where(pr =>
                             string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
-                            && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase));
-                        if (reviewPR != null)
-                        {
-                            CurrentPrNumber = reviewPR.Number;
-                            Identity.AssignedPullRequest = reviewPR.Number.ToString();
-                            Logger.LogInformation("{Role} {Name} re-tracking PR #{PrNumber} awaiting review",
-                                Identity.Role, Identity.DisplayName, reviewPR.Number);
+                            && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                            .ToList();
 
-                            // Re-broadcast review request so reviewers pick it up after restart
-                            // (bus messages are in-memory and lost on restart)
-                            await MessageBus.PublishAsync(new ReviewRequestMessage
+                        if (reviewPRs.Count > 0)
+                        {
+                            // Pick the first one with pending feedback, else the first one
+                            foreach (var reviewPR in reviewPRs)
                             {
-                                FromAgentId = Identity.Id,
-                                ToAgentId = "*",
-                                MessageType = "ReviewRequest",
-                                PrNumber = reviewPR.Number,
-                                PrTitle = reviewPR.Title,
-                                ReviewType = "Recovery"
-                            }, ct);
-                            Logger.LogInformation("{Role} {Name} re-broadcast review request for PR #{PrNumber}",
-                                Identity.Role, Identity.DisplayName, reviewPR.Number);
-                            UpdateStatus(AgentStatus.Idle, $"PR #{reviewPR.Number} awaiting review");
+                                CurrentPrNumber = reviewPR.Number;
+                                Identity.AssignedPullRequest = reviewPR.Number.ToString();
+
+                                // Check for unaddressed CHANGES_REQUESTED feedback on GitHub
+                                var pendingFeedback = await PrWorkflow.GetPendingChangesRequestedAsync(reviewPR.Number, ct);
+                                if (pendingFeedback is { } pending)
+                                {
+                                    // Populate rework queue directly — engineer needs to address feedback
+                                    ReworkQueue.Enqueue(new ReworkItem(reviewPR.Number, reviewPR.Title, pending.Feedback, pending.Reviewer));
+                                    Logger.LogInformation(
+                                        "{Role} {Name} recovered unaddressed feedback on PR #{PrNumber} from {Reviewer}",
+                                        Identity.Role, Identity.DisplayName, reviewPR.Number, pending.Reviewer);
+                                    UpdateStatus(AgentStatus.Working, $"Processing recovered feedback on PR #{reviewPR.Number}");
+                                    break; // Process one PR at a time
+                                }
+
+                                // No pending feedback — re-broadcast review request
+                                Logger.LogInformation("{Role} {Name} re-tracking PR #{PrNumber} awaiting review",
+                                    Identity.Role, Identity.DisplayName, reviewPR.Number);
+                                await MessageBus.PublishAsync(new ReviewRequestMessage
+                                {
+                                    FromAgentId = Identity.Id,
+                                    ToAgentId = "*",
+                                    MessageType = "ReviewRequest",
+                                    PrNumber = reviewPR.Number,
+                                    PrTitle = reviewPR.Title,
+                                    ReviewType = "Recovery"
+                                }, ct);
+                                Logger.LogInformation("{Role} {Name} re-broadcast review request for PR #{PrNumber}",
+                                    Identity.Role, Identity.DisplayName, reviewPR.Number);
+                                UpdateStatus(AgentStatus.Idle, $"PR #{reviewPR.Number} awaiting review");
+                                break; // One PR at a time
+                            }
                         }
                         else if (activePR == null)
                         {
