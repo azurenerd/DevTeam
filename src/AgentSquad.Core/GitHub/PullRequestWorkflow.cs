@@ -710,7 +710,8 @@ public partial class PullRequestWorkflow
         {
             ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rs",
             ".razor", ".blazor", ".vue", ".svelte", ".rb", ".php", ".swift", ".kt",
-            ".css", ".scss", ".html", ".json"
+            ".css", ".scss", ".html", ".json", ".md", ".txt", ".yml", ".yaml",
+            ".xml", ".config", ".csproj", ".sln", ".props", ".targets", ".sample"
         };
 
         var codeFiles = changedFiles

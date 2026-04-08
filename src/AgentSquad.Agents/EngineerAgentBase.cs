@@ -942,20 +942,28 @@ public abstract class EngineerAgentBase : AgentBase
         var attempts = ReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
         ReworkAttemptCounts[rework.PrNumber] = attempts;
 
-        if (attempts > Config.Limits.MaxReworkCycles)
+        if (attempts >= Config.Limits.MaxReworkCycles)
         {
             Logger.LogWarning(
                 "{Role} {Name} reached max rework cycles ({Max}) for PR #{PrNumber}, requesting force-approval",
                 Identity.Role, Identity.DisplayName, Config.Limits.MaxReworkCycles, rework.PrNumber);
 
-            // Only post the comment once per PR (not for every queued rework item)
+            // Only post the comment once per PR — check both in-memory set AND existing PR comments
             if (_forceApprovalSentPrs.Add(rework.PrNumber))
             {
-                await GitHub.AddPullRequestCommentAsync(
-                    rework.PrNumber,
-                    $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit " +
-                    $"({Config.Limits.MaxReworkCycles}). Requesting final approval to unblock progress.",
-                    ct);
+                // Check if a force-approval comment already exists (from prior run)
+                var existingComments = await GitHub.GetPullRequestCommentsAsync(rework.PrNumber, ct);
+                var alreadyPosted = existingComments.Any(c =>
+                    c.Body.Contains("maximum rework cycle limit", StringComparison.OrdinalIgnoreCase));
+
+                if (!alreadyPosted)
+                {
+                    await GitHub.AddPullRequestCommentAsync(
+                        rework.PrNumber,
+                        $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit " +
+                        $"({Config.Limits.MaxReworkCycles}). Requesting final approval to unblock progress.",
+                        ct);
+                }
 
                 await MessageBus.PublishAsync(new ReviewRequestMessage
                 {
@@ -993,6 +1001,10 @@ public abstract class EngineerAgentBase : AgentBase
             var techStack = Config.Project.TechStack;
             var reworkMemory = await GetMemoryContextAsync(ct: ct);
 
+            // Load current PR file contents so the AI can see what exists and needs fixing
+            var currentFilesContext = await PrWorkflow.GetPRCodeContextAsync(
+                rework.PrNumber, pr.HeadBranch, ct: ct);
+
             var history = new ChatHistory();
             history.AddSystemMessage(GetReworkSystemPrompt(techStack) +
                 (string.IsNullOrEmpty(reworkMemory) ? "" : $"\n\n{reworkMemory}"));
@@ -1003,6 +1015,8 @@ public abstract class EngineerAgentBase : AgentBase
                 $"## Architecture\n{architectureDoc}\n\n" +
                 $"## PM Specification\n{pmSpecDoc}\n\n" +
                 await GetAdditionalReworkContextAsync(ct) +
+                (string.IsNullOrEmpty(currentFilesContext) ? "" :
+                    $"## Current Files on PR Branch\n{currentFilesContext}\n\n") +
                 $"## Review Feedback\n{combinedFeedback}\n\n" +
                 "REQUIRED: Start your response with CHANGES SUMMARY that addresses each numbered " +
                 "feedback item using the SAME numbers. Example:\n" +
@@ -1010,9 +1024,10 @@ public abstract class EngineerAgentBase : AgentBase
                 "1. Fixed the null check in AuthController.cs\n" +
                 "2. Added validation for empty strings as requested\n" +
                 "3. No change needed — the test already covers this case\n\n" +
-                "Then output the corrected files using this exact format:\n\n" +
+                "Then you MUST output the corrected files using this exact format:\n\n" +
                 "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
-                "Include the COMPLETE content of each changed file.");
+                "Include the COMPLETE content of each changed file. " +
+                "You MUST include at least one FILE: block — a summary alone is not sufficient.");
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
             var updatedImpl = response.Content?.Trim() ?? "";

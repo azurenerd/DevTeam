@@ -544,7 +544,7 @@ public class TestEngineerAgent : AgentBase
             var attempts = _reworkAttempts.GetValueOrDefault(rework.PrNumber, 0) + 1;
             _reworkAttempts[rework.PrNumber] = attempts;
 
-            if (attempts > _config.Limits.MaxReworkCycles)
+            if (attempts >= _config.Limits.MaxReworkCycles)
             {
                 Logger.LogWarning("TestEngineer reached max rework cycles for PR #{PrNumber}", rework.PrNumber);
                 await _github.AddPullRequestCommentAsync(rework.PrNumber,
