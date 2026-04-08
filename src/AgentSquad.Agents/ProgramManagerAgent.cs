@@ -505,23 +505,22 @@ public class ProgramManagerAgent : AgentBase
                 if (issue.Comments.Count == 0)
                     continue;
 
-                // Look for new comments we haven't processed yet
+                // Check the latest comment — if it's from the bot, we've already responded
                 var latestComment = issue.Comments[^1];
-                if (_processedIssueIds.Contains(issue.Number)
-                    && latestComment.CreatedAt <= GetLastProcessedTime(issue.Number))
-                    continue;
-
-                // Skip comments made by the bot itself (only respond to human comments)
                 if (latestComment.Body.StartsWith("⚠️") || latestComment.Body.StartsWith("✅") ||
                     latestComment.Body.StartsWith("🚀") || latestComment.Body.StartsWith("❌"))
+                    continue;
+
+                // Only process human approval/denial comments (not resource-request auto-comments)
+                var body = latestComment.Body;
+                if (!body.Contains("approved", StringComparison.OrdinalIgnoreCase) &&
+                    !body.Contains("denied", StringComparison.OrdinalIgnoreCase) &&
+                    !body.Contains("rejected", StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 Logger.LogInformation(
                     "Executive response on issue #{Number}: {Comment}",
                     issue.Number, latestComment.Body);
-
-                _processedIssueIds.Add(issue.Number);
-                var body = latestComment.Body;
 
                 if (body.Contains("approved", StringComparison.OrdinalIgnoreCase))
                 {
@@ -686,6 +685,16 @@ public class ProgramManagerAgent : AgentBase
             foreach (var issue in resourceIssues)
             {
                 _processedIssueIds.Add(issue.Number);
+
+                // Skip issues that already have a bot response (from prior runs)
+                if (issue.Comments.Count > 0 &&
+                    (issue.Comments[^1].Body.StartsWith("⚠️") ||
+                     issue.Comments[^1].Body.StartsWith("✅") ||
+                     issue.Comments[^1].Body.StartsWith("🚀")))
+                {
+                    Logger.LogDebug("Resource request #{Number} already has bot response, skipping", issue.Number);
+                    continue;
+                }
 
                 if (_additionalEngineersHired >= _config.Limits.MaxAdditionalEngineers)
                 {
