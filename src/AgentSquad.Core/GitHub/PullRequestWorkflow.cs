@@ -1073,6 +1073,59 @@ public partial class PullRequestWorkflow
     }
 
     /// <summary>
+    /// Detects when an AI response is meta-commentary about itself rather than actual review content.
+    /// This happens when the Copilot CLI's underlying model "breaks character" and responds
+    /// as a generic AI assistant instead of performing the requested task.
+    /// </summary>
+    public static bool IsGarbageAIResponse(string response)
+    {
+        if (string.IsNullOrWhiteSpace(response))
+            return true;
+
+        // Patterns that indicate the model is talking about itself rather than reviewing code
+        string[] garbagePatterns =
+        [
+            "I'm powered by",
+            "I'm an interactive AI",
+            "my actual design",
+            "my operating model",
+            "my core instructions",
+            "my guidelines about",
+            "What would you actually like me to do",
+            "What's your actual goal",
+            "What I actually do",
+            "I need you to be explicit",
+            "conflicts with my",
+            "violated my guidelines",
+            "isn't a sustainable pattern",
+            "I can help with",
+            "I'm designed to",
+            "I'm happy to help",
+            "view files, edit code, run builds",
+            "Use tools (",
+            "Explain my work transparently",
+            "Acknowledge limitations clearly",
+            "Follow my core instructions",
+            "conflicting instruction",
+            "conflicting \"directive\"",
+            "what you're testing an integration",
+            "If you need a **code review**",
+            "If you need **structured review output**",
+        ];
+
+        var lower = response.ToLowerInvariant();
+        int hitCount = 0;
+        foreach (var pattern in garbagePatterns)
+        {
+            if (lower.Contains(pattern.ToLowerInvariant()))
+                hitCount++;
+        }
+
+        // Two or more garbage patterns = definitely not a real review
+        return hitCount >= 2;
+    }
+
+    /// <summary>
     /// Extracts a numbered changes summary from an AI rework response.
     /// Only extracts content following an explicit "CHANGES SUMMARY" header to avoid
     /// picking up AI reasoning steps that happen to be numbered.

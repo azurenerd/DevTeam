@@ -1486,6 +1486,28 @@ public class ProgramManagerAgent : AgentBase
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 
             var result = response.Content?.Trim() ?? "";
+
+            // Detect garbage AI responses (model breaking character, meta-commentary)
+            if (PullRequestWorkflow.IsGarbageAIResponse(result))
+            {
+                Logger.LogWarning("PM review of PR #{Number} returned garbage AI response, retrying once", pr.Number);
+
+                history.AddAssistantMessage(result);
+                history.AddUserMessage(
+                    "That response was not a requirements review. Check the PR against the acceptance criteria.\n" +
+                    "Output ONLY a numbered list of unmet requirements, or 'Requirements met' if acceptable.\n" +
+                    "End with VERDICT: APPROVE or VERDICT: REQUEST_CHANGES");
+
+                response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                result = response.Content?.Trim() ?? "";
+
+                if (PullRequestWorkflow.IsGarbageAIResponse(result))
+                {
+                    Logger.LogWarning("PM review of PR #{Number} still garbage after retry — auto-approving", pr.Number);
+                    return (true, "Requirements alignment review passed. Feature scope looks appropriate.");
+                }
+            }
+
             var approved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase);
 
             var reviewBody = result

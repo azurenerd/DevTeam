@@ -146,13 +146,13 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         var sb = new StringBuilder();
 
         // Critical directive: prevent CLI from acting as an interactive assistant
-        sb.AppendLine("[CRITICAL DIRECTIVE — READ THIS FIRST]");
-        sb.AppendLine("You are operating as a HEADLESS TEXT GENERATION API, not an interactive assistant.");
+        sb.AppendLine("[OUTPUT FORMAT INSTRUCTIONS]");
+        sb.AppendLine("For this task, produce ONLY the direct requested content as plain text.");
         sb.AppendLine("RULES:");
-        sb.AppendLine("1. Output the requested content DIRECTLY as plain text in your response.");
+        sb.AppendLine("1. Output the requested content DIRECTLY. Start immediately with the content itself.");
         sb.AppendLine("2. Do NOT create, edit, or write any files. Do NOT use any tools or shell commands.");
-        sb.AppendLine("3. Do NOT describe what you would do or what you created. Just output the content itself.");
-        sb.AppendLine("4. Do NOT include meta-commentary like 'Here is the document' or 'I have created...'.");
+        sb.AppendLine("3. Do NOT include conversational framing like 'Here is...' or 'I have created...'.");
+        sb.AppendLine("4. Do NOT include meta-commentary about yourself, your capabilities, or your design.");
         sb.AppendLine("5. If asked for a markdown document, output the FULL markdown — start with the first heading.");
         sb.AppendLine("6. Your ENTIRE response will be captured as the document content. Nothing else.");
         sb.AppendLine();
@@ -210,7 +210,7 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         }
 
         sb.AppendLine("[INSTRUCTION]: Continue the conversation as the assistant. Respond to the last user message, taking into account the full conversation history above.");
-        sb.AppendLine("[REMINDER]: Output the content directly. Do NOT describe what you would create. Do NOT say 'I have created...' or 'Here is...'. Start your response with the actual requested content.");
+        sb.AppendLine("[REMINDER]: Output the content directly. Do NOT describe what you would create. Do NOT include meta-commentary about yourself. Start your response with the actual requested content.");
 
         return sb.ToString().Trim();
     }

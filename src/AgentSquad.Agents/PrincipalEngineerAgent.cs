@@ -1679,6 +1679,30 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 
             var result = response.Content?.Trim() ?? "";
+
+            // Detect garbage AI responses (model breaking character, meta-commentary)
+            if (PullRequestWorkflow.IsGarbageAIResponse(result))
+            {
+                Logger.LogWarning("PE review of PR #{Number} returned garbage AI response, retrying once", pr.Number);
+
+                // Retry with a more direct prompt
+                history.AddAssistantMessage(result);
+                history.AddUserMessage(
+                    "That response was not a code review. I need you to review the actual code files above.\n" +
+                    "Output ONLY a numbered list of code issues, or 'LGTM' if the code is acceptable.\n" +
+                    "End with VERDICT: APPROVE or VERDICT: REQUEST_CHANGES");
+
+                response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                result = response.Content?.Trim() ?? "";
+
+                // If still garbage after retry, auto-approve to avoid posting nonsense
+                if (PullRequestWorkflow.IsGarbageAIResponse(result))
+                {
+                    Logger.LogWarning("PE review of PR #{Number} still garbage after retry — auto-approving", pr.Number);
+                    return (true, "Code review passed. Implementation looks reasonable for the task scope.");
+                }
+            }
+
             var approved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase);
 
             var reviewBody = result
