@@ -651,11 +651,11 @@ public class TestEngineerAgent : AgentBase
 
                 // Check for unaddressed feedback
                 var pendingFeedback = await _prWorkflow.GetPendingChangesRequestedAsync(pr.Number, ct);
-                if (pendingFeedback is var (reviewer, feedback))
+                if (pendingFeedback is { } pending)
                 {
-                    _reworkQueue.Enqueue((pr.Number, pr.Title, feedback, reviewer));
+                    _reworkQueue.Enqueue((pr.Number, pr.Title, pending.Feedback, pending.Reviewer));
                     Logger.LogInformation("TestEngineer recovered feedback on PR #{PrNumber} from {Reviewer}",
-                        pr.Number, reviewer);
+                        pr.Number, pending.Reviewer);
                     UpdateStatus(AgentStatus.Working, $"Processing feedback on test PR #{pr.Number}");
                     return;
                 }

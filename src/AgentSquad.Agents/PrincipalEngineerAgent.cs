@@ -950,13 +950,13 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
                 // Check for unaddressed CHANGES_REQUESTED feedback on GitHub
                 var pendingFeedback = await PrWorkflow.GetPendingChangesRequestedAsync(pr.Number, ct);
-                if (pendingFeedback is var (reviewer, feedback))
+                if (pendingFeedback is { } pending)
                 {
                     // Populate rework queue directly — no need to re-broadcast
-                    ReworkQueue.Enqueue(new ReworkItem(pr.Number, pr.Title, feedback, reviewer));
+                    ReworkQueue.Enqueue(new ReworkItem(pr.Number, pr.Title, pending.Feedback, pending.Reviewer));
                     Logger.LogInformation(
                         "PE recovered unaddressed feedback on PR #{PrNumber} from {Reviewer}",
-                        pr.Number, reviewer);
+                        pr.Number, pending.Reviewer);
                     UpdateStatus(AgentStatus.Working, $"Processing recovered feedback on PR #{pr.Number}");
                     continue;
                 }
