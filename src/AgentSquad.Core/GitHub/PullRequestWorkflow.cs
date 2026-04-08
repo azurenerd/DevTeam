@@ -743,7 +743,7 @@ public partial class PullRequestWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(reviewerAgent);
         ArgumentException.ThrowIfNullOrWhiteSpace(details);
 
-        var comment = $"**[{reviewerAgent}] CHANGES REQUESTED** — {details}";
+        var comment = $"**[{reviewerAgent}] CHANGES REQUESTED**\n\n{details}";
         await _github.AddPullRequestCommentAsync(prNumber, comment, ct);
         _logger.LogInformation("Agent {Agent} requested changes on PR #{Number}", reviewerAgent, prNumber);
     }
