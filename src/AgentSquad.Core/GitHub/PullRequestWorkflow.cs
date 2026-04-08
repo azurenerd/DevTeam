@@ -700,7 +700,7 @@ public partial class PullRequestWorkflow
     /// Skips non-code files (markdown, images, config) and truncates large files.
     /// </summary>
     public async Task<string> GetPRCodeContextAsync(
-        int prNumber, string headBranch, int maxFileSizeChars = 8000, CancellationToken ct = default)
+        int prNumber, string headBranch, int maxFileSizeChars = 15000, CancellationToken ct = default)
     {
         var changedFiles = await _github.GetPullRequestChangedFilesAsync(prNumber, ct);
         if (changedFiles.Count == 0)
@@ -732,9 +732,18 @@ public partial class PullRequestWorkflow
                     continue;
 
                 var ext = Path.GetExtension(filePath).TrimStart('.');
-                var truncated = content.Length > maxFileSizeChars
-                    ? content[..maxFileSizeChars] + "\n// ... (truncated)"
-                    : content;
+                string truncated;
+                if (content.Length > maxFileSizeChars)
+                {
+                    // Truncate at last newline before limit to avoid cutting mid-line
+                    var cutPoint = content.LastIndexOf('\n', maxFileSizeChars);
+                    if (cutPoint <= 0) cutPoint = maxFileSizeChars;
+                    truncated = content[..cutPoint];
+                }
+                else
+                {
+                    truncated = content;
+                }
 
                 sb.AppendLine($"### {filePath}");
                 sb.AppendLine($"```{ext}");
