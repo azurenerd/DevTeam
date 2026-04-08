@@ -8,6 +8,7 @@ public interface IGitHubService
     Task<AgentPullRequest> CreatePullRequestAsync(string title, string body, string headBranch, string baseBranch, string[] labels, CancellationToken ct = default);
     Task<AgentPullRequest?> GetPullRequestAsync(int number, CancellationToken ct = default);
     Task<IReadOnlyList<AgentPullRequest>> GetOpenPullRequestsAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<AgentPullRequest>> GetAllPullRequestsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AgentPullRequest>> GetPullRequestsForAgentAsync(string agentName, CancellationToken ct = default);
     Task<IReadOnlyList<IssueComment>> GetPullRequestCommentsAsync(int prNumber, CancellationToken ct = default);
     Task AddPullRequestCommentAsync(int prNumber, string comment, CancellationToken ct = default);
@@ -75,6 +76,12 @@ public interface IGitHubService
     Task<IReadOnlyList<AgentPullRequest>> GetMergedPullRequestsAsync(CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPullRequestChangedFilesAsync(int prNumber, CancellationToken ct = default);
     Task<IReadOnlyList<string>> GetPullRequestCommitMessagesAsync(int prNumber, CancellationToken ct = default);
+
+    /// <summary>
+    /// Get the timestamps of all commits on a PR branch.
+    /// Used by reviewers to detect whether new commits were pushed since the last review.
+    /// </summary>
+    Task<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>> GetPullRequestCommitsWithDatesAsync(int prNumber, CancellationToken ct = default);
 
     // Rate Limiting
     Task<GitHubRateLimitInfo> GetRateLimitAsync(CancellationToken ct = default);

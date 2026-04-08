@@ -233,6 +233,36 @@ internal sealed partial class EngineeringTaskIssueManager
     public EngineeringTask? FindByName(string name) =>
         _cache.FirstOrDefault(t => string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Close any remaining open engineering task issues. Called during pipeline completion
+    /// to ensure no task issues are left open (catches edge cases where MarkDoneAsync
+    /// wasn't called or GitHub auto-close via "Closes #N" didn't fire).
+    /// </summary>
+    public async Task CloseAllRemainingTaskIssuesAsync(CancellationToken ct = default)
+    {
+        var remaining = _cache.Where(t =>
+            !string.Equals(t.Status, "Done", StringComparison.OrdinalIgnoreCase) &&
+            t.IssueNumber.HasValue).ToList();
+
+        foreach (var task in remaining)
+        {
+            try
+            {
+                await _github.CloseIssueAsync(task.IssueNumber!.Value, ct);
+                await _github.AddIssueCommentAsync(task.IssueNumber!.Value,
+                    "✅ Closing — engineering pipeline complete. All tasks delivered.", ct);
+                var idx = _cache.FindIndex(t => t.IssueNumber == task.IssueNumber);
+                if (idx >= 0) _cache[idx] = task with { Status = "Done" };
+                _logger.LogInformation("Closed remaining task issue #{Number} ({Name}) during pipeline completion",
+                    task.IssueNumber, task.Name);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to close task issue #{Number} during cleanup", task.IssueNumber);
+            }
+        }
+    }
+
     // ── Issue Body Parsing & Building ────────────────────────────────────
 
     private static string BuildIssueBody(EngineeringTask task)

@@ -961,6 +961,38 @@ public partial class PullRequestWorkflow
     }
 
     /// <summary>
+    /// Check whether any new commits were pushed to a PR since a specific reviewer's last review.
+    /// Returns false if the reviewer requested changes but no new commits appeared — meaning
+    /// the author claimed rework but didn't actually push code changes.
+    /// </summary>
+    public async Task<bool> HasNewCommitsSinceReviewAsync(int prNumber, string reviewerName, CancellationToken ct = default)
+    {
+        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var ordered = comments.OrderByDescending(c => c.CreatedAt).ToList();
+
+        // Find this reviewer's last "CHANGES REQUESTED" comment
+        DateTime? lastReviewTime = null;
+        foreach (var comment in ordered)
+        {
+            var changesMatch = ChangesRequestedPattern.Match(comment.Body);
+            if (changesMatch.Success &&
+                string.Equals(changesMatch.Groups[1].Value.Trim(), reviewerName, StringComparison.OrdinalIgnoreCase))
+            {
+                lastReviewTime = comment.CreatedAt;
+                break;
+            }
+        }
+
+        // Never requested changes → treat as new (first review)
+        if (lastReviewTime is null)
+            return true;
+
+        // Get PR commits and check if any are newer than the last review
+        var commits = await _github.GetPullRequestCommitsWithDatesAsync(prNumber, ct);
+        return commits.Any(c => c.CommittedAt > lastReviewTime.Value);
+    }
+
+    /// <summary>
     /// Check whether a specific agent has posted ANY review comment (approved or changes-requested).
     /// Returns true if the agent has reviewed, false if they have never commented.
     /// </summary>

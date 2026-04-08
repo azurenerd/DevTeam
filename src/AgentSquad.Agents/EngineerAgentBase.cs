@@ -1041,53 +1041,45 @@ public abstract class EngineerAgentBase : AgentBase
                 {
                     await PrWorkflow.CommitCodeFilesToPRAsync(
                         pr.Number, codeFiles, "Address review feedback", ct);
+
+                    var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {allReviewers}.\n\n";
+                    if (!string.IsNullOrWhiteSpace(changesSummary))
+                        commentBody += changesSummary;
+                    else
+                        commentBody += $"**Files updated:** {string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))}";
+                    await GitHub.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
+
+                    await SyncBranchWithMainAsync(pr.Number, ct);
+                    await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+
+                    await MessageBus.PublishAsync(new ReviewRequestMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "ReviewRequest",
+                        PrNumber = pr.Number,
+                        PrTitle = pr.Title,
+                        ReviewType = "Rework"
+                    }, ct);
+
+                    Logger.LogInformation("{Role} {Name} submitted rework for PR #{PrNumber}, re-requesting review",
+                        Identity.Role, Identity.DisplayName, pr.Number);
+
+                    await RememberAsync(MemoryType.Action,
+                        $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{Config.Limits.MaxReworkCycles})",
+                        $"Feedback from {allReviewers}. Changes: {TruncateForMemory(updatedImpl)}", ct);
                 }
                 else
                 {
-                    var taskTitle = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title);
-                    await PrWorkflow.CommitFixesToPRAsync(
-                        pr.Number,
-                        $"src/{taskTitle}-rework.md",
-                        $"## Rework: Addressing Review Feedback\n\n" +
-                        $"**Reviewers:** {allReviewers}\n\n" +
-                        $"### Changes Made\n{updatedImpl}",
-                        $"Address review feedback from {allReviewers}",
-                        ct);
+                    // AI failed to produce FILE: blocks — do NOT mark as ready for review
+                    Logger.LogWarning(
+                        "{Role} {Name} rework on PR #{PrNumber} produced no FILE: blocks — no code changes committed. " +
+                        "Skipping ready-for-review to avoid pointless re-review of unchanged code",
+                        Identity.Role, Identity.DisplayName, pr.Number);
+                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                        $"**[{Identity.DisplayName}] Rework attempted** — AI response did not produce committable file changes. " +
+                        $"This rework attempt counted toward the limit ({attempts}/{Config.Limits.MaxReworkCycles}).", ct);
                 }
-
-                // Post a comment with the numbered changes summary
-                var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {allReviewers}.\n\n";
-                if (!string.IsNullOrWhiteSpace(changesSummary))
-                    commentBody += changesSummary;
-                else
-                {
-                    var filesList = codeFiles.Count > 0
-                        ? string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))
-                        : "rework document";
-                    commentBody += $"**Files updated:** {filesList}";
-                }
-                await GitHub.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
-
-                // Sync branch with main before marking ready — ensures PR is merge-clean
-                await SyncBranchWithMainAsync(pr.Number, ct);
-                await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
-
-                await MessageBus.PublishAsync(new ReviewRequestMessage
-                {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = "*",
-                    MessageType = "ReviewRequest",
-                    PrNumber = pr.Number,
-                    PrTitle = pr.Title,
-                    ReviewType = "Rework"
-                }, ct);
-
-                Logger.LogInformation("{Role} {Name} submitted rework for PR #{PrNumber}, re-requesting review",
-                    Identity.Role, Identity.DisplayName, pr.Number);
-
-                await RememberAsync(MemoryType.Action,
-                    $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{Config.Limits.MaxReworkCycles})",
-                    $"Feedback from {allReviewers}. Changes: {TruncateForMemory(updatedImpl)}", ct);
             }
         }
         catch (Exception ex)

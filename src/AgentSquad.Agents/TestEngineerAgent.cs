@@ -576,6 +576,10 @@ public class TestEngineerAgent : AgentBase
                 var chat = kernel.GetRequiredService<IChatCompletionService>();
                 var techStack = _config.Project.TechStack;
 
+                // Fetch current PR files so the AI can see what it already wrote
+                var currentFilesContext = await _prWorkflow.GetPRCodeContextAsync(
+                    rework.PrNumber, pr.HeadBranch, ct: ct);
+
                 var history = new ChatHistory();
                 history.AddSystemMessage(
                     $"You are an expert test engineer maintaining tests for a {techStack} project.\n" +
@@ -585,11 +589,15 @@ public class TestEngineerAgent : AgentBase
                     "in one sentence what you changed or why no change was needed.\n\n" +
                     "After the CHANGES SUMMARY, output each corrected file using this exact format:\n" +
                     "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
-                    "Include the COMPLETE content of each changed file.");
+                    "Include the COMPLETE content of each changed file. " +
+                    "You MUST include at least one FILE: block — a summary alone is not sufficient.");
 
                 history.AddUserMessage(
                     $"## Test PR #{rework.PrNumber}: {rework.PrTitle}\n\n" +
                     $"## Original PR Description\n{pr.Body}\n\n" +
+                    (string.IsNullOrEmpty(currentFilesContext) ? "" :
+                        $"## Current Files on PR Branch\nThese are the files you already wrote. " +
+                        "Modify them to address the feedback below:\n{currentFilesContext}\n\n") +
                     $"## Review Feedback from {rework.Reviewer}\n{rework.Feedback}\n\n" +
                     "REQUIRED: Start your response with CHANGES SUMMARY that addresses each numbered " +
                     "feedback item using the SAME numbers. Example:\n" +
@@ -610,39 +618,43 @@ public class TestEngineerAgent : AgentBase
                     {
                         await _prWorkflow.CommitCodeFilesToPRAsync(
                             pr.Number, codeFiles, "Address review feedback on tests", ct);
-                    }
 
-                    var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {rework.Reviewer}.\n\n";
-                    if (!string.IsNullOrWhiteSpace(changesSummary))
-                        commentBody += changesSummary;
+                        var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {rework.Reviewer}.\n\n";
+                        if (!string.IsNullOrWhiteSpace(changesSummary))
+                            commentBody += changesSummary;
+                        else
+                            commentBody += $"**Files updated:** {string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))}";
+                        await _github.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
+
+                        await SyncBranchWithMainAsync(pr.Number, ct);
+                        await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+                        await _messageBus.PublishAsync(new ReviewRequestMessage
+                        {
+                            FromAgentId = Identity.Id,
+                            ToAgentId = "*",
+                            MessageType = "ReviewRequest",
+                            PrNumber = pr.Number,
+                            PrTitle = pr.Title,
+                            ReviewType = "Rework"
+                        }, ct);
+
+                        Logger.LogInformation("TestEngineer submitted rework for PR #{PrNumber}, re-requesting review", pr.Number);
+                        UpdateStatus(AgentStatus.Idle, $"Waiting for review on test PR #{pr.Number}");
+                        await RememberAsync(MemoryType.Action,
+                            $"Addressed review feedback on test PR #{pr.Number} from {rework.Reviewer}",
+                            TruncateForMemory(rework.Feedback), ct);
+                    }
                     else
                     {
-                        var filesSummary = codeFiles.Count > 0
-                            ? string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))
-                            : "test files";
-                        commentBody += $"**Files updated:** {filesSummary}";
+                        // AI failed to produce FILE: blocks — do NOT mark as ready for review
+                        Logger.LogWarning(
+                            "TestEngineer rework on PR #{PrNumber} produced no FILE: blocks — no changes committed. " +
+                            "Skipping ready-for-review to avoid pointless re-review of unchanged code",
+                            rework.PrNumber);
+                        await _github.AddPullRequestCommentAsync(pr.Number,
+                            $"**[{Identity.DisplayName}] Rework attempted** — AI response did not produce committable file changes. " +
+                            $"This rework attempt counted toward the limit ({attempts}/{_config.Limits.MaxReworkCycles}).", ct);
                     }
-                    await _github.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
-
-                    // Sync branch with main before marking ready — ensures PR is merge-clean
-                    await SyncBranchWithMainAsync(pr.Number, ct);
-
-                    await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
-                    await _messageBus.PublishAsync(new ReviewRequestMessage
-                    {
-                        FromAgentId = Identity.Id,
-                        ToAgentId = "*",
-                        MessageType = "ReviewRequest",
-                        PrNumber = pr.Number,
-                        PrTitle = pr.Title,
-                        ReviewType = "Rework"
-                    }, ct);
-
-                    Logger.LogInformation("TestEngineer submitted rework for PR #{PrNumber}, re-requesting review", pr.Number);
-                    UpdateStatus(AgentStatus.Idle, $"Waiting for review on test PR #{pr.Number}");
-                    await RememberAsync(MemoryType.Action,
-                        $"Addressed review feedback on test PR #{pr.Number} from {rework.Reviewer}",
-                        TruncateForMemory(rework.Feedback), ct);
                 }
             }
             catch (Exception ex)

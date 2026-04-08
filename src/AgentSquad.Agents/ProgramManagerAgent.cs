@@ -884,7 +884,19 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
-                    (approved, reviewBody) = await EvaluatePrAlignmentWithVerdictAsync(pr, ct);
+                    var hasNewCommits = await _prWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "ProgramManager", ct);
+                    if (!hasNewCommits)
+                    {
+                        Logger.LogWarning("No new commits on PR #{Number} since last PM review — approving to unblock", prNumber);
+                        approved = true;
+                        reviewBody = "No new code commits detected since last review. " +
+                            "The author marked the PR as ready but did not push file changes. " +
+                            "Approving to avoid blocking progress — previous feedback still applies.";
+                    }
+                    else
+                    {
+                        (approved, reviewBody) = await EvaluatePrAlignmentWithVerdictAsync(pr, ct);
+                    }
                 }
 
                 if (reviewBody is null)

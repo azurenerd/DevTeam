@@ -106,6 +106,22 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<AgentPullRequest>> GetAllPullRequestsAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var prs = await _client.PullRequest.GetAllForRepository(_owner, _repo,
+                new PullRequestRequest { State = ItemStateFilter.All, SortDirection = SortDirection.Descending });
+
+            return prs.Select(pr => MapPullRequest(pr, pr.Labels.Select(l => l.Name).ToList())).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get all PRs");
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<AgentPullRequest>> GetPullRequestsForAgentAsync(
         string agentName, CancellationToken ct = default)
     {
@@ -165,6 +181,23 @@ public class GitHubService : IGitHubService
         {
             _logger.LogError(ex, "Failed to get commit messages for PR #{Number}", prNumber);
             return Array.Empty<string>();
+        }
+    }
+
+    public async Task<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>> GetPullRequestCommitsWithDatesAsync(
+        int prNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            var commits = await _client.PullRequest.Commits(_owner, _repo, prNumber);
+            return commits
+                .Select(c => (c.Sha, c.Commit.Message, c.Commit.Author.Date.UtcDateTime))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get commits with dates for PR #{Number}", prNumber);
+            return Array.Empty<(string, string, DateTime)>();
         }
     }
 

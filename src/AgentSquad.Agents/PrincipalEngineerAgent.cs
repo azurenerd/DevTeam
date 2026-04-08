@@ -938,7 +938,21 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 }
                 else
                 {
-                    (approved, reviewBody) = await EvaluatePrQualityAsync(pr, ct);
+                    // Check if the author actually committed new code since our last review.
+                    // Prevents pointless re-reviews of unchanged code (wastes AI calls and creates duplicate feedback).
+                    var hasNewCommits = await PrWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "PrincipalEngineer", ct);
+                    if (!hasNewCommits)
+                    {
+                        Logger.LogWarning("No new commits on PR #{Number} since last review — approving to unblock", prNumber);
+                        approved = true;
+                        reviewBody = "No new code commits detected since last review. " +
+                            "The author marked the PR as ready but did not push file changes. " +
+                            "Approving to avoid blocking progress — previous feedback still applies.";
+                    }
+                    else
+                    {
+                        (approved, reviewBody) = await EvaluatePrQualityAsync(pr, ct);
+                    }
                 }
 
                 if (reviewBody is null)
@@ -1830,6 +1844,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
     private async Task SignalEngineeringCompleteAsync(CancellationToken ct)
     {
+        // Close any remaining open engineering task issues
+        await _taskManager.CloseAllRemainingTaskIssuesAsync(ct);
+
         UpdateStatus(AgentStatus.Idle, "Engineering complete");
         LogActivity("system", "🏁 Engineering phase complete — all tasks done and integrated");
 

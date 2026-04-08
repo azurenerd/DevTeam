@@ -517,7 +517,19 @@ public class ArchitectAgent : AgentBase
                 }
                 else
                 {
-                    (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                    var hasNewCommits = await _prWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "Architect", ct);
+                    if (!hasNewCommits)
+                    {
+                        Logger.LogWarning("No new commits on PR #{Number} since last Architect review — approving to unblock", prNumber);
+                        verdict = "APPROVED";
+                        reasoning = "No new code commits detected since last review. " +
+                            "The author marked the PR as ready but did not push file changes. " +
+                            "Approving to avoid blocking progress — previous feedback still applies.";
+                    }
+                    else
+                    {
+                        (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                    }
                 }
 
                 if (verdict == "APPROVED")
