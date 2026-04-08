@@ -838,6 +838,9 @@ public class ProgramManagerAgent : AgentBase
 
                 _reviewedPrNumbers.Add(pr.Number);
             }
+
+            // Reset status after reviews complete so dashboard doesn't show stale "Reviewing PR" text
+            UpdateStatus(AgentStatus.Idle, "Monitoring team progress");
         }
         catch (Exception ex)
         {
