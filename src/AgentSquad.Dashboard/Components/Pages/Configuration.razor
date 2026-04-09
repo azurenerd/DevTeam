@@ -594,6 +594,7 @@ else if (_config is not null)
                             <span>Issues closed (delete failed): <strong>@_cleanupResult.IssuesClosed</strong></span>
                         }
                         <span>PRs closed: <strong>@_cleanupResult.PrsClosed</strong></span>
+                        <span>PRs labeled "tested": <strong>@_cleanupResult.PrsLabeled</strong></span>
                         <span>Files deleted: <strong>@_cleanupResult.FilesDeleted</strong></span>
                         <span>Files preserved: <strong>@_cleanupResult.FilesPreserved</strong></span>
                         <span>Branches deleted: <strong>@_cleanupResult.BranchesDeleted</strong></span>
@@ -640,6 +641,7 @@ else if (_config is not null)
                     <ul class="modal-impact-list">
                         <li class="impact-danger">Delete <strong>@(_cleanupSummary?.TotalIssues ?? 0)</strong> issues (@(_cleanupSummary?.OpenIssues ?? 0) open, @(_cleanupSummary?.ClosedIssues ?? 0) closed)</li>
                         <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenPrs ?? 0)</strong> open pull requests</li>
+                        <li class="impact-warning">Label <strong>@(_cleanupSummary?.MergedPrs ?? 0)</strong> merged PRs as "tested" (prevents re-testing on restart)</li>
                         <li class="impact-danger">Delete all agent branches</li>
                         <li class="impact-danger">Delete <strong>@(_cleanupSummary?.FileCount ?? 0)</strong> files from <code>@_config?.Project.DefaultBranch</code></li>
                     </ul>

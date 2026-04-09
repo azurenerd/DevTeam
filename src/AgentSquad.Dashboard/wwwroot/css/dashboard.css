@@ -3634,6 +3634,13 @@ div[title] .config-agent-name {
     border-radius: 4px;
     font-size: 0.8rem;
 }
+.impact-warning {
+    color: #d29922;
+    font-size: 0.85rem;
+}
+.impact-warning strong {
+    color: #e3b341;
+}
 .modal-irreversible {
     margin: 0.75rem 0 0;
     padding: 0.5rem 0.75rem;

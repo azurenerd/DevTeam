@@ -199,26 +199,43 @@ public sealed class ConfigurationService
                 }
             }
 
-            // 2. Close all open PRs
-            _logger.LogWarning("CLEANUP: Closing all open PRs in {Repo}", config.GitHubRepo);
-            var openPrs = await _github.GetOpenPullRequestsAsync(ct);
-            foreach (var pr in openPrs)
+            // 2. Close all open PRs and label all merged PRs as "tested"
+            _logger.LogWarning("CLEANUP: Closing open PRs and labeling merged PRs in {Repo}", config.GitHubRepo);
+            var allPrs = await _github.GetAllPullRequestsAsync(ct);
+
+            foreach (var pr in allPrs)
             {
                 try
                 {
-                    await _github.ClosePullRequestAsync(pr.Number, ct);
-                    result.PrsClosed++;
+                    if (pr.State == "open" && !pr.IsMerged)
+                    {
+                        // Close open PRs
+                        await _github.ClosePullRequestAsync(pr.Number, ct);
+                        result.PrsClosed++;
+                    }
+
+                    // Label ALL closed/merged PRs as "tested" so the TestEngineer
+                    // won't try to re-test them on a fresh start
+                    if (!pr.Labels.Contains("tested", StringComparer.OrdinalIgnoreCase))
+                    {
+                        var updatedLabels = pr.Labels
+                            .Append("tested")
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+                        await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
+                        result.PrsLabeled++;
+                    }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to close PR #{Number}", pr.Number);
-                    result.Errors.Add($"Failed to close PR #{pr.Number}: {ex.Message}");
+                    _logger.LogWarning(ex, "Failed to process PR #{Number}", pr.Number);
+                    result.Errors.Add($"Failed to process PR #{pr.Number}: {ex.Message}");
                 }
             }
 
             // 3. Delete agent branches (not main/master)
             _logger.LogWarning("CLEANUP: Deleting agent branches in {Repo}", config.GitHubRepo);
-            // We can't list branches via our service, but we can delete known ones from closed PRs
+            var openPrs = allPrs.Where(p => p.State == "open" || p.HeadBranch?.StartsWith("agent/") == true).ToList();
             foreach (var pr in openPrs)
             {
                 if (!string.IsNullOrEmpty(pr.HeadBranch) &&
@@ -349,6 +366,7 @@ public sealed class CleanupResult
     public int IssuesDeleted { get; set; }
     public int IssuesClosed { get; set; }
     public int PrsClosed { get; set; }
+    public int PrsLabeled { get; set; }
     public int FilesDeleted { get; set; }
     public int FilesPreserved { get; set; }
     public int BranchesDeleted { get; set; }
