@@ -617,12 +617,14 @@ else if (_config is not null)
 }
 
 @* ═══════════════════════════════════════════════════════════════════
-   CONFIRMATION MODAL
+   CONFIRMATION MODAL — backdrop and dialog are siblings so textarea
+   clicks never bubble to the backdrop's close handler
    ═══════════════════════════════════════════════════════════════════ *@
 @if (_showModal)
 {
-    <div class="modal-overlay" @onmousedown="OnOverlayMouseDown">
-        <div class="modal-dialog" @onmousedown:stopPropagation="true" @onclick:stopPropagation="true">
+    <div class="modal-container">
+        <div class="modal-backdrop" @onclick="HideCleanupModal"></div>
+        <div class="modal-dialog">
             <div class="modal-header modal-header-danger">
                 <h3 class="modal-title">⚠️ Confirm Repository Cleanup</h3>
                 <button class="modal-close" @onclick="HideCleanupModal">✕</button>
@@ -709,7 +711,7 @@ else if (_config is not null)
     private PatValidationResult? _patValidation;
     private bool _validatingPat;
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         try
         {
@@ -724,6 +726,29 @@ else if (_config is not null)
         finally
         {
             _loading = false;
+        }
+
+        // Scan repo in background so stats are ready when user scrolls down
+        await Task.Yield(); // ensure UI renders before long network call
+        _ = ScanRepoBackground();
+    }
+
+    private async Task ScanRepoBackground()
+    {
+        try
+        {
+            _scanning = true;
+            await InvokeAsync(StateHasChanged);
+            _cleanupSummary = await ConfigService.ScanRepoForCleanupAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Background repo scan failed");
+        }
+        finally
+        {
+            _scanning = false;
+            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -779,7 +804,6 @@ else if (_config is not null)
 
     private void ShowCleanupModal() => _showModal = true;
     private void HideCleanupModal() => _showModal = false;
-    private void OnOverlayMouseDown(MouseEventArgs e) => _showModal = false;
 
     private async Task ExecuteCleanup()
     {
