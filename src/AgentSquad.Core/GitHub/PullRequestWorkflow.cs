@@ -591,8 +591,10 @@ public partial class PullRequestWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(approverAgent);
 
-        // Post the approval comment
-        var comment = $"**[{approverAgent}] APPROVED**";
+        // Post the approval comment with the review rationale
+        var comment = string.IsNullOrWhiteSpace(reason)
+            ? $"**[{approverAgent}] APPROVED**"
+            : $"**[{approverAgent}] APPROVED**\n\n{reason}";
         await _github.AddPullRequestCommentAsync(prNumber, comment, ct);
         _logger.LogInformation("Agent {Agent} approved PR #{Number}", approverAgent, prNumber);
 

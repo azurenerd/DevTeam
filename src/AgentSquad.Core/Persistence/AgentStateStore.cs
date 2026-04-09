@@ -269,6 +269,49 @@ public class AgentStateStore : IDisposable
         return entries;
     }
 
+    /// <summary>Get aggregate metric totals across all agents, grouped by metric name.</summary>
+    public async Task<Dictionary<string, double>> GetAggregateMetricsAsync(
+        DateTime since, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT metric_name, SUM(metric_value)
+            FROM metrics
+            WHERE timestamp >= @since
+            GROUP BY metric_name;
+            """;
+        cmd.Parameters.AddWithValue("@since", since);
+
+        var result = new Dictionary<string, double>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result[reader.GetString(0)] = reader.GetDouble(1);
+
+        return result;
+    }
+
+    /// <summary>Get metric totals per agent for a specific metric name.</summary>
+    public async Task<Dictionary<string, double>> GetMetricsByAgentAsync(
+        string metricName, DateTime since, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT agent_id, SUM(metric_value)
+            FROM metrics
+            WHERE metric_name = @name AND timestamp >= @since
+            GROUP BY agent_id;
+            """;
+        cmd.Parameters.AddWithValue("@name", metricName);
+        cmd.Parameters.AddWithValue("@since", since);
+
+        var result = new Dictionary<string, double>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            result[reader.GetString(0)] = reader.GetDouble(1);
+
+        return result;
+    }
+
     /// <summary>Remove entries older than the specified retention period.</summary>
     public async Task PruneOldEntriesAsync(TimeSpan retention, CancellationToken ct = default)
     {

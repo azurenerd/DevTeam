@@ -48,6 +48,7 @@ public abstract class EngineerAgentBase : AgentBase
     protected LocalWorkspace? Workspace;
     protected readonly BuildRunner? BuildRunnerSvc;
     protected readonly TestRunner? TestRunnerSvc;
+    protected readonly Core.Metrics.BuildTestMetrics? Metrics;
     private bool _pendingWorkspaceCleanup;
     protected int? CurrentIssueNumber;
     protected int? CurrentPrNumber;
@@ -65,7 +66,8 @@ public abstract class EngineerAgentBase : AgentBase
         AgentMemoryStore memoryStore,
         ILogger<AgentBase> logger,
         BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null)
+        TestRunner? testRunner = null,
+        Core.Metrics.BuildTestMetrics? metrics = null)
         : base(identity, logger, memoryStore)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -78,6 +80,7 @@ public abstract class EngineerAgentBase : AgentBase
         Config = config ?? throw new ArgumentNullException(nameof(config));
         BuildRunnerSvc = buildRunner;
         TestRunnerSvc = testRunner;
+        Metrics = metrics;
     }
 
     #region Lifecycle
@@ -677,6 +680,7 @@ public abstract class EngineerAgentBase : AgentBase
                 {
                     // Fallback: GitHub API mode (no local build/test — code is NOT build-validated)
                     await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, commitMsg, ct);
+                    _ = Metrics?.RecordApiOnlyCommitAsync(Identity.Id, ct);
                     committed = true;
                 }
 
@@ -1049,6 +1053,7 @@ public abstract class EngineerAgentBase : AgentBase
     /// </summary>
     protected virtual async Task HandleReworkAsync(List<ReworkItem> reworkBatch, CancellationToken ct)
     {
+        _ = Metrics?.RecordReworkRequestedAsync(Identity.Id, ct);
         var rework = reworkBatch[0]; // Use first item for PR number/title
         var pr = await GitHub.GetPullRequestAsync(rework.PrNumber, ct);
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
@@ -1193,6 +1198,7 @@ public abstract class EngineerAgentBase : AgentBase
 
                         Logger.LogInformation("{Role} {Name} submitted rework for PR #{PrNumber}, re-requesting review",
                             Identity.Role, Identity.DisplayName, pr.Number);
+                        _ = Metrics?.RecordReworkCompletedAsync(Identity.Id, ct);
 
                         await RememberAsync(MemoryType.Action,
                             $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{Config.Limits.MaxReworkCycles})",
@@ -1203,6 +1209,7 @@ public abstract class EngineerAgentBase : AgentBase
                         // Build-blocked rework — notify on PR but don't re-request review
                         Logger.LogWarning("{Role} {Name} rework for PR #{PrNumber} blocked by build errors",
                             Identity.Role, Identity.DisplayName, pr.Number);
+                        _ = Metrics?.RecordReworkBuildBlockedAsync(Identity.Id, ct);
                         await GitHub.AddPullRequestCommentAsync(pr.Number,
                             $"**[{Identity.DisplayName}] Rework blocked** — Address review feedback produced code with build errors " +
                             $"that could not be auto-resolved. This rework attempt counted toward the limit ({attempts}/{Config.Limits.MaxReworkCycles}).", ct);
@@ -1731,6 +1738,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             // Revert the failed files before regenerating
             await Workspace!.RevertUncommittedChangesAsync(ct);
+            _ = Metrics?.RecordBuildRegenerationAsync(Identity.Id, ct);
 
             var regeneratedFiles = await RegenerateCodeForStepAsync(
                 pr, stepDescription, stepNumber, totalSteps, codeFiles, chat, ct);
@@ -1749,6 +1757,7 @@ public abstract class EngineerAgentBase : AgentBase
                     Logger.LogInformation("{Role} {Name} code regeneration fixed build errors for step {Step}/{Total}",
                         Identity.Role, Identity.DisplayName, stepNumber, totalSteps);
                     LogActivity("build", $"✅ Code regeneration fixed build errors for step {stepNumber}/{totalSteps}");
+                    _ = Metrics?.RecordBuildRegenerationSuccessAsync(Identity.Id, ct);
                 }
             }
 
@@ -1758,6 +1767,8 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogError("{Role} {Name} build failed even after code regeneration for step {Step}/{Total}, blocking commit",
                     Identity.Role, Identity.DisplayName, stepNumber, totalSteps);
                 LogActivity("build", $"❌ Step {stepNumber}/{totalSteps} blocked — build errors could not be resolved");
+                _ = Metrics?.RecordBuildBlockedCommitAsync(Identity.Id, ct);
+                _ = Metrics?.RecordBlockedCommitAsync(Identity.Id, ct);
 
                 await Workspace!.RevertUncommittedChangesAsync(ct);
 
@@ -1805,9 +1816,10 @@ public abstract class EngineerAgentBase : AgentBase
             }
         }
 
-        // Commit locally and push — only reached if build succeeded
+        // Commit locally and push — only reached if build succeeded and tests pass
         await Workspace!.CommitAsync(commitMsg, ct);
         await Workspace.PushAsync(branchName, ct);
+        _ = Metrics?.RecordSuccessfulCommitAsync(Identity.Id, ct);
         return true;
     }
 
@@ -1823,11 +1835,13 @@ public abstract class EngineerAgentBase : AgentBase
     {
         for (int attempt = 0; attempt <= wsConfig.MaxBuildRetries; attempt++)
         {
+            _ = Metrics?.RecordBuildAttemptAsync(Identity.Id, ct);
             var buildResult = await BuildRunnerSvc!.BuildAsync(
                 Workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
             if (buildResult.Success)
             {
+                _ = Metrics?.RecordBuildSuccessAsync(Identity.Id, ct);
                 if (attempt > 0)
                     Logger.LogInformation("{Role} {Name} build succeeded after {Attempt} fix attempt(s)",
                         Identity.Role, Identity.DisplayName, attempt);
@@ -1835,7 +1849,12 @@ public abstract class EngineerAgentBase : AgentBase
             }
 
             if (attempt >= wsConfig.MaxBuildRetries)
+            {
+                _ = Metrics?.RecordBuildFailureAsync(Identity.Id, ct);
                 break;
+            }
+
+            _ = Metrics?.RecordBuildFixAttemptAsync(Identity.Id, ct);
 
             Logger.LogWarning("{Role} {Name} build failed (attempt {Attempt}/{Max}): {ErrorCount} errors",
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxBuildRetries + 1, buildResult.ParsedErrors.Count);
@@ -1888,6 +1907,7 @@ public abstract class EngineerAgentBase : AgentBase
         // Phase 1: Try to fix failing tests (up to MaxTestRetries attempts)
         for (int attempt = 0; attempt <= wsConfig.MaxTestRetries; attempt++)
         {
+            _ = Metrics?.RecordTestRunAsync(Identity.Id, ct);
             var testResult = await TestRunnerSvc!.RunTestsAsync(
                 Workspace!.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
 
@@ -1908,9 +1928,12 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogWarning("{Role} {Name} tests still failing after {Max} fix attempts for step {Step}/{Total} — removing unfixable tests",
                     Identity.Role, Identity.DisplayName, wsConfig.MaxTestRetries, stepNumber, totalSteps);
                 LogActivity("test", $"⚠️ Tests unfixable after {wsConfig.MaxTestRetries} attempts — removing failing tests for step {stepNumber}/{totalSteps}");
+                _ = Metrics?.RecordTestMaxRetriesReachedAsync(Identity.Id, ct);
 
                 return await RemoveFailingTestsAsync(testResult, chat, wsConfig, stepNumber, totalSteps, stepDescription, pr, ct);
             }
+
+            _ = Metrics?.RecordTestFixAttemptAsync(Identity.Id, ct);
 
             Logger.LogWarning("{Role} {Name} tests failed (attempt {Attempt}/{Max}): {Failed} failed, {Passed} passed",
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxTestRetries,
@@ -2017,6 +2040,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         if (updatedFiles.Count > 0)
         {
+            _ = Metrics?.RecordTestsRemovedAsync(Identity.Id, lastTestResult.Failed, ct);
             foreach (var file in updatedFiles)
                 await Workspace!.WriteFileAsync(file.Path, file.Content, ct);
 

@@ -1,10 +1,12 @@
 @page "/metrics"
 @rendermode InteractiveServer
 @using AgentSquad.Core.Agents
+@using AgentSquad.Core.Metrics
 @using AgentSquad.Dashboard.Services
 @using AgentSquad.Orchestrator
 @implements IDisposable
 @inject DashboardDataService DataService
+@inject BuildTestMetrics MetricsService
 
 <PageTitle>AgentSquad — Metrics</PageTitle>
 
@@ -31,6 +33,113 @@
     </div>
 </div>
 
+@* ── Build Health ────────────────────────────────────────────── *@
+<div class="metrics-section">
+    <h2>🏗️ Build Health</h2>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Build Attempts</div>
+            <div class="stat-value">@GetMetric(BuildTestMetrics.BuildAttempts)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Build Success Rate</div>
+            <div class="stat-value @(BuildSuccessRate >= 80 ? "green" : BuildSuccessRate >= 50 ? "yellow" : "red")">
+                @($"{BuildSuccessRate:F0}")%
+            </div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Fix Attempts</div>
+            <div class="stat-value yellow">@GetMetric(BuildTestMetrics.BuildFixAttempts)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Regenerations</div>
+            <div class="stat-value yellow">@GetMetric(BuildTestMetrics.BuildRegenerations)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Regen Successes</div>
+            <div class="stat-value green">@GetMetric(BuildTestMetrics.BuildRegenerationSuccesses)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Blocked Commits</div>
+            <div class="stat-value red">@GetMetric(BuildTestMetrics.BuildBlockedCommits)</div>
+        </div>
+    </div>
+</div>
+
+@* ── Test Health ─────────────────────────────────────────────── *@
+<div class="metrics-section">
+    <h2>🧪 Test Health</h2>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Test Runs</div>
+            <div class="stat-value">@GetMetric(BuildTestMetrics.TestRunsTotal)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Fix Attempts</div>
+            <div class="stat-value yellow">@GetMetric(BuildTestMetrics.TestFixAttempts)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Max Retries Hit</div>
+            <div class="stat-value red">@GetMetric(BuildTestMetrics.TestMaxRetriesReached)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Tests Removed</div>
+            <div class="stat-value red">@GetMetric(BuildTestMetrics.TestsRemoved)</div>
+        </div>
+    </div>
+</div>
+
+@* ── Rework Health ───────────────────────────────────────────── *@
+<div class="metrics-section">
+    <h2>🔄 Rework Health</h2>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Rework Requested</div>
+            <div class="stat-value">@GetMetric(BuildTestMetrics.ReworkRequested)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Rework Completed</div>
+            <div class="stat-value green">@GetMetric(BuildTestMetrics.ReworkCompleted)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Rework Build-Blocked</div>
+            <div class="stat-value red">@GetMetric(BuildTestMetrics.ReworkBuildBlocked)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Rework Success Rate</div>
+            <div class="stat-value @(ReworkSuccessRate >= 80 ? "green" : ReworkSuccessRate >= 50 ? "yellow" : "red")">
+                @($"{ReworkSuccessRate:F0}")%
+            </div>
+        </div>
+    </div>
+</div>
+
+@* ── Commit Quality ──────────────────────────────────────────── *@
+<div class="metrics-section">
+    <h2>📦 Commit Quality</h2>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="stat-label">Successful Commits</div>
+            <div class="stat-value green">@GetMetric(BuildTestMetrics.CommitsSuccessful)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Blocked Commits</div>
+            <div class="stat-value red">@GetMetric(BuildTestMetrics.CommitsBlocked)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">API-Only (unvalidated)</div>
+            <div class="stat-value yellow">@GetMetric(BuildTestMetrics.ApiOnlyCommits)</div>
+        </div>
+        <div class="stat-card">
+            <div class="stat-label">Commit Gate Pass Rate</div>
+            <div class="stat-value @(CommitPassRate >= 90 ? "green" : CommitPassRate >= 70 ? "yellow" : "red")">
+                @($"{CommitPassRate:F0}")%
+            </div>
+        </div>
+    </div>
+</div>
+
+@* ── Agent Status Distribution ───────────────────────────────── *@
 <div class="metrics-section">
     <h2>Agent Count by Status</h2>
     <div class="bar-chart">
@@ -111,11 +220,14 @@
         TotalAgents = 0
     };
 
+    private Dictionary<string, double> _buildTestMetrics = new();
+
     private static readonly AgentStatus[] _allStatuses = Enum.GetValues<AgentStatus>();
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
         RefreshData();
+        await RefreshBuildTestMetricsAsync();
         DataService.OnChange += OnDataChanged;
     }
 
@@ -124,14 +236,57 @@
         _snapshot = DataService.GetCurrentHealthSnapshot();
     }
 
+    private async Task RefreshBuildTestMetricsAsync()
+    {
+        try
+        {
+            _buildTestMetrics = await MetricsService.GetAggregatesAsync(DateTime.MinValue);
+        }
+        catch { /* metrics table may not exist yet */ }
+    }
+
     private async void OnDataChanged()
     {
         RefreshData();
+        await RefreshBuildTestMetricsAsync();
         await InvokeAsync(StateHasChanged);
     }
 
+    private int GetMetric(string name) => (int)_buildTestMetrics.GetValueOrDefault(name, 0);
+
     private int GetStatusCount(AgentStatus status) =>
         _snapshot.StatusCounts.GetValueOrDefault(status, 0);
+
+    private double BuildSuccessRate
+    {
+        get
+        {
+            var attempts = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.BuildAttempts, 0);
+            var successes = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.BuildSuccesses, 0);
+            return attempts > 0 ? successes * 100.0 / attempts : 100;
+        }
+    }
+
+    private double ReworkSuccessRate
+    {
+        get
+        {
+            var requested = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.ReworkRequested, 0);
+            var completed = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.ReworkCompleted, 0);
+            return requested > 0 ? completed * 100.0 / requested : 100;
+        }
+    }
+
+    private double CommitPassRate
+    {
+        get
+        {
+            var successful = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.CommitsSuccessful, 0);
+            var blocked = _buildTestMetrics.GetValueOrDefault(BuildTestMetrics.CommitsBlocked, 0);
+            var total = successful + blocked;
+            return total > 0 ? successful * 100.0 / total : 100;
+        }
+    }
 
     private double UtilizationPct =>
         _snapshot.TotalAgents > 0

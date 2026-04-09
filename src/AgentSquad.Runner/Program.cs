@@ -69,6 +69,7 @@ builder.Services.AddSingleton<BuildRunner>();
 builder.Services.AddSingleton<TestRunner>();
 builder.Services.AddSingleton<PlaywrightRunner>();
 builder.Services.AddSingleton<TestStrategyAnalyzer>();
+builder.Services.AddSingleton<AgentSquad.Core.Metrics.BuildTestMetrics>();
 
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();

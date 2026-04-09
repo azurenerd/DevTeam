@@ -30,10 +30,11 @@ public class SeniorEngineerAgent : EngineerAgentBase
         IOptions<AgentSquadConfig> config,
         ILogger<SeniorEngineerAgent> logger,
         BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null)
+        TestRunner? testRunner = null,
+        Core.Metrics.BuildTestMetrics? metrics = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger,
-               buildRunner, testRunner)
+               buildRunner, testRunner, metrics)
     {
     }
 

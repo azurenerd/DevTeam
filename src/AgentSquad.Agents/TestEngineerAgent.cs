@@ -43,6 +43,7 @@ public class TestEngineerAgent : AgentBase
     private readonly TestRunner? _testRunner;
     private readonly PlaywrightRunner? _playwrightRunner;
     private readonly TestStrategyAnalyzer? _testStrategyAnalyzer;
+    private readonly Core.Metrics.BuildTestMetrics? _metrics;
 
     private LocalWorkspace? _workspace;
     private bool _pendingWorkspaceCleanup;
@@ -67,7 +68,8 @@ public class TestEngineerAgent : AgentBase
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         PlaywrightRunner? playwrightRunner = null,
-        TestStrategyAnalyzer? testStrategyAnalyzer = null)
+        TestStrategyAnalyzer? testStrategyAnalyzer = null,
+        Core.Metrics.BuildTestMetrics? metrics = null)
         : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -80,6 +82,7 @@ public class TestEngineerAgent : AgentBase
         _testRunner = testRunner;
         _playwrightRunner = playwrightRunner;
         _testStrategyAnalyzer = testStrategyAnalyzer;
+        _metrics = metrics;
     }
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
@@ -864,7 +867,7 @@ public class TestEngineerAgent : AgentBase
             Logger.LogError("TestEngineer: build still failing after {MaxRetries} fix attempts, reverting test files",
                 wsConfig.MaxBuildRetries);
             await _workspace.RevertUncommittedChangesAsync(ct);
-            await GitHub.AddPullRequestCommentAsync(sourcePR.Number,
+            await _github.AddPullRequestCommentAsync(sourcePR.Number,
                 $"❌ **Test Build Blocked:** Test files for PR #{sourcePR.Number} could not be made to compile after " +
                 $"{wsConfig.MaxBuildRetries} fix attempts. Tests were not committed.", ct);
             return -1;

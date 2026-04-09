@@ -105,11 +105,15 @@ public class ConflictDetector
         {
             var fileName = filePath.Split('/')[^1];
 
-            // Check 1: Same filename exists in a DIFFERENT directory
+            // Check 1: Same filename exists at a likely-duplicate path
+            // Only warn when the parent directory structure overlaps (e.g., Pages/Index.razor
+            // vs src/Pages/Index.razor). Don't warn for legitimately different directories
+            // (e.g., Components/Header.razor vs Shared/Header.razor).
             if (existingByFileName.TryGetValue(fileName, out var existingPaths))
             {
                 var conflicts = existingPaths
-                    .Where(ep => !string.Equals(ep, filePath, StringComparison.OrdinalIgnoreCase))
+                    .Where(ep => !string.Equals(ep, filePath, StringComparison.OrdinalIgnoreCase)
+                                 && IsSuspiciousDuplicate(filePath, ep))
                     .ToList();
 
                 if (conflicts.Count > 0)
@@ -130,6 +134,41 @@ public class ConflictDetector
         }
 
         return warnings;
+    }
+
+    /// <summary>
+    /// Determines if two file paths with the same filename are likely duplicates rather
+    /// than legitimately different files. A duplicate is suspected when one path is a
+    /// suffix of the other (e.g., Pages/Index.razor vs src/Pages/Index.razor) — meaning
+    /// an agent created the same file under a slightly different root prefix.
+    /// </summary>
+    private static bool IsSuspiciousDuplicate(string newPath, string existingPath)
+    {
+        // Normalize separators
+        var a = newPath.Replace('\\', '/').TrimStart('/');
+        var b = existingPath.Replace('\\', '/').TrimStart('/');
+
+        // One path ends with the other (e.g., "Pages/Index.razor" is suffix of "src/Pages/Index.razor")
+        if (a.EndsWith(b, StringComparison.OrdinalIgnoreCase) ||
+            b.EndsWith(a, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        // Same parent directory name (e.g., both under "Pages/")
+        var aParent = GetParentDir(a);
+        var bParent = GetParentDir(b);
+        if (aParent is not null && bParent is not null &&
+            string.Equals(aParent, bParent, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
+
+        static string? GetParentDir(string path)
+        {
+            var lastSlash = path.LastIndexOf('/');
+            if (lastSlash <= 0) return null;
+            var parentStart = path.LastIndexOf('/', lastSlash - 1);
+            return parentStart >= 0 ? path[(parentStart + 1)..lastSlash] : path[..lastSlash];
+        }
     }
 
     /// <summary>

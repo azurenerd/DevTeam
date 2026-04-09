@@ -82,10 +82,11 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         IOptions<AgentSquadConfig> config,
         ILogger<PrincipalEngineerAgent> logger,
         BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null)
+        TestRunner? testRunner = null,
+        Core.Metrics.BuildTestMetrics? metrics = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger,
-               buildRunner, testRunner)
+               buildRunner, testRunner, metrics)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _taskManager = new EngineeringTaskIssueManager(github, logger);
@@ -2307,10 +2308,28 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
             var approved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase);
 
+            // Strip VERDICT markers AND any stray approval/rejection keywords the AI may
+            // have echoed to prevent contradictory text in the posted comment.
             var reviewBody = result
                 .Replace("VERDICT: APPROVE", "", StringComparison.OrdinalIgnoreCase)
                 .Replace("VERDICT: REQUEST_CHANGES", "", StringComparison.OrdinalIgnoreCase)
                 .Trim();
+
+            // Remove lines that are just standalone decision keywords the AI echoed
+            var cleanedLines = reviewBody.Split('\n')
+                .Where(line =>
+                {
+                    var trimmed = line.Trim().TrimStart('*', '#', ' ');
+                    return !string.Equals(trimmed, "APPROVED", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(trimmed, "CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(trimmed, "CHANGES_REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[ProgramManager] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[ProgramManager] APPROVED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[PrincipalEngineer] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[PrincipalEngineer] APPROVED", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+            reviewBody = string.Join('\n', cleanedLines).Trim();
 
             // Strip any preamble/thinking the AI may have included before the numbered list
             reviewBody = PullRequestWorkflow.StripReviewPreamble(reviewBody);

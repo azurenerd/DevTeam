@@ -1778,10 +1778,30 @@ public class ProgramManagerAgent : AgentBase
 
             var approved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase);
 
+            // Strip VERDICT markers AND any stray approval/rejection keywords the AI may
+            // have echoed (e.g., "APPROVED", "CHANGES REQUESTED") to prevent contradictory
+            // text from appearing in the posted comment alongside the structured header.
             var reviewBody = result
                 .Replace("VERDICT: APPROVE", "", StringComparison.OrdinalIgnoreCase)
                 .Replace("VERDICT: REQUEST_CHANGES", "", StringComparison.OrdinalIgnoreCase)
                 .Trim();
+
+            // Remove lines that are just "APPROVED" or "CHANGES REQUESTED" standing alone
+            // (the AI sometimes echoes the decision as a standalone line)
+            var cleanedLines = reviewBody.Split('\n')
+                .Where(line =>
+                {
+                    var trimmed = line.Trim().TrimStart('*', '#', ' ');
+                    return !string.Equals(trimmed, "APPROVED", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(trimmed, "CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !string.Equals(trimmed, "CHANGES_REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[ProgramManager] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[ProgramManager] APPROVED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[PrincipalEngineer] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
+                        && !trimmed.StartsWith("[PrincipalEngineer] APPROVED", StringComparison.OrdinalIgnoreCase);
+                })
+                .ToList();
+            reviewBody = string.Join('\n', cleanedLines).Trim();
 
             // Strip any preamble/thinking the AI may have included before the numbered list
             reviewBody = PullRequestWorkflow.StripReviewPreamble(reviewBody);
