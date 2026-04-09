@@ -306,10 +306,13 @@ public class TestEngineerAgent : AgentBase
             return;
         }
 
+        // Check for existing tests already in the repo (e.g., created by PE in the same PR)
+        var existingTests = await DiscoverExistingTestsAsync(sourceFiles.Keys.ToList(), ct);
+
         UpdateStatus(AgentStatus.Working, $"Generating tests for PR #{pr.Number} ({sourceFiles.Count} files)");
 
-        // Generate real test code via AI
-        var testOutput = await GenerateTestCodeAsync(pr, sourceFiles, ct);
+        // Generate real test code via AI (passes existing tests for review/improvement)
+        var testOutput = await GenerateTestCodeAsync(pr, sourceFiles, existingTests, ct);
 
         if (string.IsNullOrWhiteSpace(testOutput))
         {
@@ -393,7 +396,8 @@ public class TestEngineerAgent : AgentBase
     /// Multi-tier: generates unit, integration, and UI tests based on TestStrategy analysis.
     /// </summary>
     private async Task<string> GenerateTestCodeAsync(
-        AgentPullRequest pr, Dictionary<string, string> sourceFiles, CancellationToken ct)
+        AgentPullRequest pr, Dictionary<string, string> sourceFiles,
+        Dictionary<string, string> existingTests, CancellationToken ct)
     {
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
@@ -427,6 +431,32 @@ public class TestEngineerAgent : AgentBase
             sourceContext.AppendLine("```\n");
         }
 
+        // Build existing test context so AI can review/improve instead of duplicating
+        var existingTestContext = "";
+        if (existingTests.Count > 0)
+        {
+            var etb = new System.Text.StringBuilder();
+            etb.AppendLine("## Existing Tests Already in Repo\n");
+            etb.AppendLine("The following test files already exist for this code. " +
+                "Do NOT duplicate these tests. Instead, review them and only output:\n" +
+                "1. **Improved versions** of existing test files if they have gaps or quality issues\n" +
+                "2. **New test files** for UNTESTED code paths not covered by existing tests\n" +
+                "3. If existing tests are comprehensive, output NOTHING (empty response is fine)\n");
+            foreach (var (path, content) in existingTests)
+            {
+                var ext = Path.GetExtension(path).TrimStart('.');
+                etb.AppendLine($"### {path} (EXISTING)");
+                etb.AppendLine($"```{ext}");
+                var truncated = content.Length > 6000 ? content[..6000] + "\n// ... (truncated)" : content;
+                etb.AppendLine(truncated);
+                etb.AppendLine("```\n");
+            }
+            existingTestContext = etb.ToString();
+            Logger.LogInformation(
+                "Found {Count} existing test files for PR #{Number} — AI will review/improve instead of recreating",
+                existingTests.Count, pr.Number);
+        }
+
         var allOutputs = new System.Text.StringBuilder();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
 
@@ -435,7 +465,8 @@ public class TestEngineerAgent : AgentBase
         {
             UpdateStatus(AgentStatus.Working, $"Generating unit tests for PR #{pr.Number}");
             var unitOutput = await GenerateTestsForTierAsync(
-                chat, TestTier.Unit, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct);
+                chat, TestTier.Unit, pr, techStack, businessContext,
+                sourceContext.ToString() + existingTestContext, memoryContext, ct);
             allOutputs.AppendLine(unitOutput);
         }
 
@@ -444,7 +475,8 @@ public class TestEngineerAgent : AgentBase
         {
             UpdateStatus(AgentStatus.Working, $"Generating integration tests for PR #{pr.Number}");
             var integrationOutput = await GenerateTestsForTierAsync(
-                chat, TestTier.Integration, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct);
+                chat, TestTier.Integration, pr, techStack, businessContext,
+                sourceContext.ToString() + existingTestContext, memoryContext, ct);
             allOutputs.AppendLine(integrationOutput);
         }
 
@@ -453,14 +485,15 @@ public class TestEngineerAgent : AgentBase
         {
             UpdateStatus(AgentStatus.Working, $"Generating UI/Playwright tests for PR #{pr.Number}");
             var uiOutput = await GenerateTestsForTierAsync(
-                chat, TestTier.UI, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct,
+                chat, TestTier.UI, pr, techStack, businessContext,
+                sourceContext.ToString() + existingTestContext, memoryContext, ct,
                 strategy.UITestScenarios);
             allOutputs.AppendLine(uiOutput);
         }
 
-        Logger.LogInformation("Generated tests for PR #{Number}: Unit={Unit}, Integration={Integration}, UI={UI}",
+        Logger.LogInformation("Generated tests for PR #{Number}: Unit={Unit}, Integration={Integration}, UI={UI}, ExistingTests={Existing}",
             pr.Number, strategy.NeedsUnitTests, strategy.NeedsIntegrationTests,
-            strategy.NeedsUITests && _config.Workspace.EnableUITests);
+            strategy.NeedsUITests && _config.Workspace.EnableUITests, existingTests.Count);
 
         return allOutputs.ToString();
     }
@@ -688,6 +721,71 @@ public class TestEngineerAgent : AgentBase
         }
 
         return context.ToString();
+    }
+
+    /// <summary>
+    /// Discovers test files that already exist in the repo for the given source files.
+    /// Prevents the TE from generating duplicate tests when a PE already created tests.
+    /// Looks for files in tests/ directories with matching class/component names.
+    /// </summary>
+    private async Task<Dictionary<string, string>> DiscoverExistingTestsAsync(
+        List<string> sourceFilePaths, CancellationToken ct)
+    {
+        var existingTests = new Dictionary<string, string>();
+        try
+        {
+            var repoTree = await _github.GetRepositoryTreeAsync(_config.Project.DefaultBranch, ct);
+
+            // Build a set of source file names (without extension) to match against test files
+            var sourceNames = sourceFilePaths
+                .Select(p => Path.GetFileNameWithoutExtension(p))
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            // Find test files in the repo tree that match source file names
+            var testFilePaths = repoTree
+                .Where(f =>
+                    (f.Contains("/tests/", StringComparison.OrdinalIgnoreCase) ||
+                     f.Contains("/test/", StringComparison.OrdinalIgnoreCase) ||
+                     f.Contains("Tests/", StringComparison.OrdinalIgnoreCase)) &&
+                    TestableExtensions.Contains(Path.GetExtension(f)))
+                .Where(f =>
+                {
+                    var testName = Path.GetFileNameWithoutExtension(f);
+                    // Match "FooTests", "FooTest", "TestFoo" against source name "Foo"
+                    return sourceNames.Any(src =>
+                        testName.Contains(src, StringComparison.OrdinalIgnoreCase) ||
+                        src.Contains(testName.Replace("Tests", "").Replace("Test", ""), StringComparison.OrdinalIgnoreCase));
+                })
+                .ToList();
+
+            foreach (var testPath in testFilePaths)
+            {
+                try
+                {
+                    var content = await _github.GetFileContentAsync(testPath, _config.Project.DefaultBranch, ct);
+                    if (!string.IsNullOrWhiteSpace(content))
+                        existingTests[testPath] = content;
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Could not read existing test file {Path}", testPath);
+                }
+            }
+
+            if (existingTests.Count > 0)
+            {
+                Logger.LogInformation(
+                    "Discovered {Count} existing test files for source files: {Paths}",
+                    existingTests.Count, string.Join(", ", existingTests.Keys));
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not scan repo tree for existing tests");
+        }
+
+        return existingTests;
     }
 
     /// <summary>
