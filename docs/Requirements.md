@@ -31,6 +31,10 @@
 19. [Code Quality & Architecture Requirements](#19-code-quality--architecture-requirements)
 20. [End-to-End Workflow Scenarios](#20-end-to-end-workflow-scenarios)
 21. [PE Integration & Branch Sync Requirements](#21-pe-integration--branch-sync-requirements)
+22. [Local Workspace & Build System Requirements](#22-local-workspace--build-system-requirements)
+23. [Multi-Tier Test Execution Requirements](#23-multi-tier-test-execution-requirements)
+24. [AI Conversation Mode Requirements](#24-ai-conversation-mode-requirements)
+25. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -265,6 +269,15 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-PE-002f**: Dependencies between tasks are tracked as issue numbers in the body (e.g., `Dependencies: #106, #107`). A task is assignable only when all dependency issues are closed.
 - **REQ-PE-002g**: Task status is tracked by issue state: open = pending/in-progress, closed = done. The `in-progress` label indicates active work.
 - **REQ-PE-002h**: Only the leader PE creates engineering-task issues. This is idempotent — if issues already exist (e.g., from a prior run), the leader loads them instead of recreating.
+- **REQ-PE-002i**: **Foundation-First Planning:** The first engineering task (T1) MUST be a project foundation/scaffolding task with NO dependencies. All other tasks MAY depend on T1. If the AI-generated T1 is not a foundation task, the PE searches the task list for keywords (`foundation`, `scaffold`, `setup`, `structure`, `skeleton`, `template`, `infrastructure`, `project setup`) and promotes the matching task to position 0. T1's dependencies are always cleared.
+- **REQ-PE-002j**: The PE prompt includes guidance to create tasks suitable for parallel work with minimal overlap and merge conflict potential. Tasks should target different modules, directories, or components.
+
+**Scenario: Foundation-First Task Ordering**
+1. AI generates engineering plan: T1="Implement auth endpoints", T2="Create project scaffold", T3="Build user CRUD"
+2. PE detects T1 is NOT a foundation task (no scaffold/setup keywords)
+3. PE finds T2 contains "scaffold" → promotes T2 to position 0, shifts T1 to position 1
+4. T2 (now first) has dependencies cleared → will be implemented first
+5. Result: scaffold creates the project structure; T1 and T3 build on top of it in parallel
 
 **Scenario: PE Creates Engineering Tasks as Issues**
 1. PE receives PlanningCompleteMessage + Architecture.md is ready
@@ -419,6 +432,41 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-TEST-005c**: If an open test PR has no reviews, it re-requests review.
 - **REQ-TEST-005d**: `_testedPRs` HashSet is populated from the `tested` label on source PRs (persisted on GitHub, not in-memory only).
 - **REQ-TEST-005e**: If source files from a merged PR no longer exist on main (e.g., files were deleted), the PR is marked as tested and skipped. It MUST NOT retry every cycle.
+
+### REQ-TEST-006: Multi-Tier Test Strategy
+
+- **REQ-TEST-006a**: Before generating tests, the `TestStrategyAnalyzer` determines which test tiers are needed using code-based heuristics (no AI calls). Three tiers exist: Unit (always for code changes), Integration (service/API layer), UI/Playwright (frontend components).
+- **REQ-TEST-006b**: **File extension rules:** `.razor`, `.cshtml`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.html` trigger UI tests. File name patterns containing `Controller`, `Service`, `Repository`, `Handler`, `Gateway`, `Middleware`, `Hub`, `Client`, `Startup`, `Program` trigger integration tests.
+- **REQ-TEST-006c**: **Keyword detection:** PR body and linked issue body are searched for UI keywords (`page`, `form`, `button`, `navigation`, `modal`, `click`, etc.) and integration keywords (`api`, `endpoint`, `database`, `http`, `authentication`, etc.).
+- **REQ-TEST-006d**: **Acceptance criteria extraction:** `ExtractAcceptanceCriteria` parses checklist items (`- [ ]`, `* [ ]`) and numbered items from the issue body's acceptance criteria section. UI keywords in criteria add UI test scenarios.
+- **REQ-TEST-006e**: Each tier gets a separate AI prompt with tier-specific guidance: unit tests use mocking patterns, integration tests use `WebApplicationFactory`, UI tests use Playwright Page Object Model.
+- **REQ-TEST-006f**: Test files use `[Trait("Category", "Unit")]` / `[Trait("Category", "Integration")]` / `[Trait("Category", "UI")]` for xUnit tier filtering.
+- **REQ-TEST-006g**: `TestStrategy` record includes `RequiredTiers` (yields active `TestTier` enum values), `Rationale` (human-readable explanation), and `UITestScenarios` (extracted from acceptance criteria).
+
+### REQ-TEST-007: Tiered Test Execution Pipeline
+
+- **REQ-TEST-007a**: Tests execute in priority order: Unit (fast feedback) → Integration → UI/Playwright. Each tier runs only if all prior tiers passed.
+- **REQ-TEST-007b**: Each tier uses its own command from `WorkspaceConfig`: `UnitTestCommand`, `IntegrationTestCommand`, `UITestCommand`. Null values fall back to the generic `TestCommand`.
+- **REQ-TEST-007c**: Each tier has independent timeout settings: `UnitTestTimeoutSeconds` (60), `IntegrationTestTimeoutSeconds` (180), `UITestTimeoutSeconds` (300).
+- **REQ-TEST-007d**: Each tier gets its own AI fix-retry loop (up to `MaxTestRetries`). If unit tests fail, do NOT attempt integration/UI tests.
+- **REQ-TEST-007e**: Results are collected as `AggregateTestResult` with per-tier breakdown. PR body uses `FormatAsMarkdown()` for visual reporting (✅/❌ per tier, pass/fail counts, failure details).
+
+### REQ-TEST-008: Playwright UI Test Support
+
+- **REQ-TEST-008a**: When `WorkspaceConfig.EnableUITests` is true and UI tests are needed, the `PlaywrightRunner` manages Playwright infrastructure.
+- **REQ-TEST-008b**: Chromium browsers are auto-installed idempotently — checks for `chromium*` directory in shared cache at `{RootPath}/.playwright-browsers/`. Install uses `pwsh playwright.ps1 install chromium` (.NET) or `npx playwright install chromium` (Node).
+- **REQ-TEST-008c**: All UI tests run **headless only** (`CreateNoWindow = true`, `HEADED=0` env var, `PlaywrightHeadless = true` config). Tests MUST NOT take over the user's screen.
+- **REQ-TEST-008d**: App-under-test lifecycle: start application process → poll HTTP 200 readiness (up to `AppStartupTimeoutSeconds`) → run tests → kill process tree on completion.
+- **REQ-TEST-008e**: When UI tests are needed and no Playwright test project exists in the workspace, auto-scaffold one via `PlaywrightRunner.GeneratePlaywrightTestScaffold()` (creates `.csproj` with Playwright + xUnit packages, `PlaywrightFixture` base class with browser lifecycle management).
+- **REQ-TEST-008f**: `AppBaseUrl` is configurable (default `http://localhost:5000`) for the app-under-test address.
+
+**Scenario: Multi-Tier Test Generation**
+1. PE merges PR #45 containing `AuthController.cs` + `Login.razor`
+2. Test Engineer picks up PR #45 → `TestStrategyAnalyzer.Analyze()` returns: `NeedsUnitTests=true` (code file), `NeedsIntegrationTests=true` (Controller pattern), `NeedsUITests=true` (.razor extension)
+3. AI generates unit tests → integration tests → UI/Playwright tests with tier-specific prompts
+4. Test Engineer creates branch, scaffolds Playwright project (first time), writes all test files
+5. Build succeeds → run unit tests (2s, 12 passed) → run integration tests (8s, 5 passed) → run UI tests headless (15s, 3 passed)
+6. Creates test PR with aggregated results: "✅ Unit: 12 passed | ✅ Integration: 5 passed | ✅ UI: 3 passed"
 
 ---
 
@@ -634,6 +682,28 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-CFG-003e**: `GitHubPollIntervalSeconds` controls how often agents poll (default 30).
 - **REQ-CFG-003f**: `MaxAdditionalEngineers` caps dynamic engineer spawning (default 3).
 
+### REQ-CFG-004: Local Workspace Configuration
+
+- **REQ-CFG-004a**: `WorkspaceConfig` section under `AgentSquad:Workspace`. Controls local build/test infrastructure for all agents.
+- **REQ-CFG-004b**: `RootPath` (default: `C:\Agents`) — root directory for agent local repos. Auto-created at startup if it doesn't exist.
+- **REQ-CFG-004c**: `BuildCommand` (default: `dotnet build`) / `TestCommand` (default: `dotnet test`) / `RestoreCommand` (default: `dotnet restore`) — per-project build/test commands configurable via config.
+- **REQ-CFG-004d**: Per-tier test commands: `UnitTestCommand`, `IntegrationTestCommand`, `UITestCommand` with individual timeout settings (`UnitTestTimeoutSeconds: 60`, `IntegrationTestTimeoutSeconds: 180`, `UITestTimeoutSeconds: 300`).
+- **REQ-CFG-004e**: `MaxTestRetries` (default: 3) — per-tier AI fix-retry attempts before failing.
+- **REQ-CFG-004f**: Playwright settings: `PlaywrightBrowsersCachePath` (default: `{RootPath}/.playwright-browsers`), `PlaywrightHeadless` (default: true), `EnableUITests` (default: true), `AppBaseUrl` (default: `http://localhost:5000`), `AppStartCommand`, `AppStartupTimeoutSeconds`.
+
+### REQ-CFG-005: Engineer Pool Configuration
+
+- **REQ-CFG-005a**: `EngineerPoolConfig` section defines initial pool composition: `SeniorEngineerCount` (default: 2), `JuniorEngineerCount` (default: 1), `PrincipalEngineerCount` (default: 1).
+- **REQ-CFG-005b**: Multi-PE mode: when `PrincipalEngineerCount > 1`, the first PE is the leader (creates engineering plan), additional PEs are workers (skip to Phase 2).
+- **REQ-CFG-005c**: Leader/worker role assignment is based on spawn order. Non-leader PEs sync task state from existing GitHub engineering-task issues.
+
+### REQ-CFG-006: AI Conversation Mode Configuration
+
+- **REQ-CFG-006a**: `FastMode` (default: false) — when true, collapses multi-turn AI conversations to a single prompt. Reduces latency and cost at the expense of nuance.
+- **REQ-CFG-006b**: `SinglePassMode` (default: false) — independent of `FastMode`. When true, flattens multi-turn conversation sequences (e.g., Researcher 3-turn, Architect 5-turn) into a single prompt per agent. Can be combined with any model tier.
+- **REQ-CFG-006c**: Agents that support multi-turn conversations: Researcher (3 turns), Architect (5 turns), PM, Principal Engineer (2 turns). Each checks `SinglePassMode` to decide whether to collapse turns.
+- **REQ-CFG-006d**: `SinglePassMode` decouples from `FastMode` so users can use premium models (high quality) with single-pass execution (lower cost/latency) — two independent axes.
+
 ---
 
 ## 16. Idempotency & Restart Recovery Requirements
@@ -682,7 +752,7 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-DASH-001a**: Dashboard embedded in Runner process (Web SDK, not separate app).
 - **REQ-DASH-001b**: Real-time updates via SignalR (no page refresh needed).
 - **REQ-DASH-001c**: Dark Grafana-style theme.
-- **REQ-DASH-001d**: Pages: Home (agent cards), AgentDetail, GitHubFeed, TeamViz (animated avatars).
+- **REQ-DASH-001d**: Pages: Home (agent cards), AgentDetail, GitHubFeed, TeamViz (animated avatars), PullRequests, Issues.
 
 ### REQ-DASH-002: Agent Cards
 
@@ -695,6 +765,37 @@ Each phase has gate conditions that must be met before advancing:
 
 - **REQ-DASH-003a**: Dashboard allows runtime model override per agent via dropdown.
 - **REQ-DASH-003b**: Available models listed in `ModelRegistry.AvailableCopilotModels`.
+
+### REQ-DASH-004: Pull Requests Tab
+
+- **REQ-DASH-004a**: Dedicated Pull Requests page accessible from the nav menu (🔀 icon).
+- **REQ-DASH-004b**: State filter tabs: Open, Closed, All — with count badges.
+- **REQ-DASH-004c**: GitHub-inspired PR cards showing: title, PR number, state indicator (🟢 open / 🟣 merged / 🔴 closed), author, branch info, labels, creation date (relative time-ago formatting).
+- **REQ-DASH-004d**: PR data fetched via `DashboardDataService.GetPullRequestsAsync()` with 30-second cache TTL.
+- **REQ-DASH-004e**: Cards link to GitHub PR URL (opens in new tab).
+
+### REQ-DASH-005: Issues Tab
+
+- **REQ-DASH-005a**: Dedicated Issues page accessible from the nav menu (📋 icon).
+- **REQ-DASH-005b**: State filter tabs: Open, Closed, All — with count badges. Active tab highlighted.
+- **REQ-DASH-005c**: **Label filter dropdown:** Dynamically populated from unique labels across all issues. Multi-select support. Labels color-coded by category: engineering-task (blue), executive-request (gold), complexity levels (gray), status labels (green/yellow/red).
+- **REQ-DASH-005d**: **Assignee filter dropdown:** Dynamically populated from issue assignees.
+- **REQ-DASH-005e**: **Sort options:** Newest, Oldest, Most commented, Recently updated. All sorting done client-side from cached data.
+- **REQ-DASH-005f**: Issue cards show: title, issue number, open/closed state icon (🟢/🟣), labels as colored badges, comment count (💬), assignees, author, creation/close date with relative time-ago formatting.
+- **REQ-DASH-005g**: Dropdown state management: toggling one filter dropdown closes any other open dropdown.
+- **REQ-DASH-005h**: Issue data fetched via `DashboardDataService.GetIssuesAsync()` with 30-second cache TTL. Issues are filtered to exclude pull requests (GitHub API returns PRs as issues).
+
+### REQ-DASH-006: Dashboard Port Configuration
+
+- **REQ-DASH-006a**: Dashboard port configurable via `AgentSquad:Dashboard:Port` (default: 5050). Value wired to Kestrel at startup via `builder.WebHost.UseUrls()`.
+- **REQ-DASH-006b**: Dashboard is non-essential — port conflict or binding failure MUST NOT crash the agent runner.
+
+**Scenario: Dashboard Issues Tab Usage**
+1. User navigates to `/issues` → sees all open issues with count badges
+2. Filters by label "engineering-task" → sees only engineering work items
+3. Sorts by "Most commented" → sees the most-discussed issues first
+4. Clicks "Closed" tab → sees completed work with closed dates
+5. Filters by assignee "senior-engineer-1" → sees only that agent's assigned issues
 
 ---
 
@@ -747,6 +848,13 @@ Each phase has gate conditions that must be met before advancing:
 - xUnit with `[Fact]` attributes. Naming: `MethodName_ExpectedBehavior()`.
 - Moq for mocking external dependencies.
 - Integration tests build full DI container with real services, mock only external APIs.
+
+### REQ-CODE-004: Code Quality Guardrails
+
+- **REQ-CODE-004a**: `RequirementsCompliance` diagnostic checker validates agent AI responses against the Requirements.md standards (e.g., PR title format, branch naming, commit structure).
+- **REQ-CODE-004b**: `RoleExpectations` defines per-agent-role expectations as structured data (required context documents, expected output format, quality bars).
+- **REQ-CODE-004c**: `AgentDiagnostic` record captures diagnostic events (timestamp, severity, agent ID, category, message) for runtime self-monitoring.
+- **REQ-CODE-004d**: Diagnostics are logged but non-blocking — agents continue even if compliance checks flag issues. The purpose is visibility, not enforcement.
 
 ---
 
@@ -960,6 +1068,77 @@ Each phase has gate conditions that must be met before advancing:
 6. Architect reviews → APPROVE (no architectural violations)
 7. Squash merge → signal testing.integration.complete → Completion phase
 ```
+
+---
+
+## 22. Local Workspace & Build System Requirements
+
+### REQ-WS-001: Workspace Lifecycle
+
+- **REQ-WS-001a**: Each agent clones the project repository into an isolated local directory at `{RootPath}/{agentId}/` before starting work. Each workspace is independent — agents do NOT share working directories.
+- **REQ-WS-001b**: On assignment, the agent clones fresh or pulls latest main. For existing workspaces, `git pull origin main` syncs to HEAD before starting work.
+- **REQ-WS-001c**: Agents create feature branches locally, commit code, and push to origin for PR creation.
+- **REQ-WS-001d**: `RootPath` (default: `C:\Agents`) is auto-created at startup if it doesn't exist.
+- **REQ-WS-001e**: After the last Issue is closed and the project is complete, the PE sends notifications to all agents to delete their local repositories, cleaning up disk space.
+
+### REQ-WS-002: Build & Test Runner
+
+- **REQ-WS-002a**: `BuildRunner` wraps `dotnet build` (or configured `BuildCommand`) with process isolation (`CreateNoWindow = true`, no shell takeover). Returns structured `ProcessResult` with exit code, stdout, stderr, and duration.
+- **REQ-WS-002b**: `TestRunner` wraps `dotnet test` (or configured `TestCommand`). Parses test output to extract pass/fail/skip counts and failure messages. Returns `TestResult` with `Passed` bool, `Output` string, and parsed counts.
+- **REQ-WS-002c**: Both runners respect configured timeout limits. Long-running processes are killed after timeout expiry.
+- **REQ-WS-002d**: Agents run `RestoreCommand` → `BuildCommand` → `TestCommand` in sequence. Build failure blocks test execution.
+- **REQ-WS-002e**: All process output is captured for AI context — build errors and test failures are fed back to the AI for fix-retry loops.
+
+### REQ-WS-003: No Fake Tests
+
+- **REQ-WS-003a**: No code is committed to the repository until it has been locally built and tested. The workspace build MUST succeed before pushing.
+- **REQ-WS-003b**: Test results in PR bodies MUST come from actual local test execution, not AI-generated summaries. The PR body includes raw test output excerpts.
+- **REQ-WS-003c**: If build/test fails and AI fix retries are exhausted (`MaxTestRetries`), the agent reports the failure in the PR body and marks it for review rather than committing broken code.
+
+**Scenario: Agent Workspace Lifecycle**
+1. PE assigns Issue #45 to Senior Engineer 1
+2. Senior Engineer 1 clones repo to `C:\Agents\senior-engineer-1\` (or pulls latest if exists)
+3. Creates branch `agent/senior-engineer-1/issue-45-implement-auth`
+4. AI generates code → files written to local workspace
+5. `dotnet restore` → `dotnet build` → success → `dotnet test` → 3 failures
+6. Build/test output fed back to AI → AI fixes the 3 test failures → re-test → all pass
+7. Commits and pushes → creates PR
+8. After project completion, PE sends cleanup notification → workspace deleted
+
+---
+
+## 23. Multi-Tier Test Execution Requirements
+
+> **Cross-reference:** Test tier strategy analysis is defined in [§9 REQ-TEST-006](#req-test-006-multi-tier-test-strategy). Playwright UI infrastructure is in [§9 REQ-TEST-008](#req-test-008-playwright-ui-test-support). This section covers the workspace-level test execution model.
+
+### REQ-MTEST-001: Test Tier Infrastructure
+
+- **REQ-MTEST-001a**: `TestTier` enum (`Unit`, `Integration`, `UI`) classifies each test. Test files use xUnit `[Trait("Category", "...")]` for tier-based filtering.
+- **REQ-MTEST-001b**: `TestResult` record includes `Tier` property (nullable for legacy results). `AggregateTestResult` record collects `TestResult` per tier and provides `FormatAsMarkdown()` for PR body reporting.
+- **REQ-MTEST-001c**: Per-tier commands are independently configurable in `WorkspaceConfig`. Null tier-specific commands fall back to the generic `TestCommand` with appropriate `--filter` arguments.
+
+### REQ-MTEST-002: Execution Order
+
+- **REQ-MTEST-002a**: Tiers execute in strict order: Unit → Integration → UI. Each tier runs ONLY if all prior tiers passed.
+- **REQ-MTEST-002b**: Each tier has its own AI fix-retry loop (independent retries). If unit tests fail after max retries, integration and UI tests are skipped entirely.
+- **REQ-MTEST-002c**: UI tier additionally requires: Playwright browser install (idempotent), app-under-test start, HTTP readiness check, and process cleanup.
+
+### REQ-MTEST-003: Result Aggregation
+
+- **REQ-MTEST-003a**: `AggregateTestResult.FormatAsMarkdown()` produces a per-tier summary table: tier name, pass/fail/skip counts, status emoji (✅/❌), and failure excerpts.
+- **REQ-MTEST-003b**: PR body groups test file paths by coverage tier for at-a-glance review.
+- **REQ-MTEST-003c**: If any tier failed, the overall status is FAIL but the PR body still reports which tiers passed.
+
+---
+
+## 24. AI Conversation Mode Requirements
+
+### REQ-MODE-001: Multi-Turn vs Single-Pass
+
+- **REQ-MODE-001a**: By default, agents use multi-turn AI conversations with increasing specificity per turn (e.g., Researcher: overview → details → summary in 3 turns; Architect: analysis → design → patterns → APIs → review in 5 turns).
+- **REQ-MODE-001b**: `SinglePassMode` (config flag) collapses all turns into one comprehensive prompt per agent. This reduces latency and cost by eliminating intermediate round-trips while maintaining all context in a single prompt.
+- **REQ-MODE-001c**: `FastMode` is a separate config flag that applies model tier downgrades (budget models for all roles). `SinglePassMode` + `FastMode` stack independently — they are two orthogonal axes (quality tier × conversation depth).
+- **REQ-MODE-001d**: When `SinglePassMode` is true, each agent's prompt includes ALL instructions that would have been spread across multiple turns, including turn-specific guidance that refines based on prior-turn output.
 
 ---
 
