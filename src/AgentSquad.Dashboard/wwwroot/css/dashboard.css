@@ -3525,25 +3525,12 @@ div[title] .config-agent-name {
 /* ═══════════════════════════════════════════════════════════════════
    CONFIRMATION MODAL
    ═══════════════════════════════════════════════════════════════════ */
-.modal-container {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    animation: modal-fade-in 0.2s ease;
-}
+/* Modal uses .modal-overlay from overview page (shared) */
 .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(0, 0, 0, 0.65);
-    z-index: 1000;
-    pointer-events: none;
+    display: none;
 }
 .modal-dialog {
-    position: fixed;
-    z-index: 1001;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
+    position: relative;
     background: var(--card-bg, #161b22);
     border: 1px solid var(--border-default);
     border-radius: 12px;
@@ -3559,8 +3546,8 @@ div[title] .config-agent-name {
     to { opacity: 1; }
 }
 @keyframes modal-slide-in {
-    from { transform: translate(-50%, -50%) translateY(-20px); opacity: 0; }
-    to { transform: translate(-50%, -50%) translateY(0); opacity: 1; }
+    from { transform: translateY(-20px); opacity: 0; }
+    to { transform: translateY(0); opacity: 1; }
 }
 .modal-header {
     display: flex;
