@@ -727,6 +727,27 @@ public class TestEngineerAgent : AgentBase
         await _workspace!.SyncWithMainAsync(ct);
         await _workspace.CreateBranchAsync(branchName, ct);
 
+        // If UI tests are present and no Playwright project exists, scaffold one
+        var hasUITests = testFiles.Any(f =>
+            f.Path.Contains("UITests", StringComparison.OrdinalIgnoreCase) ||
+            f.Path.Contains("Playwright", StringComparison.OrdinalIgnoreCase));
+
+        if (hasUITests && _playwrightRunner is not null && wsConfig.EnableUITests)
+        {
+            var uiTestDir = Path.Combine(_workspace.RepoPath, "tests");
+            var existingPlaywright = Directory.Exists(uiTestDir) &&
+                Directory.GetDirectories(uiTestDir, "*UITests*", SearchOption.TopDirectoryOnly).Length > 0;
+
+            if (!existingPlaywright)
+            {
+                Logger.LogInformation("TestEngineer: scaffolding Playwright test project infrastructure");
+                var scaffoldFiles = PlaywrightRunner.GeneratePlaywrightTestScaffold(
+                    "tests/UITests", wsConfig.AppBaseUrl ?? "http://localhost:5000");
+                foreach (var sf in scaffoldFiles)
+                    await _workspace.WriteFileAsync(sf.Path, sf.Content, ct);
+            }
+        }
+
         // Write test files
         foreach (var file in testFiles)
             await _workspace.WriteFileAsync(file.Path, file.Content, ct);
