@@ -371,6 +371,33 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "4. Identify dependencies between tasks\n" +
             "5. Reference the source GitHub Issue number for each task\n" +
             "6. For each task, specify which files to create/modify and the namespace to use\n\n" +
+            "## CRITICAL — Foundation Task (MUST be Task T1)\n" +
+            "The FIRST task (T1) MUST ALWAYS be a 'Project Foundation & Scaffolding' task that:\n" +
+            "- Sets up the solution/project structure, build configuration, and shared infrastructure\n" +
+            "- Creates the core data models, interfaces, and abstractions from the architecture document\n" +
+            "- Establishes the directory layout, namespaces, and integration points that all other tasks build upon\n" +
+            "- Creates stub/skeleton files for major components so parallel engineers know where to implement\n" +
+            "- Includes dependency injection registration, configuration models, and shared utilities\n" +
+            "- Complexity: High (this is the most important task — it sets the foundation)\n" +
+            "- Has NO dependencies (all other tasks should depend on T1)\n" +
+            "This ensures the first PR establishes the project skeleton before any parallel work begins, " +
+            "giving every engineer a clear target for where their code goes.\n\n" +
+            "## CRITICAL — Parallel-Friendly Task Decomposition\n" +
+            "Multiple engineers will work on tasks IN PARALLEL. Design tasks to MINIMIZE overlap and merge conflicts:\n" +
+            "- **Separate by component/module boundary**: each task should own a distinct set of files. " +
+            "Two tasks should NEVER create or modify the same file.\n" +
+            "- **Vertical slicing over horizontal**: prefer tasks that implement a complete feature end-to-end " +
+            "(model + service + API + tests) rather than tasks that cut across all features at one layer " +
+            "(e.g., 'add all models' then 'add all services').\n" +
+            "- **Explicit file ownership**: every task's FilePlan must list EXACTLY which files it creates or modifies. " +
+            "If two tasks need to touch the same file (e.g., DI registration in Program.cs), " +
+            "assign that responsibility to only ONE of them and note it.\n" +
+            "- **Shared infrastructure in T1**: anything that multiple tasks would need (base classes, interfaces, " +
+            "config models, shared DTOs) should go in T1 so parallel tasks only CONSUME these, never create them.\n" +
+            "- **Minimize cross-task dependencies**: maximize the number of tasks that depend ONLY on T1 " +
+            "so they can all run in parallel. Chain dependencies (T3 depends on T2 depends on T1) should be rare.\n" +
+            "- **Independent test scoping**: each task should include tests only for its own component, " +
+            "not shared test infrastructure (that belongs in T1).\n\n" +
             "CRITICAL: Review the existing repository structure carefully. " +
             "Tasks MUST reference existing files when appropriate (modify, not recreate). " +
             "New files should follow the existing directory structure and naming conventions. " +
@@ -395,15 +422,27 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         userPromptBuilder.AppendLine($"## GitHub Issues (User Stories)\n{issuesSummary}\n");
         userPromptBuilder.AppendLine(
             "Create an engineering plan mapping these Issues to tasks. " +
+            "REMEMBER:\n" +
+            "- T1 MUST be the Project Foundation & Scaffolding task (High complexity, no dependencies). " +
+            "It sets up the solution structure, shared interfaces, base classes, config, and DI registration " +
+            "so all other tasks have a clear skeleton to build upon.\n" +
+            "- ALL other tasks should depend on T1 at minimum.\n" +
+            "- Design tasks for PARALLEL execution: each task should own distinct files with NO overlap.\n" +
+            "- Prefer vertical slices (one feature end-to-end) over horizontal layers.\n" +
+            "- Maximize tasks that depend ONLY on T1 (star topology, not chains).\n\n" +
             "Output ONLY structured lines in this format:\n" +
             "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>\n\n" +
             "The FilePlan field should contain semicolon-separated file operations:\n" +
             "  CREATE:path/to/file.ext(namespace);MODIFY:path/to/existing.ext;USE:ExistingType(namespace)\n\n" +
             "Example:\n" +
-            "TASK|T1|42|Set up project structure|Create solution, projects, and folder layout|Low|NONE|" +
-            "CREATE:src/Models/AppConfig.cs(MyApp.Models);CREATE:src/Program.cs(MyApp)\n" +
-            "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|High|T1|" +
-            "CREATE:src/Services/AuthService.cs(MyApp.Services);MODIFY:src/Program.cs;USE:User(MyApp.Models)\n\n" +
+            "TASK|T1|42|Project Foundation & Scaffolding|Create solution structure, shared models, interfaces, " +
+            "DI registration, and configuration|High|NONE|" +
+            "CREATE:src/Models/AppConfig.cs(MyApp.Models);CREATE:src/Interfaces/IAuthService.cs(MyApp.Interfaces);CREATE:src/Program.cs(MyApp)\n" +
+            "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|Medium|T1|" +
+            "CREATE:src/Services/AuthService.cs(MyApp.Services);USE:IAuthService(MyApp.Interfaces)\n" +
+            "TASK|T3|44|Implement user profile|Build user profile CRUD|Medium|T1|" +
+            "CREATE:src/Services/UserProfileService.cs(MyApp.Services);CREATE:src/Controllers/ProfileController.cs(MyApp.Controllers)\n\n" +
+            "Note how T2 and T3 both depend only on T1 (parallel-safe) and own completely separate files.\n\n" +
             "Only output TASK lines, nothing else.");
 
         history.AddUserMessage(userPromptBuilder.ToString());
@@ -461,6 +500,10 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 });
             }
         }
+
+        // Enforce foundation-first pattern: ensure T1 is a foundation task
+        // and all other tasks depend on it
+        EnsureFoundationFirstPattern(parsedTasks);
 
         // Create GitHub issues for each task (the single source of truth)
         var createdTasks = await _taskManager.CreateTaskIssuesAsync(parsedTasks, ct);
@@ -2489,6 +2532,103 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     /// Input: "CREATE:src/Services/Auth.cs(MyApp.Services);MODIFY:src/Program.cs;USE:User(MyApp.Models)"
     /// Output: markdown bullet list with file operations
     /// </summary>
+    /// <summary>
+    /// Enforces the foundation-first pattern: ensures the first task (T1) has no dependencies
+    /// and all other tasks depend on T1. If the AI didn't produce a proper foundation task,
+    /// this reorders tasks so the foundation-like one is first, or injects a synthetic one.
+    /// </summary>
+    private void EnsureFoundationFirstPattern(List<EngineeringTask> tasks)
+    {
+        if (tasks.Count <= 1) return;
+
+        var foundationKeywords = new[] { "foundation", "scaffold", "setup", "structure", "skeleton", "template", "infrastructure", "project setup" };
+        var firstTask = tasks[0];
+        var isFirstFoundation = firstTask.Dependencies.Count == 0 &&
+            foundationKeywords.Any(k => firstTask.Name.Contains(k, StringComparison.OrdinalIgnoreCase) ||
+                                        firstTask.Description.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+        // If T1 isn't a foundation task, look for one elsewhere in the list and move it to front
+        if (!isFirstFoundation)
+        {
+            var foundationIdx = tasks.FindIndex(t =>
+                t.Dependencies.Count == 0 &&
+                foundationKeywords.Any(k => t.Name.Contains(k, StringComparison.OrdinalIgnoreCase) ||
+                                            t.Description.Contains(k, StringComparison.OrdinalIgnoreCase)));
+
+            if (foundationIdx > 0)
+            {
+                var foundationTask = tasks[foundationIdx];
+                tasks.RemoveAt(foundationIdx);
+                tasks.Insert(0, foundationTask);
+                Logger.LogInformation("Reordered foundation task '{Name}' to first position", foundationTask.Name);
+            }
+            else
+            {
+                Logger.LogInformation("No explicit foundation task found — T1 ({Name}) will serve as foundation", firstTask.Name);
+            }
+        }
+
+        // Ensure T1 has no dependencies
+        var t1 = tasks[0];
+        if (t1.Dependencies.Count > 0)
+        {
+            tasks[0] = t1 with { Dependencies = new List<string>() };
+            Logger.LogInformation("Cleared dependencies from foundation task T1 ({Name})", t1.Name);
+        }
+
+        // Ensure all other tasks depend on T1's ID
+        var t1Id = tasks[0].Id;
+        for (var i = 1; i < tasks.Count; i++)
+        {
+            var task = tasks[i];
+            if (!task.Dependencies.Contains(t1Id, StringComparer.OrdinalIgnoreCase))
+            {
+                task.Dependencies.Insert(0, t1Id);
+            }
+        }
+
+        // Log overlap warnings: detect tasks that create the same files
+        var fileOwnership = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var task in tasks)
+        {
+            var createFiles = ExtractCreateFilesFromDescription(task.Description);
+            foreach (var file in createFiles)
+            {
+                if (fileOwnership.TryGetValue(file, out var owner))
+                {
+                    Logger.LogWarning("File overlap detected: '{File}' is created by both {Task1} and {Task2}",
+                        file, owner, task.Id);
+                }
+                else
+                {
+                    fileOwnership[file] = task.Id;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Extracts CREATE file paths from a task description's File Plan section.
+    /// </summary>
+    private static List<string> ExtractCreateFilesFromDescription(string description)
+    {
+        var files = new List<string>();
+        // Match lines like "- ➕ **Create:** `path/to/file.cs`" or raw "CREATE:path/to/file.cs"
+        foreach (var line in description.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            // Markdown format from FormatFilePlan
+            if (trimmed.Contains("**Create:**"))
+            {
+                var backtickStart = trimmed.IndexOf('`');
+                var backtickEnd = trimmed.LastIndexOf('`');
+                if (backtickStart >= 0 && backtickEnd > backtickStart)
+                    files.Add(trimmed[(backtickStart + 1)..backtickEnd]);
+            }
+        }
+        return files;
+    }
+
     private static string FormatFilePlan(string filePlan)
     {
         if (string.IsNullOrWhiteSpace(filePlan)) return "";
