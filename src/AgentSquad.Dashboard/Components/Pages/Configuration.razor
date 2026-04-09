@@ -1,0 +1,738 @@
+@page "/configuration"
+@using AgentSquad.Core.Configuration
+@using AgentSquad.Core.Workspace
+@using AgentSquad.Dashboard.Services
+@inject ConfigurationService ConfigService
+@inject ILogger<Configuration> Logger
+@rendermode InteractiveServer
+
+<div class="page-header">
+    <h1 class="page-title">⚙️ Configuration</h1>
+    <div class="header-badges">
+        @if (_saveSuccess)
+        {
+            <span class="badge badge-success">✓ Saved</span>
+        }
+        @if (_saveError is not null)
+        {
+            <span class="badge badge-error">⚠ Error</span>
+        }
+    </div>
+</div>
+
+@if (_loading)
+{
+    <div class="config-loading">Loading configuration...</div>
+}
+else if (_config is not null)
+{
+    <div class="config-container">
+        @* ═══════════════════════════════════════════════════════════════════
+           CONFIGURATION EDITOR
+           ═══════════════════════════════════════════════════════════════════ *@
+        <div class="config-section-header">
+            <span class="config-section-icon">📝</span>
+            <div>
+                <h2 class="config-section-title">Application Settings</h2>
+                <p class="config-section-desc">Configure AgentSquad behavior, models, and agent settings. Changes are saved to appsettings.json.</p>
+            </div>
+        </div>
+
+        @* ── Project Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _projectExpanded = !_projectExpanded">
+                <span class="config-card-icon">🏗️</span>
+                <span class="config-card-title">Project</span>
+                <span class="config-card-chevron @(_projectExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_projectExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field">
+                        <label>Project Name</label>
+                        <input type="text" @bind="_config.Project.Name" class="config-input" />
+                    </div>
+                    <div class="config-field">
+                        <label>Description</label>
+                        <textarea @bind="_config.Project.Description" class="config-textarea" rows="3"></textarea>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>GitHub Repo</label>
+                            <input type="text" @bind="_config.Project.GitHubRepo" class="config-input" placeholder="owner/repo" />
+                        </div>
+                        <div class="config-field">
+                            <label>Default Branch</label>
+                            <input type="text" @bind="_config.Project.DefaultBranch" class="config-input" />
+                        </div>
+                    </div>
+                    <div class="config-field">
+                        <label>GitHub Token (PAT)</label>
+                        <div class="config-secret-field">
+                            <input type="@(_showToken ? "text" : "password")" @bind="_config.Project.GitHubToken" class="config-input" />
+                            <button class="config-secret-toggle" @onclick="() => _showToken = !_showToken">@(_showToken ? "🙈" : "👁️")</button>
+                        </div>
+                    </div>
+                    <div class="config-field">
+                        <label>Tech Stack</label>
+                        <input type="text" @bind="_config.Project.TechStack" class="config-input" />
+                    </div>
+                    <div class="config-field">
+                        <label>Executive GitHub Username</label>
+                        <input type="text" @bind="_config.Project.ExecutiveGitHubUsername" class="config-input" />
+                    </div>
+                    <div class="config-field">
+                        <label>Research Prompt <span class="config-hint">(optional — overrides default)</span></label>
+                        <textarea @bind="_config.Project.ResearchPrompt" class="config-textarea" rows="3" placeholder="Leave empty for auto-generated prompt"></textarea>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Copilot CLI Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _copilotExpanded = !_copilotExpanded">
+                <span class="config-card-icon">🤖</span>
+                <span class="config-card-title">Copilot CLI</span>
+                <span class="config-card-chevron @(_copilotExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_copilotExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Enabled</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.Enabled" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>Fast Mode</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.FastMode" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>Single-Pass Mode</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.SinglePassMode" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Silent Mode</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.SilentMode" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>JSON Output</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.JsonOutput" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>Auto-Approve Prompts</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.CopilotCli.AutoApprovePrompts" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Model Name</label>
+                            <input type="text" @bind="_config.CopilotCli.ModelName" class="config-input" />
+                        </div>
+                        <div class="config-field">
+                            <label>Fast Mode Model</label>
+                            <input type="text" @bind="_config.CopilotCli.FastModeModel" class="config-input" />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Max Concurrent Requests</label>
+                            <input type="number" @bind="_config.CopilotCli.MaxConcurrentRequests" class="config-input config-input-number" min="1" max="20" />
+                        </div>
+                        <div class="config-field">
+                            <label>Request Timeout (seconds)</label>
+                            <input type="number" @bind="_config.CopilotCli.RequestTimeoutSeconds" class="config-input config-input-number" min="30" max="7200" />
+                        </div>
+                        <div class="config-field">
+                            <label>Max Retries</label>
+                            <input type="number" @bind="_config.CopilotCli.MaxRetries" class="config-input config-input-number" min="0" max="10" />
+                        </div>
+                    </div>
+                    <div class="config-field">
+                        <label>Executable Path</label>
+                        <input type="text" @bind="_config.CopilotCli.ExecutablePath" class="config-input" />
+                    </div>
+                    <div class="config-field">
+                        <label>Reasoning Effort</label>
+                        <select @bind="_copilotReasoningEffort" class="config-select">
+                            <option value="">(default)</option>
+                            <option value="low">Low</option>
+                            <option value="medium">Medium</option>
+                            <option value="high">High</option>
+                            <option value="xhigh">XHigh</option>
+                        </select>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Agent Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _agentsExpanded = !_agentsExpanded">
+                <span class="config-card-icon">👥</span>
+                <span class="config-card-title">Agents</span>
+                <span class="config-card-chevron @(_agentsExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_agentsExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-agent-grid">
+                        @foreach (var agent in GetAgentEntries())
+                        {
+                            <div class="config-agent-row">
+                                <div class="config-agent-name">@agent.Name</div>
+                                <div class="config-agent-controls">
+                                    <select @bind="agent.Config.ModelTier" class="config-select config-select-sm">
+                                        <option value="premium">Premium</option>
+                                        <option value="standard">Standard</option>
+                                        <option value="budget">Budget</option>
+                                        <option value="local">Local</option>
+                                    </select>
+                                    <label class="config-toggle config-toggle-sm">
+                                        <input type="checkbox" @bind="agent.Config.Enabled" />
+                                        <span class="config-toggle-slider"></span>
+                                    </label>
+                                </div>
+                            </div>
+                        }
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Engineer Pool ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _poolExpanded = !_poolExpanded">
+                <span class="config-card-icon">🏊</span>
+                <span class="config-card-title">Engineer Pool</span>
+                <span class="config-card-chevron @(_poolExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_poolExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Principal Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.PrincipalEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <span class="config-hint">Additional PEs (premium tier)</span>
+                        </div>
+                        <div class="config-field">
+                            <label>Senior Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.SeniorEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <span class="config-hint">Additional SEs (standard tier)</span>
+                        </div>
+                        <div class="config-field">
+                            <label>Junior Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.JuniorEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <span class="config-hint">Additional JEs (budget/local tier)</span>
+                        </div>
+                    </div>
+                    <div class="config-pool-summary">
+                        Total additional engineers: <strong>@(_config.Limits.EngineerPool.PrincipalEngineerPool + _config.Limits.EngineerPool.SeniorEngineerPool + _config.Limits.EngineerPool.JuniorEngineerPool)</strong>
+                        (+ 1 core PE always active)
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Limits ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _limitsExpanded = !_limitsExpanded">
+                <span class="config-card-icon">📏</span>
+                <span class="config-card-title">Limits</span>
+                <span class="config-card-chevron @(_limitsExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_limitsExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Max Concurrent Agents</label>
+                            <input type="number" @bind="_config.Limits.MaxConcurrentAgents" class="config-input config-input-number" min="1" max="50" />
+                        </div>
+                        <div class="config-field">
+                            <label>Agent Timeout (minutes)</label>
+                            <input type="number" @bind="_config.Limits.AgentTimeoutMinutes" class="config-input config-input-number" min="5" max="240" />
+                        </div>
+                        <div class="config-field">
+                            <label>GitHub Poll Interval (seconds)</label>
+                            <input type="number" @bind="_config.Limits.GitHubPollIntervalSeconds" class="config-input config-input-number" min="5" max="300" />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Max Daily Token Budget</label>
+                            <input type="number" @bind="_config.Limits.MaxDailyTokenBudget" class="config-input config-input-number" min="10000" />
+                        </div>
+                        <div class="config-field">
+                            <label>Max Clarification Round-Trips</label>
+                            <input type="number" @bind="_config.Limits.MaxClarificationRoundTrips" class="config-input config-input-number" min="1" max="20" />
+                        </div>
+                        <div class="config-field">
+                            <label>Max Rework Cycles</label>
+                            <input type="number" @bind="_config.Limits.MaxReworkCycles" class="config-input config-input-number" min="1" max="10" />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Self-Completion Threshold (min)</label>
+                            <input type="number" @bind="_config.Limits.SelfCompletionThresholdMinutes" class="config-input config-input-number" min="1" max="120" />
+                        </div>
+                        <div class="config-field">
+                            <label>Min Tasks for New Engineer</label>
+                            <input type="number" @bind="_config.Limits.MinParallelizableTasksForNewEngineer" class="config-input config-input-number" min="1" max="20" />
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Dashboard Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _dashboardExpanded = !_dashboardExpanded">
+                <span class="config-card-icon">📊</span>
+                <span class="config-card-title">Dashboard</span>
+                <span class="config-card-chevron @(_dashboardExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_dashboardExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Port</label>
+                            <input type="number" @bind="_config.Dashboard.Port" class="config-input config-input-number" min="1024" max="65535" />
+                        </div>
+                        <div class="config-field">
+                            <label>Enable SignalR</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.Dashboard.EnableSignalR" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Workspace Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _workspaceExpanded = !_workspaceExpanded">
+                <span class="config-card-icon">🔧</span>
+                <span class="config-card-title">Workspace</span>
+                <span class="config-card-chevron @(_workspaceExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_workspaceExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field">
+                        <label>Root Path</label>
+                        <input type="text" @bind="_config.Workspace.RootPath" class="config-input" placeholder="C:\Agents" />
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Build Command</label>
+                            <input type="text" @bind="_config.Workspace.BuildCommand" class="config-input" />
+                        </div>
+                        <div class="config-field">
+                            <label>Test Command</label>
+                            <input type="text" @bind="_config.Workspace.TestCommand" class="config-input" />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Build Timeout (sec)</label>
+                            <input type="number" @bind="_config.Workspace.BuildTimeoutSeconds" class="config-input config-input-number" min="10" max="600" />
+                        </div>
+                        <div class="config-field">
+                            <label>Test Timeout (sec)</label>
+                            <input type="number" @bind="_config.Workspace.TestTimeoutSeconds" class="config-input config-input-number" min="10" max="600" />
+                        </div>
+                        <div class="config-field">
+                            <label>Max Build Retries</label>
+                            <input type="number" @bind="_config.Workspace.MaxBuildRetries" class="config-input config-input-number" min="0" max="10" />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Enable UI Tests</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.Workspace.EnableUITests" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>Playwright Headless</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.Workspace.PlaywrightHeadless" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                        <div class="config-field">
+                            <label>Cleanup on Complete</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.Workspace.CleanupOnProjectComplete" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label>Git User Name</label>
+                            <input type="text" @bind="_config.Workspace.GitUserName" class="config-input" />
+                        </div>
+                        <div class="config-field">
+                            <label>Git User Email</label>
+                            <input type="text" @bind="_config.Workspace.GitUserEmail" class="config-input" />
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+
+        @* ── Save Button ── *@
+        <div class="config-save-bar">
+            @if (_saveError is not null)
+            {
+                <div class="config-save-error">⚠️ @_saveError</div>
+            }
+            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving">
+                @if (_saving)
+                {
+                    <span class="config-spinner"></span>
+                    <span>Saving...</span>
+                }
+                else
+                {
+                    <span>💾 Save Configuration</span>
+                }
+            </button>
+        </div>
+
+        @* ═══════════════════════════════════════════════════════════════════
+           GITHUB REPO CLEANUP — separated from config
+           ═══════════════════════════════════════════════════════════════════ *@
+        <div class="config-divider"></div>
+
+        <div class="config-section-header config-section-danger">
+            <span class="config-section-icon">🧹</span>
+            <div>
+                <h2 class="config-section-title">GitHub Repository Cleanup</h2>
+                <p class="config-section-desc">
+                    Dangerous operation — permanently closes all issues and PRs, and deletes all code from
+                    <strong>@_config.Project.GitHubRepo</strong>. This cannot be undone.
+                </p>
+            </div>
+        </div>
+
+        <div class="config-card config-card-danger">
+            <div class="config-card-body">
+                <div class="cleanup-info">
+                    <div class="cleanup-repo">
+                        <span class="cleanup-repo-icon">📦</span>
+                        <span class="cleanup-repo-name">@_config.Project.GitHubRepo</span>
+                        <span class="cleanup-branch">(@_config.Project.DefaultBranch)</span>
+                    </div>
+                    <p class="cleanup-warning">
+                        ⚠️ This will close all open issues, close all open pull requests, delete all agent branches,
+                        and remove all files from the <code>@_config.Project.DefaultBranch</code> branch.
+                    </p>
+                </div>
+
+                <button class="cleanup-scan-btn" @onclick="ScanRepo" disabled="@_scanning">
+                    @if (_scanning)
+                    {
+                        <span class="config-spinner"></span>
+                        <span>Scanning repository...</span>
+                    }
+                    else
+                    {
+                        <span>🔍 Scan Repository</span>
+                    }
+                </button>
+
+                @if (_cleanupSummary is not null)
+                {
+                    <div class="cleanup-summary">
+                        <div class="cleanup-stat-grid">
+                            <div class="cleanup-stat">
+                                <div class="cleanup-stat-value">@_cleanupSummary.FileCount</div>
+                                <div class="cleanup-stat-label">Files</div>
+                            </div>
+                            <div class="cleanup-stat">
+                                <div class="cleanup-stat-value">@_cleanupSummary.OpenIssues</div>
+                                <div class="cleanup-stat-label">Open Issues</div>
+                            </div>
+                            <div class="cleanup-stat">
+                                <div class="cleanup-stat-value">@_cleanupSummary.OpenPrs</div>
+                                <div class="cleanup-stat-label">Open PRs</div>
+                            </div>
+                            <div class="cleanup-stat">
+                                <div class="cleanup-stat-value">@_cleanupSummary.TotalIssues</div>
+                                <div class="cleanup-stat-label">Total Issues</div>
+                            </div>
+                        </div>
+
+                        <button class="cleanup-execute-btn" @onclick="ShowCleanupModal">
+                            🗑️ Clean Up Repository
+                        </button>
+                    </div>
+                }
+            </div>
+        </div>
+
+        @if (_cleanupResult is not null)
+        {
+            <div class="config-card @(_cleanupResult.Success ? "" : "config-card-danger")">
+                <div class="config-card-body">
+                    <h3 class="cleanup-result-title">@(_cleanupResult.Success ? "✅ Cleanup Complete" : "⚠️ Cleanup Completed with Errors")</h3>
+                    <div class="cleanup-result-stats">
+                        <span>Issues closed: <strong>@_cleanupResult.IssuesClosed</strong></span>
+                        <span>PRs closed: <strong>@_cleanupResult.PrsClosed</strong></span>
+                        <span>Files deleted: <strong>@_cleanupResult.FilesDeleted</strong></span>
+                        <span>Files preserved: <strong>@_cleanupResult.FilesPreserved</strong></span>
+                        <span>Branches deleted: <strong>@_cleanupResult.BranchesDeleted</strong></span>
+                    </div>
+                    @if (_cleanupResult.Errors.Count > 0)
+                    {
+                        <details class="cleanup-errors">
+                            <summary>@_cleanupResult.Errors.Count error(s)</summary>
+                            <ul>
+                                @foreach (var err in _cleanupResult.Errors)
+                                {
+                                    <li>@err</li>
+                                }
+                            </ul>
+                        </details>
+                    }
+                </div>
+            </div>
+        }
+    </div>
+}
+
+@* ═══════════════════════════════════════════════════════════════════
+   CONFIRMATION MODAL
+   ═══════════════════════════════════════════════════════════════════ *@
+@if (_showModal)
+{
+    <div class="modal-overlay" @onclick="HideCleanupModal">
+        <div class="modal-dialog" @onclick:stopPropagation="true">
+            <div class="modal-header modal-header-danger">
+                <h3 class="modal-title">⚠️ Confirm Repository Cleanup</h3>
+                <button class="modal-close" @onclick="HideCleanupModal">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="modal-repo-badge">
+                    <span class="cleanup-repo-icon">📦</span>
+                    <strong>@_config?.Project.GitHubRepo</strong>
+                </div>
+
+                <div class="modal-impact">
+                    <h4>This action will:</h4>
+                    <ul class="modal-impact-list">
+                        <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenIssues ?? 0)</strong> open issues</li>
+                        <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenPrs ?? 0)</strong> open pull requests</li>
+                        <li class="impact-danger">Delete all agent branches</li>
+                        <li class="impact-danger">Delete <strong>@(_cleanupSummary?.FileCount ?? 0)</strong> files from <code>@_config?.Project.DefaultBranch</code></li>
+                    </ul>
+                    <p class="modal-irreversible">🚫 This action <strong>cannot be undone</strong>.</p>
+                </div>
+
+                <div class="modal-caveats">
+                    <label class="modal-caveats-label">
+                        Exceptions / Caveats <span class="config-hint">(optional)</span>
+                    </label>
+                    <textarea @bind="_cleanupCaveats" class="config-textarea modal-caveats-input"
+                        rows="3" placeholder="e.g., Leave the Design.html file in the code, but remove everything else."></textarea>
+                    <span class="config-hint">Mention any files or patterns to preserve. Files matching names you mention will be kept.</span>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="modal-cancel-btn" @onclick="HideCleanupModal">Cancel</button>
+                <button class="modal-approve-btn" @onclick="ExecuteCleanup" disabled="@_cleaningUp">
+                    @if (_cleaningUp)
+                    {
+                        <span class="config-spinner config-spinner-light"></span>
+                        <span>Cleaning up...</span>
+                    }
+                    else
+                    {
+                        <span>🗑️ Yes, Clean Up Repository</span>
+                    }
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    private AgentSquadConfig? _config;
+    private bool _loading = true;
+    private bool _saving;
+    private bool _saveSuccess;
+    private string? _saveError;
+
+    // Section expand states
+    private bool _projectExpanded = true;
+    private bool _copilotExpanded = true;
+    private bool _agentsExpanded = true;
+    private bool _poolExpanded = true;
+    private bool _limitsExpanded;
+    private bool _dashboardExpanded;
+    private bool _workspaceExpanded;
+
+    // Secret visibility
+    private bool _showToken;
+
+    // Copilot reasoning effort helper (nullable string)
+    private string _copilotReasoningEffort
+    {
+        get => _config?.CopilotCli.ReasoningEffort ?? "";
+        set { if (_config is not null) _config.CopilotCli.ReasoningEffort = string.IsNullOrEmpty(value) ? null : value; }
+    }
+
+    // Cleanup state
+    private CleanupSummary? _cleanupSummary;
+    private CleanupResult? _cleanupResult;
+    private bool _scanning;
+    private bool _showModal;
+    private string _cleanupCaveats = "";
+    private bool _cleaningUp;
+
+    protected override void OnInitialized()
+    {
+        try
+        {
+            // Deep-copy the config so edits don't affect the running system until save
+            var current = ConfigService.GetCurrentConfig();
+            _config = DeepCopy(current);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to load configuration");
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private async Task SaveConfig()
+    {
+        if (_config is null) return;
+        _saving = true;
+        _saveSuccess = false;
+        _saveError = null;
+
+        try
+        {
+            await ConfigService.SaveConfigAsync(_config);
+            _saveSuccess = true;
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(3000);
+                _saveSuccess = false;
+                await InvokeAsync(StateHasChanged);
+            });
+        }
+        catch (Exception ex)
+        {
+            _saveError = ex.Message;
+            Logger.LogError(ex, "Failed to save configuration");
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private async Task ScanRepo()
+    {
+        _scanning = true;
+        _cleanupSummary = null;
+        _cleanupResult = null;
+        StateHasChanged();
+
+        try
+        {
+            _cleanupSummary = await ConfigService.ScanRepoForCleanupAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to scan repo");
+        }
+        finally
+        {
+            _scanning = false;
+        }
+    }
+
+    private void ShowCleanupModal() => _showModal = true;
+    private void HideCleanupModal() => _showModal = false;
+
+    private async Task ExecuteCleanup()
+    {
+        _cleaningUp = true;
+        StateHasChanged();
+
+        try
+        {
+            _cleanupResult = await ConfigService.ExecuteCleanupAsync(_cleanupCaveats);
+            _showModal = false;
+            _cleanupSummary = null; // clear stale scan
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Cleanup failed");
+            _cleanupResult = new CleanupResult
+            {
+                Errors = { $"Cleanup failed: {ex.Message}" }
+            };
+        }
+        finally
+        {
+            _cleaningUp = false;
+        }
+    }
+
+    private List<AgentEntry> GetAgentEntries() => new()
+    {
+        new("Program Manager", _config!.Agents.ProgramManager),
+        new("Researcher", _config.Agents.Researcher),
+        new("Architect", _config.Agents.Architect),
+        new("Principal Engineer", _config.Agents.PrincipalEngineer),
+        new("Test Engineer", _config.Agents.TestEngineer),
+        new("Senior Engineer (Template)", _config.Agents.SeniorEngineerTemplate),
+        new("Junior Engineer (Template)", _config.Agents.JuniorEngineerTemplate),
+    };
+
+    private sealed record AgentEntry(string Name, AgentConfig Config);
+
+    /// <summary>Deep-copy via JSON round-trip so edits don't touch live config.</summary>
+    private static AgentSquadConfig DeepCopy(AgentSquadConfig src)
+    {
+        var json = System.Text.Json.JsonSerializer.Serialize(src);
+        return System.Text.Json.JsonSerializer.Deserialize<AgentSquadConfig>(json) ?? new();
+    }
+}
