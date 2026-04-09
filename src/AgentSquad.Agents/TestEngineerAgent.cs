@@ -41,6 +41,8 @@ public class TestEngineerAgent : AgentBase
     private readonly AgentSquadConfig _config;
     private readonly BuildRunner? _buildRunner;
     private readonly TestRunner? _testRunner;
+    private readonly PlaywrightRunner? _playwrightRunner;
+    private readonly TestStrategyAnalyzer? _testStrategyAnalyzer;
 
     private LocalWorkspace? _workspace;
     private bool _pendingWorkspaceCleanup;
@@ -63,7 +65,9 @@ public class TestEngineerAgent : AgentBase
         IOptions<AgentSquadConfig> config,
         ILogger<AgentBase> logger,
         BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null)
+        TestRunner? testRunner = null,
+        PlaywrightRunner? playwrightRunner = null,
+        TestStrategyAnalyzer? testStrategyAnalyzer = null)
         : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -74,6 +78,8 @@ public class TestEngineerAgent : AgentBase
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _buildRunner = buildRunner;
         _testRunner = testRunner;
+        _playwrightRunner = playwrightRunner;
+        _testStrategyAnalyzer = testStrategyAnalyzer;
     }
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
@@ -371,6 +377,7 @@ public class TestEngineerAgent : AgentBase
     /// Uses AI to generate real, runnable test code for the source files in a merged PR.
     /// Gathers full business context (linked issue, PMSpec, Architecture) so tests validate
     /// acceptance criteria and business goals — not just structural code coverage.
+    /// Multi-tier: generates unit, integration, and UI tests based on TestStrategy analysis.
     /// </summary>
     private async Task<string> GenerateTestCodeAsync(
         AgentPullRequest pr, Dictionary<string, string> sourceFiles, CancellationToken ct)
@@ -382,34 +389,19 @@ public class TestEngineerAgent : AgentBase
         // Gather business context: linked issue, PMSpec, Architecture
         var businessContext = await GatherBusinessContextAsync(pr, ct);
 
-        var history = new ChatHistory();
-        var memoryContext = await GetMemoryContextAsync(ct: ct);
-        history.AddSystemMessage(
-            $"You are an expert test engineer writing tests for a {techStack} project.\n\n" +
-            "Your job is to generate REAL, RUNNABLE test code — not documentation or test plans.\n" +
-            "Write actual test files that can be compiled and executed.\n\n" +
-            "You will be given:\n" +
-            "- The business requirements (user story and acceptance criteria) this code must satisfy\n" +
-            "- The PM specification and architecture for broader project context\n" +
-            "- The actual source code files to test\n\n" +
-            "Guidelines:\n" +
-            "- Write acceptance tests that verify the user story and acceptance criteria are met\n" +
-            "- Write unit tests for individual functions, methods, and classes\n" +
-            "- Write integration tests for component interactions where applicable\n" +
-            "- Write UI/rendering tests for frontend components where applicable\n" +
-            "- Use the standard testing framework for the tech stack (e.g., xUnit for C#, " +
-            "Jest for TypeScript, pytest for Python, bUnit for Blazor components)\n" +
-            "- Include proper imports, test class setup, and assertions\n" +
-            "- Test happy paths, edge cases, and error conditions\n" +
-            "- Use mocks/stubs for external dependencies\n" +
-            "- Place test files in a `tests/` directory mirroring the source structure\n" +
-            "- Prioritize testing business behavior over implementation details\n\n" +
-            "Output each test file using this exact format:\n\n" +
-            "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
-            "Every file MUST use the FILE: marker format so it can be parsed and committed." +
-            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
+        // Determine which test tiers are needed
+        var issueBody = await GetLinkedIssueBodyAsync(pr, ct);
+        var strategy = _testStrategyAnalyzer?.Analyze(
+            sourceFiles.Keys.ToList(), pr.Body, issueBody, techStack)
+            ?? new TestStrategy
+            {
+                NeedsUnitTests = true,
+                NeedsIntegrationTests = false,
+                NeedsUITests = false,
+                Rationale = "Fallback: no strategy analyzer available"
+            };
 
-        // Build source file context
+        // Build source file context (shared across all tiers)
         var sourceContext = new System.Text.StringBuilder();
         sourceContext.AppendLine("## Source Files to Test\n");
         foreach (var (path, content) in sourceFiles)
@@ -417,24 +409,200 @@ public class TestEngineerAgent : AgentBase
             var ext = Path.GetExtension(path).TrimStart('.');
             sourceContext.AppendLine($"### {path}");
             sourceContext.AppendLine($"```{ext}");
-            // Truncate very large files to avoid token limits
             var truncated = content.Length > 8000 ? content[..8000] + "\n// ... (truncated)" : content;
             sourceContext.AppendLine(truncated);
             sourceContext.AppendLine("```\n");
         }
 
-        history.AddUserMessage(
-            $"## Merged PR #{pr.Number}: {pr.Title}\n\n" +
-            $"## PR Description\n{pr.Body}\n\n" +
-            businessContext +
-            sourceContext.ToString() +
-            $"\nGenerate comprehensive test files for the above source code using {techStack}. " +
-            "Write tests that verify both the acceptance criteria from the user story AND " +
-            "the technical implementation. Ensure the business goals are testable and tested. " +
-            "Include edge cases and error handling.");
+        var allOutputs = new System.Text.StringBuilder();
+        var memoryContext = await GetMemoryContextAsync(ct: ct);
+
+        // Generate unit tests (always)
+        if (strategy.NeedsUnitTests)
+        {
+            UpdateStatus(AgentStatus.Working, $"Generating unit tests for PR #{pr.Number}");
+            var unitOutput = await GenerateTestsForTierAsync(
+                chat, TestTier.Unit, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct);
+            allOutputs.AppendLine(unitOutput);
+        }
+
+        // Generate integration tests (when service/API layers changed)
+        if (strategy.NeedsIntegrationTests)
+        {
+            UpdateStatus(AgentStatus.Working, $"Generating integration tests for PR #{pr.Number}");
+            var integrationOutput = await GenerateTestsForTierAsync(
+                chat, TestTier.Integration, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct);
+            allOutputs.AppendLine(integrationOutput);
+        }
+
+        // Generate UI tests with Playwright (when UI components changed)
+        if (strategy.NeedsUITests && _config.Workspace.EnableUITests)
+        {
+            UpdateStatus(AgentStatus.Working, $"Generating UI/Playwright tests for PR #{pr.Number}");
+            var uiOutput = await GenerateTestsForTierAsync(
+                chat, TestTier.UI, pr, techStack, businessContext, sourceContext.ToString(), memoryContext, ct,
+                strategy.UITestScenarios);
+            allOutputs.AppendLine(uiOutput);
+        }
+
+        Logger.LogInformation("Generated tests for PR #{Number}: Unit={Unit}, Integration={Integration}, UI={UI}",
+            pr.Number, strategy.NeedsUnitTests, strategy.NeedsIntegrationTests,
+            strategy.NeedsUITests && _config.Workspace.EnableUITests);
+
+        return allOutputs.ToString();
+    }
+
+    /// <summary>
+    /// Generate test code for a specific tier using a tier-appropriate AI prompt.
+    /// </summary>
+    private async Task<string> GenerateTestsForTierAsync(
+        IChatCompletionService chat,
+        TestTier tier,
+        AgentPullRequest pr,
+        string techStack,
+        string businessContext,
+        string sourceContext,
+        string memoryContext,
+        CancellationToken ct,
+        IReadOnlyList<string>? uiScenarios = null)
+    {
+        var history = new ChatHistory();
+        history.AddSystemMessage(GetTierSystemPrompt(tier, techStack, memoryContext));
+
+        var userPrompt = new System.Text.StringBuilder();
+        userPrompt.AppendLine($"## Merged PR #{pr.Number}: {pr.Title}\n");
+        userPrompt.AppendLine($"## PR Description\n{pr.Body}\n");
+        userPrompt.AppendLine(businessContext);
+        userPrompt.AppendLine(sourceContext);
+
+        if (tier == TestTier.UI && uiScenarios?.Count > 0)
+        {
+            userPrompt.AppendLine("## UI Test Scenarios to Cover");
+            foreach (var scenario in uiScenarios)
+                userPrompt.AppendLine($"- {scenario}");
+            userPrompt.AppendLine();
+        }
+
+        userPrompt.AppendLine(GetTierUserSuffix(tier, techStack));
+        history.AddUserMessage(userPrompt.ToString());
 
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
         return response.Content?.Trim() ?? "";
+    }
+
+    /// <summary>
+    /// Get the system prompt for a specific test tier with appropriate guidance and examples.
+    /// </summary>
+    private static string GetTierSystemPrompt(TestTier tier, string techStack, string memoryContext)
+    {
+        var basePrompt = $"You are an expert test engineer writing tests for a {techStack} project.\n" +
+            "Your job is to generate REAL, RUNNABLE test code — not documentation or test plans.\n" +
+            "Write actual test files that can be compiled and executed.\n\n" +
+            "Output each test file using this exact format:\n\n" +
+            "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
+            "Every file MUST use the FILE: marker format so it can be parsed and committed.\n\n";
+
+        var tierGuidance = tier switch
+        {
+            TestTier.Unit =>
+                "## Test Tier: UNIT TESTS\n" +
+                "Focus on isolated testing of individual functions, methods, and classes.\n" +
+                "Guidelines:\n" +
+                "- Mock ALL external dependencies (services, repositories, HTTP clients, databases)\n" +
+                "- Test one behavior per test method\n" +
+                "- Cover happy paths, edge cases, null/empty inputs, boundary values, and error conditions\n" +
+                "- Use descriptive test names: MethodName_Condition_ExpectedResult\n" +
+                "- Add [Trait(\"Category\", \"Unit\")] attribute to every test class (for xUnit)\n" +
+                "- Place files in tests/{ProjectName}.Tests/Unit/ directory\n" +
+                "- Keep tests fast — no I/O, no network, no database calls\n",
+
+            TestTier.Integration =>
+                "## Test Tier: INTEGRATION TESTS\n" +
+                "Focus on testing component interactions with real or near-real dependencies.\n" +
+                "Guidelines:\n" +
+                "- Test actual DI container wiring and service resolution\n" +
+                "- Test API endpoints end-to-end (request → response)\n" +
+                "- Test data access layer with in-memory databases where possible\n" +
+                "- Test middleware pipeline behavior\n" +
+                "- Add [Trait(\"Category\", \"Integration\")] attribute to every test class\n" +
+                "- Place files in tests/{ProjectName}.Tests/Integration/ directory\n" +
+                "- Use WebApplicationFactory for ASP.NET Core integration tests\n" +
+                "- Test error handling, validation, and edge cases at API boundaries\n",
+
+            TestTier.UI =>
+                "## Test Tier: UI/E2E TESTS (Playwright)\n" +
+                "Focus on testing user-facing behavior through browser automation.\n" +
+                "Guidelines:\n" +
+                "- Use Microsoft.Playwright for browser automation\n" +
+                "- Use the Page Object Model pattern: create a page object class for each page/component\n" +
+                "- Tests run HEADLESS (no visible browser) — use environment variable HEADED to control\n" +
+                "- Base URL comes from environment variable BASE_URL (default: http://localhost:5000)\n" +
+                "- Add [Trait(\"Category\", \"UI\")] and [Collection(\"Playwright\")] attributes\n" +
+                "- Place files in tests/{ProjectName}.UITests/ directory\n" +
+                "- Test user workflows: navigation, form submission, button clicks, data display\n" +
+                "- Include assertions on page content, element visibility, and navigation outcomes\n" +
+                "- Capture screenshots on failure using PlaywrightFixture.CaptureScreenshotAsync\n" +
+                "- Include a shared PlaywrightFixture class if one doesn't exist\n" +
+                "- Example Playwright test structure:\n" +
+                "```csharp\n" +
+                "[Collection(\"Playwright\")]\n[Trait(\"Category\", \"UI\")]\n" +
+                "public class HomePageTests\n{\n" +
+                "    private readonly PlaywrightFixture _fixture;\n" +
+                "    public HomePageTests(PlaywrightFixture fixture) => _fixture = fixture;\n\n" +
+                "    [Fact]\n    public async Task HomePage_LoadsSuccessfully()\n    {\n" +
+                "        var page = await _fixture.NewPageAsync();\n" +
+                "        await page.GotoAsync(\"/\");\n" +
+                "        await Assertions.Expect(page).ToHaveTitleAsync(new Regex(\".*\"));\n" +
+                "    }\n}\n```\n",
+
+            _ => ""
+        };
+
+        return basePrompt + tierGuidance +
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n{memoryContext}");
+    }
+
+    private static string GetTierUserSuffix(TestTier tier, string techStack)
+    {
+        return tier switch
+        {
+            TestTier.Unit =>
+                $"Generate comprehensive UNIT test files for the above source code using {techStack}. " +
+                "Test individual methods and classes in isolation with mocked dependencies. " +
+                "Include edge cases, error handling, and boundary conditions.",
+
+            TestTier.Integration =>
+                $"Generate INTEGRATION test files for the above source code using {techStack}. " +
+                "Test component interactions, API endpoints, and data access with real or in-memory dependencies. " +
+                "Use WebApplicationFactory for API tests where applicable.",
+
+            TestTier.UI =>
+                $"Generate Playwright UI/E2E test files for the above source code using {techStack}. " +
+                "Test user workflows, page navigation, form submissions, and visual elements. " +
+                "Use the Page Object Model pattern. All tests must run headless. " +
+                "Include the PlaywrightFixture class and page object classes.",
+
+            _ => $"Generate test files for the above source code using {techStack}."
+        };
+    }
+
+    /// <summary>
+    /// Get the linked issue body for test strategy analysis.
+    /// </summary>
+    private async Task<string?> GetLinkedIssueBodyAsync(AgentPullRequest pr, CancellationToken ct)
+    {
+        var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+        if (!issueNumber.HasValue) return null;
+
+        try
+        {
+            var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+            return issue?.Body;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     /// <summary>
@@ -544,8 +712,8 @@ public class TestEngineerAgent : AgentBase
     }
 
     /// <summary>
-    /// Creates a test PR using the local workspace: writes test files, builds, runs tests,
-    /// retries failures with AI fixes, then pushes validated code.
+    /// Creates a test PR using the local workspace: writes test files, builds, runs tests
+    /// per tier (unit → integration → UI), retries failures with AI fixes, then pushes.
     /// </summary>
     private async Task<int> CreateTestPRViaLocalWorkspaceAsync(
         AgentPullRequest sourcePR,
@@ -595,68 +763,147 @@ public class TestEngineerAgent : AgentBase
             }
         }
 
-        // Run tests to get real results
-        TestResult? testResult = null;
+        // Run tests per tier — results aggregated for PR body
+        var tierResults = new List<TestResult>();
+
         if (buildResult.Success)
         {
-            testResult = await _testRunner!.RunTestsAsync(
-                _workspace.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
+            // Tier 1: Unit tests (fast feedback)
+            var unitResult = await RunTestTierWithRetryAsync(
+                TestTier.Unit,
+                wsConfig.UnitTestCommand ?? wsConfig.TestCommand,
+                wsConfig.UnitTestTimeoutSeconds,
+                wsConfig, ct);
+            if (unitResult is not null)
+                tierResults.Add(unitResult);
 
-            if (!testResult.Success)
+            // Tier 2: Integration tests (only if unit tests passed or no unit-specific command)
+            var unitPassed = unitResult?.Success ?? true;
+            if (unitPassed && wsConfig.IntegrationTestCommand is not null)
             {
-                Logger.LogWarning("TestEngineer: {Failed} tests failed, attempting AI fix",
-                    testResult.Failed);
+                var intResult = await RunTestTierWithRetryAsync(
+                    TestTier.Integration,
+                    wsConfig.IntegrationTestCommand,
+                    wsConfig.IntegrationTestTimeoutSeconds,
+                    wsConfig, ct);
+                if (intResult is not null)
+                    tierResults.Add(intResult);
+            }
 
-                var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
-                var chat = kernel.GetRequiredService<IChatCompletionService>();
-
-                for (int attempt = 0; attempt < wsConfig.MaxTestRetries && !testResult.Success; attempt++)
+            // Tier 3: UI tests with Playwright (only if earlier tiers passed)
+            var allPriorPassed = tierResults.All(r => r.Success);
+            if (allPriorPassed && wsConfig.EnableUITests && _playwrightRunner is not null && wsConfig.UITestCommand is not null)
+            {
+                try
                 {
-                    var failureSummary = testResult.FailureDetails.Count > 0
-                        ? string.Join("\n", testResult.FailureDetails.Take(10))
-                        : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
+                    // Ensure Playwright browsers are installed
+                    await _playwrightRunner.EnsureBrowsersInstalledAsync(wsConfig, _workspace.RepoPath, ct);
 
-                    var fixHistory = new ChatHistory();
-                    fixHistory.AddUserMessage(
-                        $"Tests failed ({testResult.Failed} of {testResult.Total}):\n\n{failureSummary}\n\n" +
-                        "Fix the test code. Output ONLY corrected files using:\n" +
-                        "FILE: path/to/file.ext\n```language\n<content>\n```\n\n" +
-                        "Only fix test bugs — don't mask real code bugs.");
-
-                    var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
-                    var fixedFiles = CodeFileParser.ParseFiles(fixResponse.Content ?? "");
-                    foreach (var file in fixedFiles)
-                        await _workspace.WriteFileAsync(file.Path, file.Content, ct);
-
-                    // Rebuild + retest
-                    var rebuildResult = await _buildRunner.BuildAsync(
-                        _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
-                    if (!rebuildResult.Success) break;
-
-                    testResult = await _testRunner.RunTestsAsync(
-                        _workspace.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
+                    var uiResult = await _playwrightRunner.RunUITestsAsync(
+                        _workspace.RepoPath, wsConfig,
+                        wsConfig.UITestCommand,
+                        wsConfig.UITestTimeoutSeconds, ct);
+                    tierResults.Add(uiResult);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "TestEngineer: UI test execution failed");
+                    tierResults.Add(new TestResult
+                    {
+                        Success = false,
+                        Output = $"UI test execution error: {ex.Message}",
+                        Passed = 0, Failed = 0, Skipped = 0,
+                        Duration = TimeSpan.Zero,
+                        Tier = TestTier.UI,
+                        FailureDetails = [ex.Message]
+                    });
                 }
             }
 
-            Logger.LogInformation("TestEngineer: test results — Passed: {Passed}, Failed: {Failed}, Skipped: {Skipped}",
-                testResult.Passed, testResult.Failed, testResult.Skipped);
+            foreach (var result in tierResults)
+            {
+                Logger.LogInformation("TestEngineer: {Tier} tests — Passed: {Passed}, Failed: {Failed}, Skipped: {Skipped}",
+                    result.Tier, result.Passed, result.Failed, result.Skipped);
+            }
         }
 
         // Commit and push
         await _workspace.CommitAsync($"test: add tests for PR #{sourcePR.Number}", ct);
         await _workspace.PushAsync(branchName, ct);
 
-        return await CreateTestPRMetadataAsync(sourcePR, testFiles, branchName, testResult, ct);
+        // Create aggregate result for PR body
+        AggregateTestResult? aggregate = tierResults.Count > 0
+            ? new AggregateTestResult { TierResults = tierResults }
+            : null;
+
+        return await CreateTestPRMetadataAsync(sourcePR, testFiles, branchName, aggregate, ct);
+    }
+
+    /// <summary>
+    /// Run a specific test tier with the AI fix-retry loop.
+    /// </summary>
+    private async Task<TestResult?> RunTestTierWithRetryAsync(
+        TestTier tier,
+        string testCommand,
+        int timeoutSeconds,
+        WorkspaceConfig wsConfig,
+        CancellationToken ct)
+    {
+        UpdateStatus(AgentStatus.Working, $"Running {tier} tests");
+
+        var testResult = await _testRunner!.RunTestsAsync(
+            _workspace!.RepoPath, testCommand, timeoutSeconds, ct);
+        testResult = testResult with { Tier = tier };
+
+        if (!testResult.Success)
+        {
+            Logger.LogWarning("TestEngineer: {Tier} tests failed ({Failed} of {Total}), attempting AI fix",
+                tier, testResult.Failed, testResult.Total);
+
+            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            for (int attempt = 0; attempt < wsConfig.MaxTestRetries && !testResult.Success; attempt++)
+            {
+                var failureSummary = testResult.FailureDetails.Count > 0
+                    ? string.Join("\n", testResult.FailureDetails.Take(10))
+                    : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
+
+                var fixHistory = new ChatHistory();
+                fixHistory.AddUserMessage(
+                    $"{tier} tests failed ({testResult.Failed} of {testResult.Total}):\n\n{failureSummary}\n\n" +
+                    "Fix the test code. Output ONLY corrected files using:\n" +
+                    "FILE: path/to/file.ext\n```language\n<content>\n```\n\n" +
+                    "Only fix test bugs — don't mask real code bugs.");
+
+                var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+                var fixedFiles = CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+                foreach (var file in fixedFiles)
+                    await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+                // Rebuild + retest
+                var rebuildResult = await _buildRunner!.BuildAsync(
+                    _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+                if (!rebuildResult.Success) break;
+
+                testResult = await _testRunner.RunTestsAsync(
+                    _workspace.RepoPath, testCommand, timeoutSeconds, ct);
+                testResult = testResult with { Tier = tier };
+            }
+        }
+
+        return testResult;
     }
 
     /// <summary>
     /// Creates the PR metadata (title, body, labels) — shared by both API and local workspace paths.
+    /// Uses AggregateTestResult for multi-tier reporting.
     /// </summary>
     private async Task<int> CreateTestPRMetadataAsync(
         AgentPullRequest sourcePR,
         IReadOnlyList<CodeFileParser.CodeFile> testFiles,
         string branchName,
-        TestResult? testResults,
+        AggregateTestResult? testResults,
         CancellationToken ct)
     {
         var fileList = string.Join("\n", testFiles.Select(f => $"- `{f.Path}`"));
@@ -670,34 +917,25 @@ public class TestEngineerAgent : AgentBase
         bodyBuilder.AppendLine($"**Test Files:** {testFiles.Count}");
         bodyBuilder.AppendLine();
 
-        // Include real test results if available
+        // Include multi-tier test results
         if (testResults is not null)
         {
-            bodyBuilder.AppendLine("### Test Results (actual execution)");
-            bodyBuilder.AppendLine($"- **Passed:** {testResults.Passed}");
-            bodyBuilder.AppendLine($"- **Failed:** {testResults.Failed}");
-            bodyBuilder.AppendLine($"- **Skipped:** {testResults.Skipped}");
-            bodyBuilder.AppendLine($"- **Total:** {testResults.Total}");
-            bodyBuilder.AppendLine($"- **Duration:** {testResults.Duration.TotalSeconds:F1}s");
-            bodyBuilder.AppendLine($"- **Command:** `{_config.Workspace.TestCommand}`");
-            bodyBuilder.AppendLine();
-
-            if (testResults.FailureDetails.Count > 0)
-            {
-                bodyBuilder.AppendLine("### Failures");
-                foreach (var failure in testResults.FailureDetails.Take(5))
-                    bodyBuilder.AppendLine($"- {failure}");
-                bodyBuilder.AppendLine();
-            }
+            bodyBuilder.AppendLine(testResults.FormatAsMarkdown());
         }
 
         bodyBuilder.AppendLine("### Test Files");
         bodyBuilder.AppendLine(fileList);
         bodyBuilder.AppendLine();
-        bodyBuilder.AppendLine("### Coverage");
-        bodyBuilder.AppendLine("- Unit tests for new/changed functions and classes");
-        bodyBuilder.AppendLine("- Integration tests for component interactions");
-        bodyBuilder.AppendLine("- Edge case and error handling coverage");
+
+        // Categorize test files by tier for clarity
+        var unitFiles = testFiles.Where(f => f.Path.Contains("/Unit/", StringComparison.OrdinalIgnoreCase) || f.Path.Contains("\\Unit\\", StringComparison.OrdinalIgnoreCase)).ToList();
+        var integrationFiles = testFiles.Where(f => f.Path.Contains("/Integration/", StringComparison.OrdinalIgnoreCase) || f.Path.Contains("\\Integration\\", StringComparison.OrdinalIgnoreCase)).ToList();
+        var uiFiles = testFiles.Where(f => f.Path.Contains("UITests", StringComparison.OrdinalIgnoreCase) || f.Path.Contains("Playwright", StringComparison.OrdinalIgnoreCase)).ToList();
+
+        bodyBuilder.AppendLine("### Coverage Tiers");
+        if (unitFiles.Count > 0) bodyBuilder.AppendLine($"- **Unit:** {unitFiles.Count} files — isolated function/method tests");
+        if (integrationFiles.Count > 0) bodyBuilder.AppendLine($"- **Integration:** {integrationFiles.Count} files — component interaction tests");
+        if (uiFiles.Count > 0) bodyBuilder.AppendLine($"- **UI/E2E:** {uiFiles.Count} files — Playwright browser automation tests");
 
         var prBody = bodyBuilder.ToString();
 

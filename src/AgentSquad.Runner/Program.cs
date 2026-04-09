@@ -57,6 +57,8 @@ builder.Services.AddSingleton<ConflictResolver>();
 // Workspace services (local build + test verification)
 builder.Services.AddSingleton<BuildRunner>();
 builder.Services.AddSingleton<TestRunner>();
+builder.Services.AddSingleton<PlaywrightRunner>();
+builder.Services.AddSingleton<TestStrategyAnalyzer>();
 
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();

@@ -1,6 +1,19 @@
 namespace AgentSquad.Core.Workspace;
 
 /// <summary>
+/// Test tier classification for multi-tier test execution.
+/// </summary>
+public enum TestTier
+{
+    /// <summary>Unit tests — fast, isolated, mock dependencies.</summary>
+    Unit,
+    /// <summary>Integration tests — real dependencies, DI container, API calls.</summary>
+    Integration,
+    /// <summary>UI/E2E tests — Playwright browser automation, user workflows.</summary>
+    UI
+}
+
+/// <summary>
 /// Result of running an external process (git, build, test).
 /// </summary>
 public record ProcessResult
@@ -42,10 +55,59 @@ public record TestResult
     public required TimeSpan Duration { get; init; }
 
     /// <summary>
+    /// Which test tier this result belongs to. Null for legacy undifferentiated runs.
+    /// </summary>
+    public TestTier? Tier { get; init; }
+
+    /// <summary>
     /// Details of individual test failures for AI feedback.
     /// Each entry describes one failing test with the error message.
     /// </summary>
     public IReadOnlyList<string> FailureDetails { get; init; } = [];
 
     public int Total => Passed + Failed + Skipped;
+}
+
+/// <summary>
+/// Aggregated test results across multiple test tiers.
+/// </summary>
+public record AggregateTestResult
+{
+    public required IReadOnlyList<TestResult> TierResults { get; init; }
+
+    public bool AllPassed => TierResults.All(r => r.Success);
+    public int TotalPassed => TierResults.Sum(r => r.Passed);
+    public int TotalFailed => TierResults.Sum(r => r.Failed);
+    public int TotalSkipped => TierResults.Sum(r => r.Skipped);
+    public int TotalTests => TierResults.Sum(r => r.Total);
+    public TimeSpan TotalDuration => TimeSpan.FromTicks(TierResults.Sum(r => r.Duration.Ticks));
+
+    /// <summary>
+    /// Format multi-tier results as markdown for PR body.
+    /// </summary>
+    public string FormatAsMarkdown()
+    {
+        var status = AllPassed ? "✅ ALL PASSED" : "❌ FAILURES DETECTED";
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"## Test Results — {status}");
+        sb.AppendLine();
+
+        foreach (var result in TierResults)
+        {
+            var tierName = result.Tier?.ToString() ?? "General";
+            var tierStatus = result.Success ? "✅" : "❌";
+            sb.AppendLine($"### {tierName} Tests {tierStatus} — {result.Passed} passed, {result.Failed} failed ({result.Duration.TotalSeconds:F1}s)");
+
+            if (result.FailureDetails.Count > 0)
+            {
+                sb.AppendLine();
+                foreach (var failure in result.FailureDetails.Take(5))
+                    sb.AppendLine($"- **{failure}**");
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine($"**Total:** {TotalPassed} passed, {TotalFailed} failed, {TotalSkipped} skipped in {TotalDuration.TotalSeconds:F1}s");
+        return sb.ToString();
+    }
 }
