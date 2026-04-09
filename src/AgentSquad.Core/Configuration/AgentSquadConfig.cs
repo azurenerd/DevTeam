@@ -222,10 +222,11 @@ public class CopilotCliConfig
     public int MaxRetries { get; set; } = 3;
 
     /// <summary>
-    /// When true, multi-turn agents (Researcher, Architect) collapse their
+    /// When true, multi-turn agents (Researcher, Architect, PM) collapse their
     /// chain-of-thought into a single comprehensive prompt instead of multiple
-    /// conversational turns. Faster but potentially less thorough.
-    /// Automatically enabled when FastMode is true.
+    /// conversational turns. Faster and cheaper but potentially less thorough.
+    /// Independent of FastMode — can use premium models with single-pass for
+    /// speed without sacrificing model quality.
     /// </summary>
     public bool SinglePassMode { get; set; } = false;
 

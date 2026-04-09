@@ -1293,6 +1293,46 @@ public class ProgramManagerAgent : AgentBase
                 (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
             // Turn 1: Analyze and identify business goals, user stories, success criteria
+            var useSinglePass = _config.CopilotCli.SinglePassMode;
+            string pmSpecDoc;
+
+            if (useSinglePass)
+            {
+                // Single-pass: one comprehensive prompt instead of 2 turns
+                UpdateStatus(AgentStatus.Working, "Creating PMSpec (single-pass)");
+                history.AddUserMessage(
+                    $"I need you to create a PM Specification for our project.\n\n" +
+                    $"**Project Name:** {projectName}\n\n" +
+                    $"**Project Description:**\n{projectDescription}\n\n" +
+                    $"## Research Findings\n{researchDoc}\n\n" +
+                    "Produce a complete, structured PMSpec.md document with ALL of these sections:\n\n" +
+                    $"# PM Specification: {projectName}\n\n" +
+                    "## Executive Summary\n" +
+                    "(2-3 sentences describing what we're building and why)\n\n" +
+                    "## Business Goals\n" +
+                    "(Numbered list of concrete business objectives)\n\n" +
+                    "## User Stories & Acceptance Criteria\n" +
+                    "(Each story as: **As a [role]**, I want [capability], so that [benefit]. " +
+                    "Followed by acceptance criteria as a checklist.)\n\n" +
+                    "## Scope\n" +
+                    "### In Scope\n(Bullet list)\n" +
+                    "### Out of Scope\n(Bullet list — explicit exclusions to prevent scope creep)\n\n" +
+                    "## Non-Functional Requirements\n" +
+                    "(Performance targets, security requirements, scalability needs, reliability SLAs)\n\n" +
+                    "## Success Metrics\n" +
+                    "(Measurable criteria for project completion)\n\n" +
+                    "## Constraints & Assumptions\n" +
+                    "(Technical constraints, timeline assumptions, dependency assumptions)\n\n" +
+                    "Use these exact section headers. Be thorough, specific, and business-focused. " +
+                    "Each user story must have clear acceptance criteria. " +
+                    "This document will be the single source of truth for business requirements.");
+
+                var singleResponse = await chat.GetChatMessageContentAsync(
+                    history, cancellationToken: ct);
+                pmSpecDoc = singleResponse.Content?.Trim() ?? "";
+            }
+            else
+            {
             history.AddUserMessage(
                 $"I need you to create a PM Specification for our project.\n\n" +
                 $"**Project Name:** {projectName}\n\n" +
@@ -1339,7 +1379,8 @@ public class ProgramManagerAgent : AgentBase
 
             var specResponse = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
-            var pmSpecDoc = specResponse.Content?.Trim() ?? "";
+            pmSpecDoc = specResponse.Content?.Trim() ?? "";
+            }
 
             Logger.LogDebug("PM Spec document compiled for {ProjectName}", projectName);
 

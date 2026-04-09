@@ -267,7 +267,7 @@ public class ArchitectAgent : AgentBase
             "infrastructure around this technology. Do NOT recommend or use alternative stacks." +
             (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
-        var useSinglePass = _config.CopilotCli.SinglePassMode || _config.CopilotCli.FastMode;
+        var useSinglePass = _config.CopilotCli.SinglePassMode;
         string architectureDoc;
 
         if (useSinglePass)

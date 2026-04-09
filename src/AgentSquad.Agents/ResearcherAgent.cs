@@ -255,7 +255,7 @@ public class ResearcherAgent : AgentBase
             "the decision is final." +
             (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
 
-        var useSinglePass = _config.CopilotCli.SinglePassMode || _config.CopilotCli.FastMode;
+        var useSinglePass = _config.CopilotCli.SinglePassMode;
         string synthesisContent;
         string detailedAnalysis;
 
