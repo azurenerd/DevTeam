@@ -193,6 +193,25 @@ public class WorkflowStateMachine
         lock (_lock) { return _history.ToList().AsReadOnly(); }
     }
 
+    // ── Reset ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Reset the workflow to its initial state (Initialization phase, no signals).
+    /// Clears the SQLite checkpoint so the next startup begins fresh.
+    /// </summary>
+    public async Task ResetAsync(CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            _currentPhase = ProjectPhase.Initialization;
+            _signals.Clear();
+            _history.Clear();
+        }
+
+        await _stateStore.ClearAllCheckpointsAsync(ct);
+        _logger.LogWarning("Workflow state machine reset to Initialization (signals and checkpoints cleared)");
+    }
+
     // ── Checkpoint / Recovery ────────────────────────────────────────
 
     /// <summary>

@@ -1,8 +1,11 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
+using AgentSquad.Core.Persistence;
+using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Options;
 
 namespace AgentSquad.Dashboard.Services;
@@ -14,6 +17,10 @@ public sealed class ConfigurationService
 {
     private readonly IOptions<AgentSquadConfig> _config;
     private readonly IGitHubService _github;
+    private readonly AgentRegistry _registry;
+    private readonly AgentSpawnManager _spawnManager;
+    private readonly WorkflowStateMachine _workflow;
+    private readonly DashboardDataService _dashboard;
     private readonly ILogger<ConfigurationService> _logger;
     private readonly string _appSettingsPath;
 
@@ -26,11 +33,19 @@ public sealed class ConfigurationService
     public ConfigurationService(
         IOptions<AgentSquadConfig> config,
         IGitHubService github,
+        AgentRegistry registry,
+        AgentSpawnManager spawnManager,
+        WorkflowStateMachine workflow,
+        DashboardDataService dashboard,
         ILogger<ConfigurationService> logger,
         IWebHostEnvironment env)
     {
         _config = config;
         _github = github;
+        _registry = registry;
+        _spawnManager = spawnManager;
+        _workflow = workflow;
+        _dashboard = dashboard;
         _logger = logger;
         _appSettingsPath = Path.Combine(env.ContentRootPath, "appsettings.json");
     }
@@ -166,7 +181,7 @@ public sealed class ConfigurationService
     }
 
     /// <summary>
-    /// Executes the destructive cleanup operation on the GitHub repo.
+    /// Executes the full cleanup: stop agents → clean repo → reset state → restart agents.
     /// </summary>
     public async Task<CleanupResult> ExecuteCleanupAsync(
         string? caveats, CancellationToken ct = default)
@@ -176,10 +191,33 @@ public sealed class ConfigurationService
 
         try
         {
+            // ── Phase 1: Stop all running agents ─────────────────────
+            _logger.LogWarning("CLEANUP Phase 1/4: Stopping all agents...");
+            result.Phase = "Stopping agents";
+            var agents = _registry.GetAllAgents();
+            foreach (var agent in agents)
+            {
+                try
+                {
+                    await _registry.UnregisterAsync(agent.Identity.Id, ct);
+                    result.AgentsStopped++;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to stop agent {AgentId}", agent.Identity.Id);
+                }
+            }
+            _logger.LogInformation("Stopped {Count} agents", result.AgentsStopped);
+            await Task.Delay(500, ct); // brief pause for cleanup
+
+            // ── Phase 2: Clean GitHub repository ─────────────────────
+            _logger.LogWarning("CLEANUP Phase 2/4: Cleaning GitHub repository...");
+            result.Phase = "Cleaning repository";
+
             // Parse caveats to find files to preserve
             var preserveFiles = ParseCaveats(caveats);
 
-            // 1. Delete ALL issues (open + closed) — uses GraphQL deleteIssue, falls back to close
+            // 2a. Delete ALL issues (open + closed) — uses GraphQL deleteIssue, falls back to close
             _logger.LogWarning("CLEANUP: Deleting all issues in {Repo}", config.GitHubRepo);
             var allIssues = await _github.GetAllIssuesAsync(ct);
             foreach (var issue in allIssues)
@@ -199,7 +237,7 @@ public sealed class ConfigurationService
                 }
             }
 
-            // 2. Close all open PRs and label all merged PRs as "tested"
+            // 2b. Close all open PRs and label all merged PRs as "tested"
             _logger.LogWarning("CLEANUP: Closing open PRs and labeling merged PRs in {Repo}", config.GitHubRepo);
             var allPrs = await _github.GetAllPullRequestsAsync(ct);
 
@@ -209,13 +247,10 @@ public sealed class ConfigurationService
                 {
                     if (pr.State == "open" && !pr.IsMerged)
                     {
-                        // Close open PRs
                         await _github.ClosePullRequestAsync(pr.Number, ct);
                         result.PrsClosed++;
                     }
 
-                    // Label ALL closed/merged PRs as "tested" so the TestEngineer
-                    // won't try to re-test them on a fresh start
                     if (!pr.Labels.Contains("tested", StringComparer.OrdinalIgnoreCase))
                     {
                         var updatedLabels = pr.Labels
@@ -233,7 +268,7 @@ public sealed class ConfigurationService
                 }
             }
 
-            // 3. Delete agent branches (not main/master)
+            // 2c. Delete agent branches (not main/master)
             _logger.LogWarning("CLEANUP: Deleting agent branches in {Repo}", config.GitHubRepo);
             var openPrs = allPrs.Where(p => p.State == "open" || p.HeadBranch?.StartsWith("agent/") == true).ToList();
             foreach (var pr in openPrs)
@@ -255,7 +290,7 @@ public sealed class ConfigurationService
                 }
             }
 
-            // 4. Delete all files from default branch (except preserved ones)
+            // 2d. Delete all files from default branch (except preserved ones)
             _logger.LogWarning("CLEANUP: Deleting files from {Branch} in {Repo}",
                 config.DefaultBranch, config.GitHubRepo);
             var files = await _github.GetRepositoryTreeAsync(config.DefaultBranch, ct);
@@ -278,7 +313,64 @@ public sealed class ConfigurationService
             }
 
             result.FilesPreserved = files.Count - filesToDelete.Count;
+
+            // ── Phase 3: Reset internal state ────────────────────────
+            _logger.LogWarning("CLEANUP Phase 3/4: Resetting workflow state...");
+            result.Phase = "Resetting state";
+
+            // Reset workflow to Initialization phase, clear all signals and checkpoints
+            await _workflow.ResetAsync(ct);
+
+            // Reset spawn slot counters so agents can be re-spawned
+            _spawnManager.ResetSlots();
+
+            // Reset dashboard caches
+            _dashboard.ResetCaches();
+
+            _logger.LogInformation("Internal state reset to Initialization");
+
+            // ── Phase 4: Respawn core agents ─────────────────────────
+            _logger.LogWarning("CLEANUP Phase 4/4: Spawning fresh agents...");
+            result.Phase = "Starting agents";
+
+            var roles = new[]
+            {
+                AgentRole.ProgramManager,
+                AgentRole.Researcher,
+                AgentRole.Architect,
+                AgentRole.PrincipalEngineer,
+                AgentRole.TestEngineer
+            };
+
+            foreach (var role in roles)
+            {
+                try
+                {
+                    var identity = await _spawnManager.SpawnAgentAsync(role, ct);
+                    if (identity is not null)
+                    {
+                        result.AgentsStarted++;
+                        _logger.LogInformation("Spawned {Role}: {Name}", role, identity.DisplayName);
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to spawn {Role} — returned null", role);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Failed to spawn {Role} agent during restart", role);
+                    result.Errors.Add($"Failed to spawn {role}: {ex.Message}");
+                }
+            }
+
+            result.Phase = "Complete";
             result.Success = true;
+            _logger.LogWarning(
+                "✅ CLEANUP COMPLETE: {Issues} issues deleted, {Prs} PRs closed, " +
+                "{Files} files deleted, {Stopped} agents stopped, {Started} agents restarted",
+                result.IssuesDeleted, result.PrsClosed, result.FilesDeleted,
+                result.AgentsStopped, result.AgentsStarted);
         }
         catch (Exception ex)
         {
@@ -363,6 +455,7 @@ public sealed class CleanupSummary
 public sealed class CleanupResult
 {
     public bool Success { get; set; }
+    public string Phase { get; set; } = "Pending";
     public int IssuesDeleted { get; set; }
     public int IssuesClosed { get; set; }
     public int PrsClosed { get; set; }
@@ -370,6 +463,8 @@ public sealed class CleanupResult
     public int FilesDeleted { get; set; }
     public int FilesPreserved { get; set; }
     public int BranchesDeleted { get; set; }
+    public int AgentsStopped { get; set; }
+    public int AgentsStarted { get; set; }
     public List<string> Errors { get; set; } = new();
 }
 

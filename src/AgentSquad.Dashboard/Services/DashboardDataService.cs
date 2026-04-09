@@ -187,6 +187,30 @@ public sealed class DashboardDataService : BackgroundService
         }
     }
 
+    /// <summary>
+    /// Clear all dashboard caches so the UI starts fresh after a reset.
+    /// Agent event subscriptions remain active for newly spawned agents.
+    /// </summary>
+    public void ResetCaches()
+    {
+        lock (_cacheLock)
+        {
+            _agentCache.Clear();
+            _agentErrors.Clear();
+            _trackedAgents.Clear();
+            _diagnosticHistory.Clear();
+            _milestones.Clear();
+            _recordedMilestoneKeys.Clear();
+            _cachedPullRequests = Array.Empty<AgentPullRequest>();
+            _cachedIssues = Array.Empty<AgentIssue>();
+            _lastPrFetchUtc = DateTime.MinValue;
+            _lastIssueFetchUtc = DateTime.MinValue;
+        }
+
+        RecordMilestone("🔄", "Project Reset", "Repository cleaned and agents restarted", "phase");
+        _logger.LogInformation("Dashboard caches reset");
+    }
+
     public AgentSnapshot? GetAgentSnapshot(string agentId)
     {
         lock (_cacheLock)

@@ -574,8 +574,9 @@ else if (_config is not null)
                             </div>
                         </div>
 
-                        <button class="cleanup-execute-btn" @onclick="ShowCleanupModal">
-                            🗑️ Clean Up Repository
+                        <button class="cleanup-execute-btn" @onclick="ShowCleanupModal"
+                            title="Stop all agents, clean the repository, reset workflow state, and restart a fresh project">
+                            🔄 Clean &amp; Restart Project
                         </button>
                     </div>
                 }
@@ -586,8 +587,9 @@ else if (_config is not null)
         {
             <div class="config-card @(_cleanupResult.Success ? "" : "config-card-danger")">
                 <div class="config-card-body">
-                    <h3 class="cleanup-result-title">@(_cleanupResult.Success ? "✅ Cleanup Complete" : "⚠️ Cleanup Completed with Errors")</h3>
+                    <h3 class="cleanup-result-title">@(_cleanupResult.Success ? "✅ Clean & Restart Complete" : "⚠️ Cleanup Completed with Errors")</h3>
                     <div class="cleanup-result-stats">
+                        <span>Agents stopped: <strong>@_cleanupResult.AgentsStopped</strong></span>
                         <span>Issues deleted: <strong>@_cleanupResult.IssuesDeleted</strong></span>
                         @if (_cleanupResult.IssuesClosed > 0)
                         {
@@ -598,7 +600,12 @@ else if (_config is not null)
                         <span>Files deleted: <strong>@_cleanupResult.FilesDeleted</strong></span>
                         <span>Files preserved: <strong>@_cleanupResult.FilesPreserved</strong></span>
                         <span>Branches deleted: <strong>@_cleanupResult.BranchesDeleted</strong></span>
+                        <span>Agents restarted: <strong>@_cleanupResult.AgentsStarted</strong></span>
                     </div>
+                    @if (_cleanupResult.Success)
+                    {
+                        <p style="margin-top:8px;color:#3fb950;">🚀 A fresh project is now running — agents are starting from the Research phase.</p>
+                    }
                     @if (_cleanupResult.Errors.Count > 0)
                     {
                         <details class="cleanup-errors">
@@ -624,9 +631,9 @@ else if (_config is not null)
 @if (_showModal)
 {
     <div style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;">
-        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;width:560px;max-width:90vw;max-height:85vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,0.4);">
+        <div style="background:#161b22;border:1px solid #30363d;border-radius:12px;width:600px;max-width:90vw;max-height:85vh;overflow-y:auto;box-shadow:0 16px 48px rgba(0,0,0,0.4);">
             <div class="modal-header modal-header-danger">
-                <h3 class="modal-title">⚠️ Confirm Repository Cleanup</h3>
+                <h3 class="modal-title">⚠️ Clean &amp; Restart Project</h3>
                 <button class="modal-close" @onclick="HideCleanupModal">✕</button>
             </div>
             <div class="modal-body">
@@ -636,14 +643,21 @@ else if (_config is not null)
                 </div>
 
                 <div class="modal-impact">
-                    <h4>This action will:</h4>
+                    <h4>This will clean the repo and kick off a fresh project:</h4>
                     <ul class="modal-impact-list">
+                        <li class="impact-info">🛑 <strong>Stop all running agents</strong> (PM, Researcher, Architect, PE, TE)</li>
                         <li class="impact-danger">Delete <strong>@(_cleanupSummary?.TotalIssues ?? 0)</strong> issues (@(_cleanupSummary?.OpenIssues ?? 0) open, @(_cleanupSummary?.ClosedIssues ?? 0) closed)</li>
                         <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenPrs ?? 0)</strong> open pull requests</li>
-                        <li class="impact-warning">Label <strong>@(_cleanupSummary?.MergedPrs ?? 0)</strong> merged PRs as "tested" (prevents re-testing on restart)</li>
+                        <li class="impact-warning">Label <strong>@(_cleanupSummary?.MergedPrs ?? 0)</strong> merged PRs as "tested"</li>
                         <li class="impact-danger">Delete all agent branches</li>
                         <li class="impact-danger">Delete <strong>@(_cleanupSummary?.FileCount ?? 0)</strong> files from <code>@_config?.Project.DefaultBranch</code></li>
+                        <li class="impact-info">🔄 <strong>Reset workflow state</strong> to Initialization (clear all signals &amp; checkpoints)</li>
+                        <li class="impact-success">🚀 <strong>Restart all agents</strong> — begins a new project using current configuration</li>
                     </ul>
+                    <p class="modal-project-note">
+                        📋 <strong>New project:</strong> "@(_config?.Project.Name)" — agents will start fresh from Research phase
+                        using the Project Description and settings configured above.
+                    </p>
                     <p class="modal-irreversible">🚫 This action <strong>cannot be undone</strong>.</p>
                 </div>
 
@@ -662,11 +676,11 @@ else if (_config is not null)
                     @if (_cleaningUp)
                     {
                         <span class="config-spinner config-spinner-light"></span>
-                        <span>Cleaning up...</span>
+                        <span>@_cleanupPhase</span>
                     }
                     else
                     {
-                        <span>🗑️ Yes, Clean Up Repository</span>
+                        <span>🗑️ Clean &amp; Restart Project</span>
                     }
                 </button>
             </div>
@@ -707,6 +721,7 @@ else if (_config is not null)
     private bool _showModal;
     private string _cleanupCaveats = "";
     private bool _cleaningUp;
+    private string _cleanupPhase = "Cleaning up...";
 
     // PAT validation state
     private PatValidationResult? _patValidation;
@@ -809,13 +824,31 @@ else if (_config is not null)
     private async Task ExecuteCleanup()
     {
         _cleaningUp = true;
+        _cleanupPhase = "Stopping agents...";
         StateHasChanged();
 
         try
         {
-            _cleanupResult = await ConfigService.ExecuteCleanupAsync(_cleanupCaveats);
+            // Run cleanup in a background task so we can update UI with phase progress
+            _cleanupResult = await Task.Run(async () =>
+            {
+                var result = await ConfigService.ExecuteCleanupAsync(_cleanupCaveats);
+                return result;
+            });
+
             _showModal = false;
             _cleanupSummary = null; // clear stale scan
+
+            // After cleanup + restart, re-scan for the (now empty) repo state
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(2000); // let agents settle
+                await InvokeAsync(async () =>
+                {
+                    await ScanRepoBackground();
+                    StateHasChanged();
+                });
+            });
         }
         catch (Exception ex)
         {
@@ -828,6 +861,7 @@ else if (_config is not null)
         finally
         {
             _cleaningUp = false;
+            _cleanupPhase = "Cleaning up...";
         }
     }
 

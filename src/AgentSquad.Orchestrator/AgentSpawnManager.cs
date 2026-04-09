@@ -46,6 +46,22 @@ public class AgentSpawnManager
     }
 
     /// <summary>
+    /// Reset all spawn slot counters so agents can be re-spawned from scratch.
+    /// Call this after all agents have been unregistered.
+    /// </summary>
+    public void ResetSlots()
+    {
+        lock (_lock)
+        {
+            _spawnCounts.Clear();
+            _spawnedPEs = 0;
+            _spawnedSEs = 0;
+            _spawnedJEs = 0;
+        }
+        _logger.LogInformation("Agent spawn slot counters reset");
+    }
+
+    /// <summary>
     /// Spawn a new agent by role. Returns the agent identity, or null if the
     /// spawn limit for that role has been reached.
     /// </summary>

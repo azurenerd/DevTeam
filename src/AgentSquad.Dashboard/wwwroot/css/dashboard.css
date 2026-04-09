@@ -3629,6 +3629,29 @@ div[title] .config-agent-name {
 .impact-warning strong {
     color: #e3b341;
 }
+.impact-info {
+    color: #58a6ff;
+    font-size: 0.85rem;
+}
+.impact-info strong {
+    color: #79c0ff;
+}
+.impact-success {
+    color: #3fb950;
+    font-size: 0.85rem;
+}
+.impact-success strong {
+    color: #56d364;
+}
+.modal-project-note {
+    margin: 0.75rem 0 0;
+    padding: 0.5rem 0.75rem;
+    background: rgba(56, 139, 253, 0.08);
+    border: 1px solid rgba(56, 139, 253, 0.2);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    color: #58a6ff;
+}
 .modal-irreversible {
     margin: 0.75rem 0 0;
     padding: 0.5rem 0.75rem;
