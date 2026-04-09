@@ -1,3 +1,5 @@
+using AgentSquad.Core.Workspace;
+
 namespace AgentSquad.Core.Configuration;
 
 public class AgentSquadConfig
@@ -8,6 +10,7 @@ public class AgentSquadConfig
     public LimitsConfig Limits { get; set; } = new();
     public DashboardConfig Dashboard { get; set; } = new();
     public CopilotCliConfig CopilotCli { get; set; } = new();
+    public WorkspaceConfig Workspace { get; set; } = new();
 }
 
 public class ProjectConfig

@@ -3,6 +3,7 @@ using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -27,9 +28,12 @@ public class SeniorEngineerAgent : EngineerAgentBase
         AgentStateStore stateStore,
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
-        ILogger<SeniorEngineerAgent> logger)
+        ILogger<SeniorEngineerAgent> logger,
+        BuildRunner? buildRunner = null,
+        TestRunner? testRunner = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger,
+               buildRunner, testRunner)
     {
     }
 

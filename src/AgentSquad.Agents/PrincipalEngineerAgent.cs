@@ -6,6 +6,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -79,9 +80,12 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         AgentRegistry registry,
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
-        ILogger<PrincipalEngineerAgent> logger)
+        ILogger<PrincipalEngineerAgent> logger,
+        BuildRunner? buildRunner = null,
+        TestRunner? testRunner = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger)
+               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, logger,
+               buildRunner, testRunner)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _taskManager = new EngineeringTaskIssueManager(github, logger);
@@ -2022,6 +2026,26 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
         await RememberAsync(MemoryType.Action,
             $"Engineering phase complete: {_taskManager.TotalCount} tasks done", ct: ct);
+
+        // Signal all agents to clean up local workspaces
+        if (Config.Workspace.IsEnabled && Config.Workspace.CleanupOnProjectComplete)
+        {
+            try
+            {
+                await MessageBus.PublishAsync(new WorkspaceCleanupMessage
+                {
+                    FromAgentId = Identity.Id,
+                    ToAgentId = "*",
+                    MessageType = "WorkspaceCleanup",
+                    Reason = "Project complete — all engineering tasks finished and integrated"
+                }, ct);
+                Logger.LogInformation("Broadcast workspace cleanup signal to all agents");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to broadcast workspace cleanup signal");
+            }
+        }
     }
 
     #endregion

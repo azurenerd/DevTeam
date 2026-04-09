@@ -6,6 +6,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -38,7 +39,11 @@ public class TestEngineerAgent : AgentBase
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentSquadConfig _config;
+    private readonly BuildRunner? _buildRunner;
+    private readonly TestRunner? _testRunner;
 
+    private LocalWorkspace? _workspace;
+    private bool _pendingWorkspaceCleanup;
     private readonly HashSet<int> _testedPRs = new();
     private readonly List<IDisposable> _subscriptions = new();
     private readonly ConcurrentQueue<(int PrNumber, string PrTitle, string Feedback, string Reviewer)> _reworkQueue = new();
@@ -56,7 +61,9 @@ public class TestEngineerAgent : AgentBase
         ModelRegistry modelRegistry,
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
-        ILogger<AgentBase> logger)
+        ILogger<AgentBase> logger,
+        BuildRunner? buildRunner = null,
+        TestRunner? testRunner = null)
         : base(identity, logger, memoryStore)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -65,21 +72,65 @@ public class TestEngineerAgent : AgentBase
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
+        _buildRunner = buildRunner;
+        _testRunner = testRunner;
     }
 
-    protected override Task OnInitializeAsync(CancellationToken ct)
+    protected override async Task OnInitializeAsync(CancellationToken ct)
     {
         _subscriptions.Add(_messageBus.Subscribe<ChangesRequestedMessage>(
             Identity.Id, HandleChangesRequestedAsync));
+        _subscriptions.Add(_messageBus.Subscribe<WorkspaceCleanupMessage>(
+            Identity.Id, HandleWorkspaceCleanupAsync));
+
+        // Initialize local workspace if configured
+        if (_config.Workspace.IsEnabled)
+        {
+            try
+            {
+                var repoUrl = $"https://x-access-token:{_config.Project.GitHubToken}@github.com/{_config.Project.GitHubRepo}.git";
+                _workspace = new LocalWorkspace(
+                    _config.Workspace,
+                    Identity.Id,
+                    repoUrl,
+                    _config.Project.DefaultBranch,
+                    Logger);
+                await _workspace.InitializeAsync(ct);
+                Logger.LogInformation("TestEngineer initialized local workspace at {Path}", _workspace.RepoPath);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "TestEngineer failed to initialize local workspace, falling back to API mode");
+                _workspace = null;
+            }
+        }
+    }
+
+    private Task HandleWorkspaceCleanupAsync(WorkspaceCleanupMessage msg, CancellationToken ct)
+    {
+        Logger.LogInformation("TestEngineer received workspace cleanup signal: {Reason}", msg.Reason);
+        _pendingWorkspaceCleanup = true;
         return Task.CompletedTask;
     }
 
-    protected override Task OnStopAsync(CancellationToken ct)
+    protected override async Task OnStopAsync(CancellationToken ct)
     {
         foreach (var sub in _subscriptions)
             sub.Dispose();
         _subscriptions.Clear();
-        return Task.CompletedTask;
+
+        if (_pendingWorkspaceCleanup && _workspace is not null)
+        {
+            try
+            {
+                await _workspace.CleanupAsync();
+                Logger.LogInformation("TestEngineer workspace cleaned up");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "TestEngineer failed to clean up workspace");
+            }
+        }
     }
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
@@ -467,7 +518,16 @@ public class TestEngineerAgent : AgentBase
         CancellationToken ct)
     {
         var taskSlug = $"{sourcePR.Number}-tests";
-        var branchName = await _prWorkflow.CreateTaskBranchAsync(Identity.DisplayName, taskSlug, ct);
+        var branchName = $"agent/{Identity.Id.Replace(" ", "-").ToLowerInvariant()}/{taskSlug}";
+
+        // Local workspace mode: write → build → test → push
+        if (_workspace is not null && _buildRunner is not null && _testRunner is not null)
+        {
+            return await CreateTestPRViaLocalWorkspaceAsync(sourcePR, testFiles, branchName, ct);
+        }
+
+        // Fallback: API-only mode
+        branchName = await _prWorkflow.CreateTaskBranchAsync(Identity.DisplayName, taskSlug, ct);
 
         // Commit all test files to the branch
         foreach (var file in testFiles)
@@ -480,27 +540,166 @@ public class TestEngineerAgent : AgentBase
                 ct);
         }
 
-        // Create the test PR with file listing
+        return await CreateTestPRMetadataAsync(sourcePR, testFiles, branchName, testResults: null, ct);
+    }
+
+    /// <summary>
+    /// Creates a test PR using the local workspace: writes test files, builds, runs tests,
+    /// retries failures with AI fixes, then pushes validated code.
+    /// </summary>
+    private async Task<int> CreateTestPRViaLocalWorkspaceAsync(
+        AgentPullRequest sourcePR,
+        IReadOnlyList<CodeFileParser.CodeFile> testFiles,
+        string branchName,
+        CancellationToken ct)
+    {
+        var wsConfig = _config.Workspace;
+
+        // Sync and create branch
+        await _workspace!.SyncWithMainAsync(ct);
+        await _workspace.CreateBranchAsync(branchName, ct);
+
+        // Write test files
+        foreach (var file in testFiles)
+            await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+        // Build to verify test files compile
+        var buildResult = await _buildRunner!.BuildAsync(
+            _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+
+        if (!buildResult.Success)
+        {
+            Logger.LogWarning("TestEngineer: test build failed, attempting AI fix");
+            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            for (int attempt = 0; attempt < wsConfig.MaxBuildRetries && !buildResult.Success; attempt++)
+            {
+                var errorSummary = buildResult.ParsedErrors.Count > 0
+                    ? string.Join("\n", buildResult.ParsedErrors.Take(20))
+                    : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
+
+                var fixHistory = new ChatHistory();
+                fixHistory.AddUserMessage(
+                    $"The test files have build errors:\n\n{errorSummary}\n\n" +
+                    "Fix the test files so they compile. Output ONLY corrected files using:\n" +
+                    "FILE: path/to/file.ext\n```language\n<content>\n```");
+
+                var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+                var fixedFiles = CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+                foreach (var file in fixedFiles)
+                    await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+                buildResult = await _buildRunner.BuildAsync(
+                    _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+            }
+        }
+
+        // Run tests to get real results
+        TestResult? testResult = null;
+        if (buildResult.Success)
+        {
+            testResult = await _testRunner!.RunTestsAsync(
+                _workspace.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
+
+            if (!testResult.Success)
+            {
+                Logger.LogWarning("TestEngineer: {Failed} tests failed, attempting AI fix",
+                    testResult.Failed);
+
+                var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+                for (int attempt = 0; attempt < wsConfig.MaxTestRetries && !testResult.Success; attempt++)
+                {
+                    var failureSummary = testResult.FailureDetails.Count > 0
+                        ? string.Join("\n", testResult.FailureDetails.Take(10))
+                        : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
+
+                    var fixHistory = new ChatHistory();
+                    fixHistory.AddUserMessage(
+                        $"Tests failed ({testResult.Failed} of {testResult.Total}):\n\n{failureSummary}\n\n" +
+                        "Fix the test code. Output ONLY corrected files using:\n" +
+                        "FILE: path/to/file.ext\n```language\n<content>\n```\n\n" +
+                        "Only fix test bugs — don't mask real code bugs.");
+
+                    var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+                    var fixedFiles = CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+                    foreach (var file in fixedFiles)
+                        await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+                    // Rebuild + retest
+                    var rebuildResult = await _buildRunner.BuildAsync(
+                        _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+                    if (!rebuildResult.Success) break;
+
+                    testResult = await _testRunner.RunTestsAsync(
+                        _workspace.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
+                }
+            }
+
+            Logger.LogInformation("TestEngineer: test results — Passed: {Passed}, Failed: {Failed}, Skipped: {Skipped}",
+                testResult.Passed, testResult.Failed, testResult.Skipped);
+        }
+
+        // Commit and push
+        await _workspace.CommitAsync($"test: add tests for PR #{sourcePR.Number}", ct);
+        await _workspace.PushAsync(branchName, ct);
+
+        return await CreateTestPRMetadataAsync(sourcePR, testFiles, branchName, testResult, ct);
+    }
+
+    /// <summary>
+    /// Creates the PR metadata (title, body, labels) — shared by both API and local workspace paths.
+    /// </summary>
+    private async Task<int> CreateTestPRMetadataAsync(
+        AgentPullRequest sourcePR,
+        IReadOnlyList<CodeFileParser.CodeFile> testFiles,
+        string branchName,
+        TestResult? testResults,
+        CancellationToken ct)
+    {
         var fileList = string.Join("\n", testFiles.Select(f => $"- `{f.Path}`"));
         var prTitle = $"{Identity.DisplayName}: Tests for PR #{sourcePR.Number} - {sourcePR.Title}";
-        var prBody = $"""
-            ## Test Engineering
 
-            **Source PR:** #{sourcePR.Number} (merged)
-            **Generated by:** {Identity.DisplayName}
-            **Test Files:** {testFiles.Count}
+        var bodyBuilder = new System.Text.StringBuilder();
+        bodyBuilder.AppendLine("## Test Engineering");
+        bodyBuilder.AppendLine();
+        bodyBuilder.AppendLine($"**Source PR:** #{sourcePR.Number} (merged)");
+        bodyBuilder.AppendLine($"**Generated by:** {Identity.DisplayName}");
+        bodyBuilder.AppendLine($"**Test Files:** {testFiles.Count}");
+        bodyBuilder.AppendLine();
 
-            ### Test Files
-            {fileList}
+        // Include real test results if available
+        if (testResults is not null)
+        {
+            bodyBuilder.AppendLine("### Test Results (actual execution)");
+            bodyBuilder.AppendLine($"- **Passed:** {testResults.Passed}");
+            bodyBuilder.AppendLine($"- **Failed:** {testResults.Failed}");
+            bodyBuilder.AppendLine($"- **Skipped:** {testResults.Skipped}");
+            bodyBuilder.AppendLine($"- **Total:** {testResults.Total}");
+            bodyBuilder.AppendLine($"- **Duration:** {testResults.Duration.TotalSeconds:F1}s");
+            bodyBuilder.AppendLine($"- **Command:** `{_config.Workspace.TestCommand}`");
+            bodyBuilder.AppendLine();
 
-            ### Coverage
-            - Unit tests for new/changed functions and classes
-            - Integration tests for component interactions
-            - Edge case and error handling coverage
+            if (testResults.FailureDetails.Count > 0)
+            {
+                bodyBuilder.AppendLine("### Failures");
+                foreach (var failure in testResults.FailureDetails.Take(5))
+                    bodyBuilder.AppendLine($"- {failure}");
+                bodyBuilder.AppendLine();
+            }
+        }
 
-            ### How to Run
-            Run the test suite with the standard test runner for the project tech stack.
-            """;
+        bodyBuilder.AppendLine("### Test Files");
+        bodyBuilder.AppendLine(fileList);
+        bodyBuilder.AppendLine();
+        bodyBuilder.AppendLine("### Coverage");
+        bodyBuilder.AppendLine("- Unit tests for new/changed functions and classes");
+        bodyBuilder.AppendLine("- Integration tests for component interactions");
+        bodyBuilder.AppendLine("- Edge case and error handling coverage");
+
+        var prBody = bodyBuilder.ToString();
 
         var labels = new[] { "tests", PullRequestWorkflow.Labels.InProgress };
 

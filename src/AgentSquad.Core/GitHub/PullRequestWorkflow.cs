@@ -138,6 +138,53 @@ public partial class PullRequestWorkflow
     }
 
     /// <summary>
+    /// Creates a PR for a branch that was already pushed via git (local workspace mode).
+    /// Unlike <see cref="CreateTaskPullRequestAsync"/>, does NOT commit a task marker file
+    /// because the branch already has real code commits from the local workspace.
+    /// </summary>
+    public async Task<AgentPullRequest> CreatePrForPushedBranchAsync(
+        string branchName,
+        string title,
+        string body,
+        IReadOnlyList<string>? labels = null,
+        CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(title);
+
+        // Idempotency: check if a PR with the same title already exists
+        var existing = await FindExistingPullRequestAsync(title, ct);
+        if (existing is not null)
+        {
+            _logger.LogInformation("PR '{Title}' already exists as #{Number}, returning existing",
+                title, existing.Number);
+            return existing;
+        }
+
+        var prLabels = labels?.ToList() ?? [Labels.InProgress];
+
+        _logger.LogInformation("Creating PR for pushed branch '{Branch}': {Title}", branchName, title);
+
+        AgentPullRequest pr;
+        try
+        {
+            pr = await _github.CreatePullRequestAsync(
+                title, body, branchName, _defaultBranch, [.. prLabels], ct);
+        }
+        catch (Octokit.ApiValidationException)
+        {
+            _logger.LogWarning("PR creation for pushed branch returned Validation Failed — looking for existing PR");
+            var fallback = await FindExistingPullRequestAsync(title, ct);
+            if (fallback is not null)
+                return fallback;
+            throw;
+        }
+
+        _logger.LogInformation("Created PR #{Number} for pushed branch '{Branch}'", pr.Number, branchName);
+        return pr;
+    }
+
+    /// <summary>
     /// Find an existing open PR by title prefix match. Returns null if none found.
     /// </summary>
     public async Task<AgentPullRequest?> FindExistingPullRequestAsync(

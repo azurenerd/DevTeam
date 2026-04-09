@@ -2,6 +2,7 @@ using AgentSquad.Core.Configuration;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using AgentSquad.Agents;
 using AgentSquad.Dashboard.Components;
@@ -52,6 +53,10 @@ builder.Services.AddSingleton<PullRequestWorkflow>(sp =>
 });
 builder.Services.AddSingleton<IssueWorkflow>();
 builder.Services.AddSingleton<ConflictResolver>();
+
+// Workspace services (local build + test verification)
+builder.Services.AddSingleton<BuildRunner>();
+builder.Services.AddSingleton<TestRunner>();
 
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();

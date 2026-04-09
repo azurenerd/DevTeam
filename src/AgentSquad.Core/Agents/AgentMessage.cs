@@ -101,3 +101,12 @@ public record ClarificationResponseMessage : AgentMessage
     public required int IssueNumber { get; init; }
     public required string Response { get; init; }
 }
+
+/// <summary>
+/// Sent by the PE Leader when all issues are closed and the project is complete.
+/// Agents should delete their local workspaces when they receive this message.
+/// </summary>
+public record WorkspaceCleanupMessage : AgentMessage
+{
+    public required string Reason { get; init; }
+}

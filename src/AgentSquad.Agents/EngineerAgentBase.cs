@@ -5,6 +5,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -43,6 +44,11 @@ public abstract class EngineerAgentBase : AgentBase
     // Cached repo tree for giving agents visibility into existing code (Tier 1: repo structure awareness)
     private IReadOnlyList<string>? _repoTreeCache;
     private DateTime _repoTreeCacheExpiry = DateTime.MinValue;
+    // Local workspace for real build/test verification (null when disabled)
+    protected LocalWorkspace? Workspace;
+    protected readonly BuildRunner? BuildRunnerSvc;
+    protected readonly TestRunner? TestRunnerSvc;
+    private bool _pendingWorkspaceCleanup;
     protected int? CurrentIssueNumber;
     protected int? CurrentPrNumber;
 
@@ -57,7 +63,9 @@ public abstract class EngineerAgentBase : AgentBase
         AgentStateStore stateStore,
         AgentSquadConfig config,
         AgentMemoryStore memoryStore,
-        ILogger<AgentBase> logger)
+        ILogger<AgentBase> logger,
+        BuildRunner? buildRunner = null,
+        TestRunner? testRunner = null)
         : base(identity, logger, memoryStore)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -68,6 +76,8 @@ public abstract class EngineerAgentBase : AgentBase
         Models = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         StateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         Config = config ?? throw new ArgumentNullException(nameof(config));
+        BuildRunnerSvc = buildRunner;
+        TestRunnerSvc = testRunner;
     }
 
     #region Lifecycle
@@ -86,7 +96,35 @@ public abstract class EngineerAgentBase : AgentBase
         Subscriptions.Add(MessageBus.Subscribe<ClarificationResponseMessage>(
             Identity.Id, HandleClarificationResponseAsync));
 
+        // Subscribe to workspace cleanup signal from PE leader
+        Subscriptions.Add(MessageBus.Subscribe<WorkspaceCleanupMessage>(
+            Identity.Id, HandleWorkspaceCleanupAsync));
+
         RegisterAdditionalSubscriptions();
+
+        // Initialize local workspace if configured
+        if (Config.Workspace.IsEnabled)
+        {
+            try
+            {
+                var repoUrl = $"https://x-access-token:{Config.Project.GitHubToken}@github.com/{Config.Project.GitHubRepo}.git";
+                Workspace = new LocalWorkspace(
+                    Config.Workspace,
+                    Identity.Id,
+                    repoUrl,
+                    Config.Project.DefaultBranch,
+                    Logger);
+                await Workspace.InitializeAsync(ct);
+                Logger.LogInformation("{Role} {Name} initialized local workspace at {Path}",
+                    Identity.Role, Identity.DisplayName, Workspace.RepoPath);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "{Role} {Name} failed to initialize local workspace, falling back to API mode",
+                    Identity.Role, Identity.DisplayName);
+                Workspace = null;
+            }
+        }
 
         // Restore rework attempt counts from checkpoint
         try
@@ -277,11 +315,32 @@ public abstract class EngineerAgentBase : AgentBase
     protected virtual Task WorkOnExistingPrAsync(AgentPullRequest pr, CancellationToken ct)
         => WorkOnLegacyPrAsync(pr, ct);
 
-    protected override Task OnStopAsync(CancellationToken ct)
+    protected override async Task OnStopAsync(CancellationToken ct)
     {
         foreach (var sub in Subscriptions)
             sub.Dispose();
         Subscriptions.Clear();
+
+        // Clean up workspace if cleanup was requested
+        if (_pendingWorkspaceCleanup && Workspace is not null)
+        {
+            try
+            {
+                await Workspace.CleanupAsync();
+                Logger.LogInformation("{Role} {Name} workspace cleaned up", Identity.Role, Identity.DisplayName);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "{Role} {Name} failed to clean up workspace", Identity.Role, Identity.DisplayName);
+            }
+        }
+    }
+
+    private Task HandleWorkspaceCleanupAsync(WorkspaceCleanupMessage msg, CancellationToken ct)
+    {
+        Logger.LogInformation("{Role} {Name} received workspace cleanup signal: {Reason}",
+            Identity.Role, Identity.DisplayName, msg.Reason);
+        _pendingWorkspaceCleanup = true;
         return Task.CompletedTask;
     }
 
@@ -607,7 +666,18 @@ public abstract class EngineerAgentBase : AgentBase
             if (codeFiles.Count > 0)
             {
                 var commitMsg = $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}";
-                await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, commitMsg, ct);
+
+                // Local workspace mode: write → build → test → commit → push
+                if (Workspace is not null && BuildRunnerSvc is not null)
+                {
+                    await CommitViaLocalWorkspaceAsync(pr, codeFiles, commitMsg, stepNumber, steps.Count, step, chat, ct);
+                }
+                else
+                {
+                    // Fallback: GitHub API mode (no local build/test)
+                    await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, commitMsg, ct);
+                }
+
                 Logger.LogInformation("{Role} {Name} committed {FileCount} files for step {Step}/{Total} on PR #{PrNumber}",
                     Identity.Role, Identity.DisplayName, codeFiles.Count, stepNumber, steps.Count, pr.Number);
                 LogActivity("task", $"✅ Step {stepNumber}/{steps.Count} committed ({codeFiles.Count} files): {Truncate(step, 80)}");
@@ -892,8 +962,19 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogInformation("{Role} {Name} parsed {Count} code files for PR #{Number}",
                 Identity.Role, Identity.DisplayName, codeFiles.Count, pr.Number);
 
-            await PrWorkflow.CommitCodeFilesToPRAsync(
-                pr.Number, codeFiles, $"Implement issue #{issue.Number}: {issue.Title}", ct);
+            if (Workspace is not null && BuildRunnerSvc is not null)
+            {
+                var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
+                var chat = kernel.GetRequiredService<IChatCompletionService>();
+                await CommitViaLocalWorkspaceAsync(pr, codeFiles,
+                    $"Implement issue #{issue.Number}: {issue.Title}", 1, 1,
+                    issue.Title, chat, ct);
+            }
+            else
+            {
+                await PrWorkflow.CommitCodeFilesToPRAsync(
+                    pr.Number, codeFiles, $"Implement issue #{issue.Number}: {issue.Title}", ct);
+            }
         }
         else
         {
@@ -1057,8 +1138,16 @@ public abstract class EngineerAgentBase : AgentBase
                 var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(updatedImpl);
                 if (codeFiles.Count > 0)
                 {
-                    await PrWorkflow.CommitCodeFilesToPRAsync(
-                        pr.Number, codeFiles, "Address review feedback", ct);
+                    if (Workspace is not null && BuildRunnerSvc is not null)
+                    {
+                        await CommitViaLocalWorkspaceAsync(pr, codeFiles, "Address review feedback",
+                            1, 1, "Address review feedback", chat, ct);
+                    }
+                    else
+                    {
+                        await PrWorkflow.CommitCodeFilesToPRAsync(
+                            pr.Number, codeFiles, "Address review feedback", ct);
+                    }
 
                     var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {allReviewers}.\n\n";
                     if (!string.IsNullOrWhiteSpace(changesSummary))
@@ -1363,7 +1452,17 @@ public abstract class EngineerAgentBase : AgentBase
                     codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
 
                 if (codeFiles.Count > 0)
-                    await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, "Implement task", ct);
+                {
+                    if (Workspace is not null && BuildRunnerSvc is not null)
+                    {
+                        await CommitViaLocalWorkspaceAsync(pr, codeFiles, "Implement task",
+                            1, 1, syntheticIssue.Title, chat, ct);
+                    }
+                    else
+                    {
+                        await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, "Implement task", ct);
+                    }
+                }
             }
             else
             {
@@ -1420,8 +1519,17 @@ public abstract class EngineerAgentBase : AgentBase
 
                     if (codeFiles.Count > 0)
                     {
-                        await PrWorkflow.CommitCodeFilesToPRAsync(
-                            pr.Number, codeFiles, $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}", ct);
+                        var commitMsg = $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}";
+                        if (Workspace is not null && BuildRunnerSvc is not null)
+                        {
+                            await CommitViaLocalWorkspaceAsync(pr, codeFiles, commitMsg,
+                                stepNumber, steps.Count, step, chat, ct);
+                        }
+                        else
+                        {
+                            await PrWorkflow.CommitCodeFilesToPRAsync(
+                                pr.Number, codeFiles, commitMsg, ct);
+                        }
                     }
 
                     completedSteps.Add(step);
@@ -1529,6 +1637,217 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogWarning(ex, "Failed to fetch repo tree for context");
             return "";
         }
+    }
+
+    #endregion
+
+    #region Local Workspace Build/Test
+
+    /// <summary>
+    /// Write files to local workspace, build, test, fix if needed, then commit and push.
+    /// This ensures no code reaches GitHub until it actually compiles and passes tests.
+    /// </summary>
+    private async Task CommitViaLocalWorkspaceAsync(
+        AgentPullRequest pr,
+        IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> codeFiles,
+        string commitMsg,
+        int stepNumber,
+        int totalSteps,
+        string stepDescription,
+        IChatCompletionService chat,
+        CancellationToken ct)
+    {
+        var wsConfig = Config.Workspace;
+        var branchName = pr.HeadBranch ?? $"agent/{Identity.Id.Replace(" ", "-").ToLowerInvariant()}/pr-{pr.Number}";
+
+        // Ensure workspace is on the right branch
+        if (stepNumber == 1)
+        {
+            await Workspace!.SyncWithMainAsync(ct);
+            await Workspace.CreateBranchAsync(branchName, ct);
+        }
+
+        // Write files to local filesystem
+        foreach (var file in codeFiles)
+            await Workspace!.WriteFileAsync(file.Path, file.Content, ct);
+
+        // Build with retry loop
+        var buildSuccess = await BuildWithRetryAsync(codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
+
+        if (!buildSuccess)
+        {
+            Logger.LogWarning("{Role} {Name} build failed after {MaxRetries} retries for step {Step}/{Total}, committing anyway with warning",
+                Identity.Role, Identity.DisplayName, wsConfig.MaxBuildRetries, stepNumber, totalSteps);
+            await GitHub.AddPullRequestCommentAsync(pr.Number,
+                $"⚠️ **Build Warning:** Step {stepNumber}/{totalSteps} has build errors that could not be auto-fixed after {wsConfig.MaxBuildRetries} attempts.", ct);
+        }
+
+        // Test with retry loop (only if build succeeded)
+        if (buildSuccess && TestRunnerSvc is not null)
+        {
+            var testSuccess = await TestWithRetryAsync(codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
+
+            if (!testSuccess)
+            {
+                Logger.LogWarning("{Role} {Name} tests failed after {MaxRetries} retries for step {Step}/{Total}",
+                    Identity.Role, Identity.DisplayName, wsConfig.MaxTestRetries, stepNumber, totalSteps);
+                await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    $"⚠️ **Test Warning:** Step {stepNumber}/{totalSteps} has test failures that could not be auto-fixed after {wsConfig.MaxTestRetries} attempts.", ct);
+            }
+        }
+
+        // Commit locally and push
+        await Workspace!.CommitAsync(commitMsg, ct);
+        await Workspace.PushAsync(branchName, ct);
+    }
+
+    /// <summary>
+    /// Build the project locally, feeding errors back to AI for fix attempts.
+    /// </summary>
+    private async Task<bool> BuildWithRetryAsync(
+        IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> originalFiles,
+        IChatCompletionService chat,
+        WorkspaceConfig wsConfig,
+        int stepNumber, int totalSteps, string stepDescription,
+        CancellationToken ct)
+    {
+        for (int attempt = 0; attempt <= wsConfig.MaxBuildRetries; attempt++)
+        {
+            var buildResult = await BuildRunnerSvc!.BuildAsync(
+                Workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+
+            if (buildResult.Success)
+            {
+                if (attempt > 0)
+                    Logger.LogInformation("{Role} {Name} build succeeded after {Attempt} fix attempt(s)",
+                        Identity.Role, Identity.DisplayName, attempt);
+                return true;
+            }
+
+            if (attempt >= wsConfig.MaxBuildRetries)
+                break;
+
+            Logger.LogWarning("{Role} {Name} build failed (attempt {Attempt}/{Max}): {ErrorCount} errors",
+                Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxBuildRetries + 1, buildResult.ParsedErrors.Count);
+            LogActivity("build", $"🔧 Build failed (attempt {attempt + 1}), asking AI to fix {buildResult.ParsedErrors.Count} errors");
+
+            // Feed errors to AI for fix
+            var errorSummary = buildResult.ParsedErrors.Count > 0
+                ? string.Join("\n", buildResult.ParsedErrors.Take(20))
+                : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
+
+            var fixPrompt = $"""
+                The code from step {stepNumber}/{totalSteps} ({stepDescription}) has build errors.
+                
+                BUILD ERRORS:
+                {errorSummary}
+                
+                Fix ALL build errors. Output ONLY the corrected files using this format:
+                FILE: path/to/file.ext
+                ```language
+                <complete corrected file content>
+                ```
+                
+                Include the COMPLETE file content for each file that needs changes.
+                """;
+
+            var fixHistory = new ChatHistory();
+            fixHistory.AddUserMessage(fixPrompt);
+            var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+            var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+
+            foreach (var file in fixedFiles)
+                await Workspace.WriteFileAsync(file.Path, file.Content, ct);
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Run tests locally, feeding failures back to AI for fix attempts.
+    /// </summary>
+    private async Task<bool> TestWithRetryAsync(
+        IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> originalFiles,
+        IChatCompletionService chat,
+        WorkspaceConfig wsConfig,
+        int stepNumber, int totalSteps, string stepDescription,
+        CancellationToken ct)
+    {
+        for (int attempt = 0; attempt <= wsConfig.MaxTestRetries; attempt++)
+        {
+            var testResult = await TestRunnerSvc!.RunTestsAsync(
+                Workspace!.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
+
+            if (testResult.Success)
+            {
+                if (attempt > 0)
+                    Logger.LogInformation("{Role} {Name} tests passed after {Attempt} fix attempt(s): {Passed} passed",
+                        Identity.Role, Identity.DisplayName, attempt, testResult.Passed);
+                else
+                    Logger.LogInformation("{Role} {Name} tests passed: {Passed} passed, {Skipped} skipped",
+                        Identity.Role, Identity.DisplayName, testResult.Passed, testResult.Skipped);
+                return true;
+            }
+
+            if (attempt >= wsConfig.MaxTestRetries)
+                break;
+
+            Logger.LogWarning("{Role} {Name} tests failed (attempt {Attempt}/{Max}): {Failed} failed, {Passed} passed",
+                Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxTestRetries + 1,
+                testResult.Failed, testResult.Passed);
+            LogActivity("test", $"🧪 Tests failed (attempt {attempt + 1}): {testResult.Failed} failed, asking AI to fix");
+
+            var failureSummary = testResult.FailureDetails.Count > 0
+                ? string.Join("\n", testResult.FailureDetails.Take(10))
+                : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
+
+            var fixPrompt = $"""
+                The code from step {stepNumber}/{totalSteps} ({stepDescription}) has test failures.
+                
+                TEST FAILURES ({testResult.Failed} of {testResult.Total}):
+                {failureSummary}
+                
+                Fix the code so all tests pass. Output ONLY the corrected files using this format:
+                FILE: path/to/file.ext
+                ```language
+                <complete corrected file content>
+                ```
+                
+                Include the COMPLETE file content for each file that needs changes.
+                Do NOT modify the test files unless the tests themselves are wrong.
+                """;
+
+            var fixHistory = new ChatHistory();
+            fixHistory.AddUserMessage(fixPrompt);
+            var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+            var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+
+            foreach (var file in fixedFiles)
+                await Workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+            // Rebuild after fix before re-testing
+            var rebuildResult = await BuildRunnerSvc!.BuildAsync(
+                Workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+            if (!rebuildResult.Success)
+            {
+                Logger.LogWarning("{Role} {Name} rebuild after test fix also failed, skipping further test retries",
+                    Identity.Role, Identity.DisplayName);
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Set up the workspace branch for a PR (sync main, create/checkout branch).
+    /// Called before the first step when in local workspace mode.
+    /// </summary>
+    protected async Task PrepareWorkspaceBranchAsync(string branchName, CancellationToken ct)
+    {
+        if (Workspace is null) return;
+        await Workspace.SyncWithMainAsync(ct);
+        await Workspace.CreateBranchAsync(branchName, ct);
     }
 
     #endregion
