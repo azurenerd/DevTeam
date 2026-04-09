@@ -118,6 +118,8 @@ public sealed class DashboardDataService : BackgroundService
     private AgentHealthSnapshot? _lastHealthSnapshot;
     private IReadOnlyList<AgentPullRequest> _cachedPullRequests = Array.Empty<AgentPullRequest>();
     private DateTime _lastPrFetchUtc = DateTime.MinValue;
+    private IReadOnlyList<AgentIssue> _cachedIssues = Array.Empty<AgentIssue>();
+    private DateTime _lastIssueFetchUtc = DateTime.MinValue;
     private static readonly TimeSpan PrCacheExpiry = TimeSpan.FromSeconds(30);
 
     public DashboardDataService(
@@ -840,6 +842,26 @@ public sealed class DashboardDataService : BackgroundService
         }
 
         return _cachedPullRequests;
+    }
+
+    // --- Issue data for dashboard ---
+
+    public async Task<IReadOnlyList<AgentIssue>> GetIssuesAsync()
+    {
+        if (DateTime.UtcNow - _lastIssueFetchUtc < PrCacheExpiry && _cachedIssues.Count > 0)
+            return _cachedIssues;
+
+        try
+        {
+            _cachedIssues = await _github.GetAllIssuesAsync();
+            _lastIssueFetchUtc = DateTime.UtcNow;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch issues for dashboard");
+        }
+
+        return _cachedIssues;
     }
 
     // Observable event for Blazor components to subscribe to for re-rendering

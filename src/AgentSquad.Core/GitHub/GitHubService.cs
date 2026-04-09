@@ -380,6 +380,23 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<AgentIssue>> GetAllIssuesAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            var issues = await _client.Issue.GetAllForRepository(_owner, _repo,
+                new RepositoryIssueRequest { State = ItemStateFilter.All, SortDirection = SortDirection.Descending });
+
+            // Filter out pull requests (GitHub API returns PRs as issues too)
+            return issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get all issues");
+            throw;
+        }
+    }
+
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesForAgentAsync(
         string agentName, CancellationToken ct = default)
     {
@@ -1110,6 +1127,10 @@ public class GitHubService : IGitHubService
             AssignedAgent = agentName,
             Url = issue.HtmlUrl,
             CreatedAt = issue.CreatedAt.UtcDateTime,
+            UpdatedAt = issue.UpdatedAt?.UtcDateTime,
+            ClosedAt = issue.ClosedAt?.UtcDateTime,
+            Author = issue.User?.Login,
+            CommentCount = issue.Comments,
             Labels = issue.Labels.Select(l => l.Name).ToList(),
             Comments = comments?.Select(c => new Models.IssueComment
             {

@@ -31,6 +31,10 @@ public record AgentIssue
     public string? AssignedAgent { get; init; }
     public string Url { get; init; } = "";
     public DateTime CreatedAt { get; init; }
+    public DateTime? UpdatedAt { get; init; }
+    public DateTime? ClosedAt { get; init; }
+    public string? Author { get; init; }
+    public int CommentCount { get; init; }
     public List<string> Labels { get; init; } = new();
     public List<IssueComment> Comments { get; init; } = new();
 }

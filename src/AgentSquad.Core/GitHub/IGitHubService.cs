@@ -21,6 +21,7 @@ public interface IGitHubService
     Task<AgentIssue> CreateIssueAsync(string title, string body, string[] labels, CancellationToken ct = default);
     Task<AgentIssue?> GetIssueAsync(int number, CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetOpenIssuesAsync(CancellationToken ct = default);
+    Task<IReadOnlyList<AgentIssue>> GetAllIssuesAsync(CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetIssuesForAgentAsync(string agentName, CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default);
     Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, string state, CancellationToken ct = default);
