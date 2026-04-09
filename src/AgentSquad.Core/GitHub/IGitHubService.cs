@@ -31,6 +31,13 @@ public interface IGitHubService
     Task UpdateIssueTitleAsync(int issueNumber, string newTitle, CancellationToken ct = default);
     Task CloseIssueAsync(int issueNumber, CancellationToken ct = default);
 
+    /// <summary>
+    /// Permanently delete an issue using the GitHub GraphQL API.
+    /// Requires the PAT to have admin/delete permissions on the repo.
+    /// Falls back to closing the issue if deletion fails.
+    /// </summary>
+    Task<bool> DeleteIssueAsync(int issueNumber, CancellationToken ct = default);
+
     // File Management
     Task<string?> GetFileContentAsync(string path, string? branch = null, CancellationToken ct = default);
     Task CreateOrUpdateFileAsync(string path, string content, string commitMessage, string? branch = null, CancellationToken ct = default);

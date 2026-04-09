@@ -49,41 +49,88 @@ else if (_config is not null)
             {
                 <div class="config-card-body">
                     <div class="config-field">
-                        <label>Project Name</label>
-                        <input type="text" @bind="_config.Project.Name" class="config-input" />
+                        <label title="The display name for this project. Used in logs, dashboard, and agent conversations.">Project Name</label>
+                        <input type="text" @bind="_config.Project.Name" class="config-input"
+                            title="A short, human-readable name for the project. Shown in the dashboard header and agent logs." />
                     </div>
                     <div class="config-field">
-                        <label>Description</label>
-                        <textarea @bind="_config.Project.Description" class="config-textarea" rows="3"></textarea>
+                        <label title="A brief description of what the project does. Provided to agents as context for code generation and decision-making.">Description</label>
+                        <textarea @bind="_config.Project.Description" class="config-textarea" rows="3"
+                            title="Describe the project's purpose, tech stack, and goals. Agents read this to understand what they're building."></textarea>
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>GitHub Repo</label>
-                            <input type="text" @bind="_config.Project.GitHubRepo" class="config-input" placeholder="owner/repo" />
+                            <label title="The GitHub repository in 'owner/repo' format (e.g., 'myorg/myproject'). All agent PRs, issues, and code go here.">GitHub Repo</label>
+                            <input type="text" @bind="_config.Project.GitHubRepo" class="config-input" placeholder="owner/repo"
+                                title="Format: owner/repo. This is the target repository where agents create PRs, issues, and push code." />
                         </div>
                         <div class="config-field">
-                            <label>Default Branch</label>
-                            <input type="text" @bind="_config.Project.DefaultBranch" class="config-input" />
+                            <label title="The primary branch (e.g., 'main' or 'master'). Agent PRs target this branch and file operations reference it.">Default Branch</label>
+                            <input type="text" @bind="_config.Project.DefaultBranch" class="config-input"
+                                title="The main/trunk branch name. Agent PRs will target this branch." />
                         </div>
                     </div>
                     <div class="config-field">
-                        <label>GitHub Token (PAT)</label>
-                        <div class="config-secret-field">
-                            <input type="@(_showToken ? "text" : "password")" @bind="_config.Project.GitHubToken" class="config-input" />
-                            <button class="config-secret-toggle" @onclick="() => _showToken = !_showToken">@(_showToken ? "🙈" : "👁️")</button>
+                        <label title="GitHub Personal Access Token (PAT) used for all GitHub API operations. Needs repo, issues, and workflow scopes.">GitHub Token (PAT)</label>
+                        <div class="config-pat-row">
+                            <div class="config-secret-field">
+                                <input type="@(_showToken ? "text" : "password")" @bind="_config.Project.GitHubToken" class="config-input"
+                                    title="A GitHub PAT with repo, issues, and workflow scopes. Used for creating PRs, issues, reading code, and cleanup operations." />
+                                <button class="config-secret-toggle" @onclick="() => _showToken = !_showToken"
+                                    title="@(_showToken ? "Hide token" : "Show token")">@(_showToken ? "🙈" : "👁️")</button>
+                            </div>
+                            <button class="config-validate-btn @(_patValidation?.Success == true ? "config-validate-success" : "")"
+                                @onclick="ValidatePat" disabled="@_validatingPat"
+                                title="Test the PAT token against the repo specified above to verify access.">
+                                @if (_validatingPat)
+                                {
+                                    <span class="config-spinner config-spinner-sm"></span>
+                                }
+                                else if (_patValidation?.Success == true)
+                                {
+                                    <span>✓ Verified</span>
+                                }
+                                else
+                                {
+                                    <span>🔑 Verify Access</span>
+                                }
+                            </button>
                         </div>
+                        @if (_patValidation is not null)
+                        {
+                            @if (_patValidation.Success)
+                            {
+                                <div class="config-pat-result config-pat-success">
+                                    <span>✅ Connected as <strong>@_patValidation.AuthenticatedUser</strong> → <strong>@_patValidation.RepoName</strong></span>
+                                    <span class="config-pat-detail">@(_patValidation.IsPrivate ? "🔒 Private" : "🌐 Public") · Branch: @_patValidation.DefaultBranch</span>
+                                    @if (!string.IsNullOrEmpty(_patValidation.RepoDescription))
+                                    {
+                                        <span class="config-pat-desc">@_patValidation.RepoDescription</span>
+                                    }
+                                </div>
+                            }
+                            else
+                            {
+                                <div class="config-pat-result config-pat-error">
+                                    <span>❌ @_patValidation.Error</span>
+                                </div>
+                            }
+                        }
                     </div>
                     <div class="config-field">
-                        <label>Tech Stack</label>
-                        <input type="text" @bind="_config.Project.TechStack" class="config-input" />
+                        <label title="The primary technology stack (e.g., '.NET 8', 'React + Node.js'). Agents use this to pick appropriate frameworks, patterns, and test tools.">Tech Stack</label>
+                        <input type="text" @bind="_config.Project.TechStack" class="config-input"
+                            title="e.g., '.NET 8', 'React + TypeScript', 'Python FastAPI'. Guides agent decisions about project structure, dependencies, and test frameworks." />
                     </div>
                     <div class="config-field">
-                        <label>Executive GitHub Username</label>
-                        <input type="text" @bind="_config.Project.ExecutiveGitHubUsername" class="config-input" />
+                        <label title="Your GitHub username. Used to identify executive-level requests in issues and for at-mentions in PR reviews.">Executive GitHub Username</label>
+                        <input type="text" @bind="_config.Project.ExecutiveGitHubUsername" class="config-input"
+                            title="The GitHub username of the project lead. Issues created by this user get 'executive-request' priority." />
                     </div>
                     <div class="config-field">
-                        <label>Research Prompt <span class="config-hint">(optional — overrides default)</span></label>
-                        <textarea @bind="_config.Project.ResearchPrompt" class="config-textarea" rows="3" placeholder="Leave empty for auto-generated prompt"></textarea>
+                        <label title="Optional custom prompt for the Researcher agent. Leave empty to use the auto-generated research prompt based on project description.">Research Prompt <span class="config-hint">(optional — overrides default)</span></label>
+                        <textarea @bind="_config.Project.ResearchPrompt" class="config-textarea" rows="3" placeholder="Leave empty for auto-generated prompt"
+                            title="Custom instructions for the Researcher agent. If blank, a prompt is auto-generated from the project description. Use this to focus research on specific topics."></textarea>
                     </div>
                 </div>
             }
@@ -100,21 +147,21 @@ else if (_config is not null)
             {
                 <div class="config-card-body">
                     <div class="config-field-row">
-                        <div class="config-field">
+                        <div class="config-field" title="When enabled, all AI calls route through the GitHub Copilot CLI instead of direct API keys. Requires 'copilot' CLI v1.0.18+ installed.">
                             <label>Enabled</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.Enabled" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Uses a faster, cheaper model for non-critical operations like status updates and simple classifications. Reduces cost without sacrificing quality on important tasks.">
                             <label>Fast Mode</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.FastMode" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Sends the entire multi-turn conversation as a single prompt instead of multiple turns. Can improve coherence but uses more tokens per request.">
                             <label>Single-Pass Mode</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.SinglePassMode" />
@@ -123,21 +170,21 @@ else if (_config is not null)
                         </div>
                     </div>
                     <div class="config-field-row">
-                        <div class="config-field">
+                        <div class="config-field" title="Suppresses CLI banners, progress indicators, and decorative output. Cleaner logs but less visibility into what the CLI is doing.">
                             <label>Silent Mode</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.SilentMode" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Uses '--output-format json' for structured JSONL responses. More reliable parsing but some models may not support it.">
                             <label>JSON Output</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.JsonOutput" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Automatically responds 'y' to any interactive prompts from the CLI. Required for unattended operation. Disable only for debugging.">
                             <label>Auto-Approve Prompts</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.CopilotCli.AutoApprovePrompts" />
@@ -147,35 +194,42 @@ else if (_config is not null)
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Model Name</label>
-                            <input type="text" @bind="_config.CopilotCli.ModelName" class="config-input" />
+                            <label title="The default AI model for standard operations. Uses dot notation (e.g., 'claude-sonnet-4.6', 'gpt-5.2').">Model Name</label>
+                            <input type="text" @bind="_config.CopilotCli.ModelName" class="config-input"
+                                title="Default model ID. Examples: claude-sonnet-4.6, claude-opus-4.6, gpt-5.2. Model IDs use dots, not dashes." />
                         </div>
                         <div class="config-field">
-                            <label>Fast Mode Model</label>
-                            <input type="text" @bind="_config.CopilotCli.FastModeModel" class="config-input" />
+                            <label title="A smaller/faster model used when Fast Mode is enabled. Typically a 'haiku' or 'mini' variant.">Fast Mode Model</label>
+                            <input type="text" @bind="_config.CopilotCli.FastModeModel" class="config-input"
+                                title="Cheaper model for fast-mode operations. Examples: claude-haiku-4.5, gpt-5.4-mini." />
                         </div>
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Max Concurrent Requests</label>
-                            <input type="number" @bind="_config.CopilotCli.MaxConcurrentRequests" class="config-input config-input-number" min="1" max="20" />
+                            <label title="Maximum number of simultaneous Copilot CLI processes. Higher = more parallelism but more system resources.">Max Concurrent Requests</label>
+                            <input type="number" @bind="_config.CopilotCli.MaxConcurrentRequests" class="config-input config-input-number" min="1" max="20"
+                                title="Controls the SemaphoreSlim limit for parallel CLI invocations. Default: 4. Increase if agents are waiting too long for AI responses." />
                         </div>
                         <div class="config-field">
-                            <label>Request Timeout (seconds)</label>
-                            <input type="number" @bind="_config.CopilotCli.RequestTimeoutSeconds" class="config-input config-input-number" min="30" max="7200" />
+                            <label title="How long to wait for a single CLI request before timing out. Complex prompts (architecture, code generation) may need more time.">Request Timeout (seconds)</label>
+                            <input type="number" @bind="_config.CopilotCli.RequestTimeoutSeconds" class="config-input config-input-number" min="30" max="7200"
+                                title="Per-request timeout. Default: 300s (5 min). Increase for complex multi-turn conversations. Max: 7200s (2 hours)." />
                         </div>
                         <div class="config-field">
-                            <label>Max Retries</label>
-                            <input type="number" @bind="_config.CopilotCli.MaxRetries" class="config-input config-input-number" min="0" max="10" />
+                            <label title="Number of automatic retries on transient failures (timeouts, rate limits). Each retry waits progressively longer.">Max Retries</label>
+                            <input type="number" @bind="_config.CopilotCli.MaxRetries" class="config-input config-input-number" min="0" max="10"
+                                title="Retry count for failed CLI invocations. Default: 2. Set to 0 to fail fast on errors." />
                         </div>
                     </div>
                     <div class="config-field">
-                        <label>Executable Path</label>
-                        <input type="text" @bind="_config.CopilotCli.ExecutablePath" class="config-input" />
+                        <label title="Full path to the 'copilot' executable. Usually auto-detected from PATH. Set manually if installed in a non-standard location.">Executable Path</label>
+                        <input type="text" @bind="_config.CopilotCli.ExecutablePath" class="config-input"
+                            title="Override the CLI executable location. Leave as 'copilot' to use PATH discovery. Example: 'C:\\Program Files\\GitHub CLI\\copilot.exe'" />
                     </div>
                     <div class="config-field">
-                        <label>Reasoning Effort</label>
-                        <select @bind="_copilotReasoningEffort" class="config-select">
+                        <label title="Controls how much 'thinking' the model does before responding. Higher = better quality but slower and more expensive.">Reasoning Effort</label>
+                        <select @bind="_copilotReasoningEffort" class="config-select"
+                            title="Model reasoning depth. Low: fastest/cheapest. Medium: balanced. High: thorough. XHigh: maximum quality (slowest).">
                             <option value="">(default)</option>
                             <option value="low">Low</option>
                             <option value="medium">Medium</option>
@@ -197,19 +251,23 @@ else if (_config is not null)
             @if (_agentsExpanded)
             {
                 <div class="config-card-body">
+                    <p class="config-hint" style="margin-bottom: 12px;" title="Each agent can be assigned a model tier (premium=best quality, budget=cheapest) and enabled/disabled independently.">
+                        Assign AI model tiers and enable/disable each agent role. Hover over agent names for details.
+                    </p>
                     <div class="config-agent-grid">
                         @foreach (var agent in GetAgentEntries())
                         {
-                            <div class="config-agent-row">
+                            <div class="config-agent-row" title="@GetAgentTooltip(agent.Name)">
                                 <div class="config-agent-name">@agent.Name</div>
                                 <div class="config-agent-controls">
-                                    <select @bind="agent.Config.ModelTier" class="config-select config-select-sm">
+                                    <select @bind="agent.Config.ModelTier" class="config-select config-select-sm"
+                                        title="AI model quality tier. Premium: best quality (Opus-class). Standard: good balance (Sonnet-class). Budget: cheapest (GPT-mini). Local: Ollama self-hosted.">
                                         <option value="premium">Premium</option>
                                         <option value="standard">Standard</option>
                                         <option value="budget">Budget</option>
                                         <option value="local">Local</option>
                                     </select>
-                                    <label class="config-toggle config-toggle-sm">
+                                    <label class="config-toggle config-toggle-sm" title="Enable or disable this agent. Disabled agents won't be spawned at startup.">
                                         <input type="checkbox" @bind="agent.Config.Enabled" />
                                         <span class="config-toggle-slider"></span>
                                     </label>
@@ -231,20 +289,26 @@ else if (_config is not null)
             @if (_poolExpanded)
             {
                 <div class="config-card-body">
+                    <p class="config-hint" style="margin-bottom: 12px;" title="Controls how many ADDITIONAL engineers can be dynamically spawned beyond the core PE. The core PE (rank 0) is always created.">
+                        Configure the pool of additional engineers that can be spawned for parallel development. The core PE is always active.
+                    </p>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Principal Engineers</label>
-                            <input type="number" @bind="_config.Limits.EngineerPool.PrincipalEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <label title="Additional Principal Engineers beyond the core PE. PEs handle high-complexity tasks requiring architectural awareness. Uses premium tier.">Principal Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.PrincipalEngineerPool" class="config-input config-input-number" min="0" max="10"
+                                title="Number of ADDITIONAL PEs to spawn (the core PE always exists). Each uses premium-tier AI. Recommended: 1-3 for large projects." />
                             <span class="config-hint">Additional PEs (premium tier)</span>
                         </div>
                         <div class="config-field">
-                            <label>Senior Engineers</label>
-                            <input type="number" @bind="_config.Limits.EngineerPool.SeniorEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <label title="Additional Senior Engineers for standard-complexity tasks. Good balance of quality and cost. Uses standard tier.">Senior Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.SeniorEngineerPool" class="config-input config-input-number" min="0" max="10"
+                                title="Senior Engineers handle moderate-complexity tasks. Each uses standard-tier AI. Set to 0 to disable SE spawning." />
                             <span class="config-hint">Additional SEs (standard tier)</span>
                         </div>
                         <div class="config-field">
-                            <label>Junior Engineers</label>
-                            <input type="number" @bind="_config.Limits.EngineerPool.JuniorEngineerPool" class="config-input config-input-number" min="0" max="10" />
+                            <label title="Additional Junior Engineers for simple, well-defined tasks. Cheapest option. Uses budget or local tier.">Junior Engineers</label>
+                            <input type="number" @bind="_config.Limits.EngineerPool.JuniorEngineerPool" class="config-input config-input-number" min="0" max="10"
+                                title="Junior Engineers handle simple tasks (boilerplate, scaffolding). Uses budget/local-tier AI. Set to 0 to disable JE spawning." />
                             <span class="config-hint">Additional JEs (budget/local tier)</span>
                         </div>
                     </div>
@@ -268,40 +332,48 @@ else if (_config is not null)
                 <div class="config-card-body">
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Max Concurrent Agents</label>
-                            <input type="number" @bind="_config.Limits.MaxConcurrentAgents" class="config-input config-input-number" min="1" max="50" />
+                            <label title="Maximum number of agents that can run simultaneously. Includes core agents + spawned engineers.">Max Concurrent Agents</label>
+                            <input type="number" @bind="_config.Limits.MaxConcurrentAgents" class="config-input config-input-number" min="1" max="50"
+                                title="Upper bound on total running agents. Default: 10. Increase for large projects with many parallel tasks." />
                         </div>
                         <div class="config-field">
-                            <label>Agent Timeout (minutes)</label>
-                            <input type="number" @bind="_config.Limits.AgentTimeoutMinutes" class="config-input config-input-number" min="5" max="240" />
+                            <label title="How long an agent can run before being forcefully stopped. Prevents runaway agents from consuming resources indefinitely.">Agent Timeout (minutes)</label>
+                            <input type="number" @bind="_config.Limits.AgentTimeoutMinutes" class="config-input config-input-number" min="5" max="240"
+                                title="Per-agent timeout. Default: 60 min. Complex tasks (architecture, large PRs) may need more. Max: 240 min (4 hours)." />
                         </div>
                         <div class="config-field">
-                            <label>GitHub Poll Interval (seconds)</label>
-                            <input type="number" @bind="_config.Limits.GitHubPollIntervalSeconds" class="config-input config-input-number" min="5" max="300" />
-                        </div>
-                    </div>
-                    <div class="config-field-row">
-                        <div class="config-field">
-                            <label>Max Daily Token Budget</label>
-                            <input type="number" @bind="_config.Limits.MaxDailyTokenBudget" class="config-input config-input-number" min="10000" />
-                        </div>
-                        <div class="config-field">
-                            <label>Max Clarification Round-Trips</label>
-                            <input type="number" @bind="_config.Limits.MaxClarificationRoundTrips" class="config-input config-input-number" min="1" max="20" />
-                        </div>
-                        <div class="config-field">
-                            <label>Max Rework Cycles</label>
-                            <input type="number" @bind="_config.Limits.MaxReworkCycles" class="config-input config-input-number" min="1" max="10" />
+                            <label title="How often agents poll GitHub for new issues, PR comments, and review feedback. Lower = more responsive but more API calls.">GitHub Poll Interval (seconds)</label>
+                            <input type="number" @bind="_config.Limits.GitHubPollIntervalSeconds" class="config-input config-input-number" min="5" max="300"
+                                title="Polling frequency for GitHub API. Default: 30s. Lower values use more API rate limit. Minimum: 5s." />
                         </div>
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Self-Completion Threshold (min)</label>
-                            <input type="number" @bind="_config.Limits.SelfCompletionThresholdMinutes" class="config-input config-input-number" min="1" max="120" />
+                            <label title="Maximum total tokens (input + output) across all agents per day. Prevents runaway costs. Set high for active development.">Max Daily Token Budget</label>
+                            <input type="number" @bind="_config.Limits.MaxDailyTokenBudget" class="config-input config-input-number" min="10000"
+                                title="Daily token spending cap across all agents. Default: 1,000,000. Set to a high value if using Copilot CLI (no direct cost)." />
                         </div>
                         <div class="config-field">
-                            <label>Min Tasks for New Engineer</label>
-                            <input type="number" @bind="_config.Limits.MinParallelizableTasksForNewEngineer" class="config-input config-input-number" min="1" max="20" />
+                            <label title="Maximum back-and-forth exchanges between agents when clarifying requirements. Prevents infinite loops of agents asking each other questions.">Max Clarification Round-Trips</label>
+                            <input type="number" @bind="_config.Limits.MaxClarificationRoundTrips" class="config-input config-input-number" min="1" max="20"
+                                title="Cap on clarification exchanges between agents. Default: 3. Higher = more thorough but slower progression." />
+                        </div>
+                        <div class="config-field">
+                            <label title="Maximum times an agent can rework code after a review rejection. Prevents endless fix-review cycles.">Max Rework Cycles</label>
+                            <input type="number" @bind="_config.Limits.MaxReworkCycles" class="config-input config-input-number" min="1" max="10"
+                                title="Max code rework iterations after review feedback. Default: 3. After this, the agent escalates or marks as blocked." />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field">
+                            <label title="Minimum time an agent must spend on a task before it can self-complete. Prevents premature completion of complex tasks.">Self-Completion Threshold (min)</label>
+                            <input type="number" @bind="_config.Limits.SelfCompletionThresholdMinutes" class="config-input config-input-number" min="1" max="120"
+                                title="Agents can't mark their own task complete until this much time has passed. Encourages thorough work. Default: 5 min." />
+                        </div>
+                        <div class="config-field">
+                            <label title="Minimum number of parallelizable tasks required before the orchestrator will spawn a new engineer. Prevents spawning for small workloads.">Min Tasks for New Engineer</label>
+                            <input type="number" @bind="_config.Limits.MinParallelizableTasksForNewEngineer" class="config-input config-input-number" min="1" max="20"
+                                title="Task threshold for auto-scaling. Default: 2. The spawn manager won't create new engineers unless this many tasks are waiting." />
                         </div>
                     </div>
                 </div>
@@ -320,10 +392,11 @@ else if (_config is not null)
                 <div class="config-card-body">
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Port</label>
-                            <input type="number" @bind="_config.Dashboard.Port" class="config-input config-input-number" min="1024" max="65535" />
+                            <label title="The port the Blazor dashboard UI listens on. Must not conflict with other services. Requires restart to take effect.">Port</label>
+                            <input type="number" @bind="_config.Dashboard.Port" class="config-input config-input-number" min="1024" max="65535"
+                                title="Dashboard HTTP port. Default: 5050. Change if another service is using this port. Requires app restart." />
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Enables real-time push updates to the dashboard via SignalR WebSockets. When off, the dashboard uses polling instead.">
                             <label>Enable SignalR</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.Dashboard.EnableSignalR" />
@@ -346,49 +419,55 @@ else if (_config is not null)
             {
                 <div class="config-card-body">
                     <div class="config-field">
-                        <label>Root Path</label>
-                        <input type="text" @bind="_config.Workspace.RootPath" class="config-input" placeholder="C:\Agents" />
+                        <label title="Root directory where agent workspaces are created. Each agent gets a subdirectory here for local git clones and builds.">Root Path</label>
+                        <input type="text" @bind="_config.Workspace.RootPath" class="config-input" placeholder="C:\Agents"
+                            title="Base directory for all agent workspaces. Each agent clones the repo into {RootPath}/{agent-id}/. Ensure sufficient disk space." />
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Build Command</label>
-                            <input type="text" @bind="_config.Workspace.BuildCommand" class="config-input" />
+                            <label title="Shell command to build the project. Run in the workspace root after code changes. Must exit 0 on success.">Build Command</label>
+                            <input type="text" @bind="_config.Workspace.BuildCommand" class="config-input"
+                                title="e.g., 'dotnet build', 'npm run build', 'make'. Executed in the agent's workspace directory." />
                         </div>
                         <div class="config-field">
-                            <label>Test Command</label>
-                            <input type="text" @bind="_config.Workspace.TestCommand" class="config-input" />
-                        </div>
-                    </div>
-                    <div class="config-field-row">
-                        <div class="config-field">
-                            <label>Build Timeout (sec)</label>
-                            <input type="number" @bind="_config.Workspace.BuildTimeoutSeconds" class="config-input config-input-number" min="10" max="600" />
-                        </div>
-                        <div class="config-field">
-                            <label>Test Timeout (sec)</label>
-                            <input type="number" @bind="_config.Workspace.TestTimeoutSeconds" class="config-input config-input-number" min="10" max="600" />
-                        </div>
-                        <div class="config-field">
-                            <label>Max Build Retries</label>
-                            <input type="number" @bind="_config.Workspace.MaxBuildRetries" class="config-input config-input-number" min="0" max="10" />
+                            <label title="Shell command to run tests. Executed after successful build. Must exit 0 when all tests pass.">Test Command</label>
+                            <input type="text" @bind="_config.Workspace.TestCommand" class="config-input"
+                                title="e.g., 'dotnet test', 'npm test', 'pytest'. Agents use this to validate their code changes before creating PRs." />
                         </div>
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
+                            <label title="Maximum time for a build command before it's killed. Prevents hung builds from blocking agents.">Build Timeout (sec)</label>
+                            <input type="number" @bind="_config.Workspace.BuildTimeoutSeconds" class="config-input config-input-number" min="10" max="600"
+                                title="Build timeout in seconds. Default: 120. Increase for large solutions or first-time NuGet restore." />
+                        </div>
+                        <div class="config-field">
+                            <label title="Maximum time for a test command before it's killed. Prevents hung test suites from blocking agents.">Test Timeout (sec)</label>
+                            <input type="number" @bind="_config.Workspace.TestTimeoutSeconds" class="config-input config-input-number" min="10" max="600"
+                                title="Test timeout in seconds. Default: 180. Increase for large test suites or integration tests." />
+                        </div>
+                        <div class="config-field">
+                            <label title="How many times to retry a failed build before giving up. Each retry includes AI-assisted fix attempts.">Max Build Retries</label>
+                            <input type="number" @bind="_config.Workspace.MaxBuildRetries" class="config-input config-input-number" min="0" max="10"
+                                title="Build retry count with AI fix attempts between retries. Default: 3. Set to 0 to fail immediately on build errors." />
+                        </div>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field" title="Enable Playwright-based end-to-end UI tests. When on, the Test Engineer can generate and run browser-based tests.">
                             <label>Enable UI Tests</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.Workspace.EnableUITests" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Run Playwright browser tests in headless mode (no visible browser window). Always recommended for CI/agent environments.">
                             <label>Playwright Headless</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.Workspace.PlaywrightHeadless" />
                                 <span class="config-toggle-slider"></span>
                             </label>
                         </div>
-                        <div class="config-field">
+                        <div class="config-field" title="Automatically delete agent workspace directories when the project completes. Frees disk space but loses local build caches.">
                             <label>Cleanup on Complete</label>
                             <label class="config-toggle">
                                 <input type="checkbox" @bind="_config.Workspace.CleanupOnProjectComplete" />
@@ -398,12 +477,14 @@ else if (_config is not null)
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label>Git User Name</label>
-                            <input type="text" @bind="_config.Workspace.GitUserName" class="config-input" />
+                            <label title="Git user.name for commits made by agents in their workspaces. Shows up in git log and PR commit history.">Git User Name</label>
+                            <input type="text" @bind="_config.Workspace.GitUserName" class="config-input"
+                                title="The git author name used for agent commits. e.g., 'AgentSquad Bot'" />
                         </div>
                         <div class="config-field">
-                            <label>Git User Email</label>
-                            <input type="text" @bind="_config.Workspace.GitUserEmail" class="config-input" />
+                            <label title="Git user.email for commits made by agents. Should be a valid email or a noreply address.">Git User Email</label>
+                            <input type="text" @bind="_config.Workspace.GitUserEmail" class="config-input"
+                                title="The git author email used for agent commits. e.g., 'agentsquad@noreply.github.com'" />
                         </div>
                     </div>
                 </div>
@@ -507,7 +588,11 @@ else if (_config is not null)
                 <div class="config-card-body">
                     <h3 class="cleanup-result-title">@(_cleanupResult.Success ? "✅ Cleanup Complete" : "⚠️ Cleanup Completed with Errors")</h3>
                     <div class="cleanup-result-stats">
-                        <span>Issues closed: <strong>@_cleanupResult.IssuesClosed</strong></span>
+                        <span>Issues deleted: <strong>@_cleanupResult.IssuesDeleted</strong></span>
+                        @if (_cleanupResult.IssuesClosed > 0)
+                        {
+                            <span>Issues closed (delete failed): <strong>@_cleanupResult.IssuesClosed</strong></span>
+                        }
                         <span>PRs closed: <strong>@_cleanupResult.PrsClosed</strong></span>
                         <span>Files deleted: <strong>@_cleanupResult.FilesDeleted</strong></span>
                         <span>Files preserved: <strong>@_cleanupResult.FilesPreserved</strong></span>
@@ -536,8 +621,8 @@ else if (_config is not null)
    ═══════════════════════════════════════════════════════════════════ *@
 @if (_showModal)
 {
-    <div class="modal-overlay" @onclick="HideCleanupModal">
-        <div class="modal-dialog" @onclick:stopPropagation="true">
+    <div class="modal-overlay" @onmousedown="OnOverlayMouseDown">
+        <div class="modal-dialog" @onmousedown:stopPropagation="true" @onclick:stopPropagation="true">
             <div class="modal-header modal-header-danger">
                 <h3 class="modal-title">⚠️ Confirm Repository Cleanup</h3>
                 <button class="modal-close" @onclick="HideCleanupModal">✕</button>
@@ -551,7 +636,7 @@ else if (_config is not null)
                 <div class="modal-impact">
                     <h4>This action will:</h4>
                     <ul class="modal-impact-list">
-                        <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenIssues ?? 0)</strong> open issues</li>
+                        <li class="impact-danger">Delete <strong>@(_cleanupSummary?.TotalIssues ?? 0)</strong> issues (@(_cleanupSummary?.OpenIssues ?? 0) open, @(_cleanupSummary?.ClosedIssues ?? 0) closed)</li>
                         <li class="impact-danger">Close <strong>@(_cleanupSummary?.OpenPrs ?? 0)</strong> open pull requests</li>
                         <li class="impact-danger">Delete all agent branches</li>
                         <li class="impact-danger">Delete <strong>@(_cleanupSummary?.FileCount ?? 0)</strong> files from <code>@_config?.Project.DefaultBranch</code></li>
@@ -619,6 +704,10 @@ else if (_config is not null)
     private bool _showModal;
     private string _cleanupCaveats = "";
     private bool _cleaningUp;
+
+    // PAT validation state
+    private PatValidationResult? _patValidation;
+    private bool _validatingPat;
 
     protected override void OnInitialized()
     {
@@ -690,6 +779,7 @@ else if (_config is not null)
 
     private void ShowCleanupModal() => _showModal = true;
     private void HideCleanupModal() => _showModal = false;
+    private void OnOverlayMouseDown(MouseEventArgs e) => _showModal = false;
 
     private async Task ExecuteCleanup()
     {
@@ -728,6 +818,40 @@ else if (_config is not null)
     };
 
     private sealed record AgentEntry(string Name, AgentConfig Config);
+
+    private async Task ValidatePat()
+    {
+        if (_config is null) return;
+        _validatingPat = true;
+        _patValidation = null;
+        StateHasChanged();
+
+        try
+        {
+            _patValidation = await ConfigService.ValidatePatAsync(
+                _config.Project.GitHubToken, _config.Project.GitHubRepo);
+        }
+        catch (Exception ex)
+        {
+            _patValidation = new PatValidationResult { Success = false, Error = ex.Message };
+        }
+        finally
+        {
+            _validatingPat = false;
+        }
+    }
+
+    private static string GetAgentTooltip(string agentName) => agentName switch
+    {
+        "Program Manager" => "Coordinates the entire project. Creates the PMSpec.md from research, breaks work into issues, assigns tasks, reviews PRs, and manages the workflow pipeline. Quality-critical — use premium tier.",
+        "Researcher" => "Gathers technical context at project start. Analyzes the project description, explores existing code/docs, and produces Research.md that all downstream agents reference.",
+        "Architect" => "Designs the system architecture. Reads PMSpec.md and Research.md, produces Architecture.md with component diagrams, API contracts, and technology decisions. Quality-critical.",
+        "Principal Engineer" => "The core engineer responsible for high-complexity tasks. Creates the EngineeringPlan.md, handles the most architecturally significant code, and reviews other engineers' PRs.",
+        "Test Engineer" => "Generates and runs tests (unit, integration, UI) for every PR. Analyzes code changes to determine which test tiers are needed. Creates test PRs with passing test suites.",
+        "Senior Engineer (Template)" => "Template for dynamically spawned Senior Engineers. SEs handle standard-complexity coding tasks. Each spawned SE gets a unique ID and assigned issues.",
+        "Junior Engineer (Template)" => "Template for dynamically spawned Junior Engineers. JEs handle simple, well-defined tasks like boilerplate and scaffolding. Uses cheaper model tiers.",
+        _ => agentName
+    };
 
     /// <summary>Deep-copy via JSON round-trip so edits don't touch live config.</summary>
     private static AgentSquadConfig DeepCopy(AgentSquadConfig src)

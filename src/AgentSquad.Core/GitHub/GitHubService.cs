@@ -461,6 +461,46 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<bool> DeleteIssueAsync(int issueNumber, CancellationToken ct = default)
+    {
+        try
+        {
+            // Get the issue's node_id for GraphQL
+            var issue = await _client.Issue.Get(_owner, _repo, issueNumber);
+            var nodeId = issue.NodeId;
+
+            // Use GitHub GraphQL API to permanently delete the issue
+            var query = $$"""{"query":"mutation { deleteIssue(input: {issueId: \"{{nodeId}}\"}) { clientMutationId } }"}""";
+            var body = new StringContent(query, Encoding.UTF8, "application/json");
+
+            var token = _client.Credentials.GetToken();
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("AgentSquad/1.0");
+
+            var response = await http.PostAsync("https://api.github.com/graphql", body, ct);
+            var responseBody = await response.Content.ReadAsStringAsync(ct);
+
+            if (response.IsSuccessStatusCode && !responseBody.Contains("\"errors\""))
+            {
+                _logger.LogInformation("Deleted issue #{Number} via GraphQL", issueNumber);
+                return true;
+            }
+
+            // If GraphQL delete fails (permissions), fall back to closing
+            _logger.LogWarning("GraphQL deleteIssue failed for #{Number} ({Status}: {Body}), falling back to close",
+                issueNumber, response.StatusCode, responseBody);
+            await CloseIssueAsync(issueNumber, ct);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to delete issue #{Number}, falling back to close", issueNumber);
+            try { await CloseIssueAsync(issueNumber, ct); } catch { /* best effort */ }
+            return false;
+        }
+    }
+
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default)
     {
         try

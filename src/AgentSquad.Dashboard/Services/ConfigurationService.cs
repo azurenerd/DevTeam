@@ -38,6 +38,64 @@ public sealed class ConfigurationService
     /// <summary>Returns the current in-memory config snapshot.</summary>
     public AgentSquadConfig GetCurrentConfig() => _config.Value;
 
+    /// <summary>
+    /// Validates a GitHub PAT token against a specified repo.
+    /// Returns a result with repo info on success, or error message on failure.
+    /// </summary>
+    public async Task<PatValidationResult> ValidatePatAsync(string token, string repoFullName, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return new PatValidationResult { Success = false, Error = "Token is empty." };
+
+        if (string.IsNullOrWhiteSpace(repoFullName) || !repoFullName.Contains('/'))
+            return new PatValidationResult { Success = false, Error = "Repo must be in 'owner/repo' format." };
+
+        var parts = repoFullName.Split('/', 2);
+        try
+        {
+            var client = new Octokit.GitHubClient(new Octokit.ProductHeaderValue("AgentSquad-Validate"))
+            {
+                Credentials = new Octokit.Credentials(token)
+            };
+
+            var repo = await client.Repository.Get(parts[0], parts[1]);
+            var user = await client.User.Current();
+
+            // Check key permissions by testing a read-only endpoint
+            var scopes = new List<string>();
+            try
+            {
+                await client.Issue.GetAllForRepository(parts[0], parts[1],
+                    new Octokit.RepositoryIssueRequest { State = Octokit.ItemStateFilter.Open });
+                scopes.Add("issues:read");
+            }
+            catch { /* no access */ }
+
+            return new PatValidationResult
+            {
+                Success = true,
+                RepoName = repo.FullName,
+                RepoDescription = repo.Description ?? "(no description)",
+                IsPrivate = repo.Private,
+                DefaultBranch = repo.DefaultBranch,
+                AuthenticatedUser = user.Login,
+                Permissions = scopes
+            };
+        }
+        catch (Octokit.NotFoundException)
+        {
+            return new PatValidationResult { Success = false, Error = $"Repository '{repoFullName}' not found. Check the repo name and that your PAT has access." };
+        }
+        catch (Octokit.AuthorizationException)
+        {
+            return new PatValidationResult { Success = false, Error = "Authorization failed. The PAT token is invalid or expired." };
+        }
+        catch (Exception ex)
+        {
+            return new PatValidationResult { Success = false, Error = $"Validation failed: {ex.Message}" };
+        }
+    }
+
     /// <summary>Returns the GitHub repo name from config.</summary>
     public string GetRepoName() => _config.Value.Project.GitHubRepo;
 
@@ -121,20 +179,23 @@ public sealed class ConfigurationService
             // Parse caveats to find files to preserve
             var preserveFiles = ParseCaveats(caveats);
 
-            // 1. Close all open issues
-            _logger.LogWarning("CLEANUP: Closing all open issues in {Repo}", config.GitHubRepo);
-            var openIssues = await _github.GetOpenIssuesAsync(ct);
-            foreach (var issue in openIssues)
+            // 1. Delete ALL issues (open + closed) — uses GraphQL deleteIssue, falls back to close
+            _logger.LogWarning("CLEANUP: Deleting all issues in {Repo}", config.GitHubRepo);
+            var allIssues = await _github.GetAllIssuesAsync(ct);
+            foreach (var issue in allIssues)
             {
                 try
                 {
-                    await _github.CloseIssueAsync(issue.Number, ct);
-                    result.IssuesClosed++;
+                    var deleted = await _github.DeleteIssueAsync(issue.Number, ct);
+                    if (deleted)
+                        result.IssuesDeleted++;
+                    else
+                        result.IssuesClosed++; // fallback to close
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to close issue #{Number}", issue.Number);
-                    result.Errors.Add($"Failed to close issue #{issue.Number}: {ex.Message}");
+                    _logger.LogWarning(ex, "Failed to delete issue #{Number}", issue.Number);
+                    result.Errors.Add($"Failed to delete issue #{issue.Number}: {ex.Message}");
                 }
             }
 
@@ -285,10 +346,24 @@ public sealed class CleanupSummary
 public sealed class CleanupResult
 {
     public bool Success { get; set; }
+    public int IssuesDeleted { get; set; }
     public int IssuesClosed { get; set; }
     public int PrsClosed { get; set; }
     public int FilesDeleted { get; set; }
     public int FilesPreserved { get; set; }
     public int BranchesDeleted { get; set; }
     public List<string> Errors { get; set; } = new();
+}
+
+/// <summary>Result of PAT token validation.</summary>
+public sealed class PatValidationResult
+{
+    public bool Success { get; set; }
+    public string? Error { get; set; }
+    public string? RepoName { get; set; }
+    public string? RepoDescription { get; set; }
+    public bool IsPrivate { get; set; }
+    public string? DefaultBranch { get; set; }
+    public string? AuthenticatedUser { get; set; }
+    public List<string> Permissions { get; set; } = new();
 }

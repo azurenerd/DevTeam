@@ -3150,6 +3150,89 @@ main {
     background: var(--border-subtle);
 }
 
+/* PAT Validation */
+.config-pat-row {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+}
+.config-pat-row .config-secret-field {
+    flex: 1;
+}
+.config-validate-btn {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.8rem;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    min-height: 38px;
+}
+.config-validate-btn:hover:not(:disabled) {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}
+.config-validate-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+.config-validate-btn.config-validate-success {
+    background: rgba(52, 211, 153, 0.15);
+    border-color: rgba(52, 211, 153, 0.4);
+    color: #34d399;
+}
+.config-spinner-sm {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+}
+.config-pat-result {
+    margin-top: 0.5rem;
+    padding: 0.6rem 0.8rem;
+    border-radius: 8px;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+.config-pat-success {
+    background: rgba(52, 211, 153, 0.08);
+    border: 1px solid rgba(52, 211, 153, 0.25);
+    color: #6ee7b7;
+}
+.config-pat-error {
+    background: rgba(239, 68, 68, 0.08);
+    border: 1px solid rgba(239, 68, 68, 0.25);
+    color: #fca5a5;
+}
+.config-pat-detail {
+    font-size: 0.78rem;
+    opacity: 0.8;
+}
+.config-pat-desc {
+    font-size: 0.76rem;
+    font-style: italic;
+    opacity: 0.65;
+}
+
+/* Tooltip styling for labels */
+.config-field label[title],
+.config-field[title] label,
+div[title] .config-agent-name {
+    cursor: help;
+    border-bottom: 1px dotted rgba(255, 255, 255, 0.2);
+    padding-bottom: 1px;
+}
+
 /* Toggle Switch */
 .config-toggle {
     position: relative;
