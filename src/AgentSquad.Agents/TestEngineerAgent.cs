@@ -591,14 +591,24 @@ public class TestEngineerAgent : AgentBase
     /// <summary>
     /// Get the system prompt for a specific test tier with appropriate guidance and examples.
     /// </summary>
-    private static string GetTierSystemPrompt(TestTier tier, string techStack, string memoryContext)
+    private string GetTierSystemPrompt(TestTier tier, string techStack, string memoryContext)
     {
         var basePrompt = $"You are an expert test engineer writing tests for a {techStack} project.\n" +
             "Your job is to generate REAL, RUNNABLE test code — not documentation or test plans.\n" +
             "Write actual test files that can be compiled and executed.\n\n" +
+            "CRITICAL: You MUST also generate the test project file (.csproj) if one doesn't exist.\n" +
+            "The .csproj file must include all required NuGet package references and a ProjectReference\n" +
+            "to the source project being tested.\n\n" +
             "Output each test file using this exact format:\n\n" +
             "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
             "Every file MUST use the FILE: marker format so it can be parsed and committed.\n\n";
+
+        // Detect Blazor project and add specific guidance
+        var blazorGuidance = "";
+        if (IsBlazorProject())
+        {
+            blazorGuidance = GetBlazorTestGuidance();
+        }
 
         var tierGuidance = tier switch
         {
@@ -612,7 +622,9 @@ public class TestEngineerAgent : AgentBase
                 "- Use descriptive test names: MethodName_Condition_ExpectedResult\n" +
                 "- Add [Trait(\"Category\", \"Unit\")] attribute to every test class (for xUnit)\n" +
                 "- Place files in tests/{ProjectName}.Tests/Unit/ directory\n" +
-                "- Keep tests fast — no I/O, no network, no database calls\n",
+                "- Keep tests fast — no I/O, no network, no database calls\n" +
+                "- YOU MUST output a .csproj file at tests/{ProjectName}.Tests/{ProjectName}.Tests.csproj\n" +
+                "  with xUnit, Moq, and project reference to the source project\n",
 
             TestTier.Integration =>
                 "## Test Tier: INTEGRATION TESTS\n" +
@@ -625,7 +637,9 @@ public class TestEngineerAgent : AgentBase
                 "- Add [Trait(\"Category\", \"Integration\")] attribute to every test class\n" +
                 "- Place files in tests/{ProjectName}.Tests/Integration/ directory\n" +
                 "- Use WebApplicationFactory for ASP.NET Core integration tests\n" +
-                "- Test error handling, validation, and edge cases at API boundaries\n",
+                "- Test error handling, validation, and edge cases at API boundaries\n" +
+                "- YOU MUST output a .csproj file at tests/{ProjectName}.Tests/{ProjectName}.Tests.csproj\n" +
+                "  with xUnit, Moq, Microsoft.AspNetCore.Mvc.Testing, and project reference\n",
 
             TestTier.UI =>
                 "## Test Tier: UI/E2E TESTS (Playwright)\n" +
@@ -656,8 +670,188 @@ public class TestEngineerAgent : AgentBase
             _ => ""
         };
 
-        return basePrompt + tierGuidance +
+        return basePrompt + blazorGuidance + tierGuidance +
             (string.IsNullOrEmpty(memoryContext) ? "" : $"\n{memoryContext}");
+    }
+
+    /// <summary>
+    /// Detect whether the target project is a Blazor project by checking for .razor files.
+    /// </summary>
+    private bool IsBlazorProject()
+    {
+        if (_workspace?.RepoPath is null) return false;
+        try
+        {
+            return Directory.EnumerateFiles(_workspace.RepoPath, "*.razor", SearchOption.AllDirectories).Any();
+        }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// Returns Blazor-specific test guidance to include in the system prompt.
+    /// </summary>
+    private string GetBlazorTestGuidance()
+    {
+        // Try to find the source .csproj to get the project name
+        var projectName = "ReportingDashboard"; // fallback
+        if (_workspace?.RepoPath is not null)
+        {
+            var csproj = Directory.EnumerateFiles(_workspace.RepoPath, "*.csproj", SearchOption.TopDirectoryOnly).FirstOrDefault();
+            if (csproj is not null)
+                projectName = Path.GetFileNameWithoutExtension(csproj);
+        }
+
+        return $@"## BLAZOR PROJECT — SPECIAL INSTRUCTIONS
+
+This is a **Blazor Server** (.NET 8) project. You MUST follow these Blazor-specific testing patterns:
+
+### Required .csproj for Unit/Integration Tests
+You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj`
+```xml
+<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include=""bunit"" Version=""1.28.9"" />
+    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.9.0"" />
+    <PackageReference Include=""Moq"" Version=""4.20.70"" />
+    <PackageReference Include=""xunit"" Version=""2.7.0"" />
+    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.7"" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include=""..\..\{projectName}.csproj"" />
+  </ItemGroup>
+</Project>
+```
+
+### Blazor Component Testing with bUnit
+- Use `bunit.TestContext` for rendering Blazor components
+- `using Bunit;` namespace (lowercase 'b' in the using, but the NuGet is `bunit`)
+- Render components: `var cut = ctx.RenderComponent<MyComponent>()`
+- Pass parameters: `ctx.RenderComponent<MyComponent>(p => p.Add(x => x.Title, ""Test""))`
+- Assert markup: `cut.Markup.Contains(""expected text"")`
+- Find elements: `cut.Find(""h1"").TextContent`
+- Mock services: `ctx.Services.AddSingleton<IMyService>(mockService.Object)`
+- Mock JSInterop: `ctx.JSInterop.SetupVoid(""methodName"")`
+- For cascading parameters: `ctx.RenderComponent<CascadingValue<Type>>(p => p.Add(x => x.Value, myValue).AddChildContent<MyComponent>())`
+
+### Service/Model Testing (non-Blazor classes)
+- Test service classes, models, and utilities with standard xUnit + Moq
+- No bUnit needed for plain C# classes
+- Mock `IServiceProvider`, `IConfiguration`, `HttpClient` etc. as needed
+
+### Key Rules
+- ALWAYS include the .csproj file in your output
+- Use `using {projectName};`, `using {projectName}.Models;`, `using {projectName}.Services;` etc. for namespaces
+- Do NOT reference namespaces that don't exist in the project
+- Keep test classes focused — one test class per source class/component
+
+";
+    }
+
+    /// <summary>
+    /// Ensures a test project .csproj exists for unit/integration test files.
+    /// If the AI didn't generate one, creates a fallback .csproj with standard references.
+    /// </summary>
+    private void EnsureTestProjectExists(IReadOnlyList<CodeFileParser.CodeFile> testFiles)
+    {
+        if (_workspace?.RepoPath is null) return;
+
+        // Find test directories that contain .cs files but no .csproj
+        var testDirs = testFiles
+            .Where(f => f.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            .Select(f => GetTestProjectDir(f.Path))
+            .Where(d => d is not null)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var testDir in testDirs)
+        {
+            if (testDir is null) continue;
+
+            // Check if AI already generated a .csproj in this dir or if one already exists on disk
+            var hasCsproj = testFiles.Any(f =>
+                f.Path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) &&
+                f.Path.Replace('\\', '/').StartsWith(testDir.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+
+            var csprojOnDisk = Directory.Exists(Path.Combine(_workspace.RepoPath, testDir)) &&
+                Directory.GetFiles(Path.Combine(_workspace.RepoPath, testDir), "*.csproj").Length > 0;
+
+            if (hasCsproj || csprojOnDisk) continue;
+
+            // Generate fallback .csproj
+            var projectName = Path.GetFileName(testDir.TrimEnd('/', '\\'));
+            var sourceProjectName = GetSourceProjectName();
+            var csprojPath = Path.Combine(testDir, $"{projectName}.csproj");
+            var isBlazor = IsBlazorProject();
+
+            var csprojContent = GenerateTestCsproj(sourceProjectName, testDir, isBlazor);
+
+            Logger.LogInformation("TestEngineer: scaffolding missing test project {CsprojPath}", csprojPath);
+            var fullPath = Path.Combine(_workspace.RepoPath, csprojPath);
+            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+            File.WriteAllText(fullPath, csprojContent);
+        }
+    }
+
+    /// <summary>
+    /// Extracts the test project directory from a test file path (e.g., "tests/Foo.Tests/Unit/Bar.cs" → "tests/Foo.Tests").
+    /// </summary>
+    private static string? GetTestProjectDir(string filePath)
+    {
+        var normalized = filePath.Replace('\\', '/');
+        if (!normalized.StartsWith("tests/", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var parts = normalized.Split('/');
+        if (parts.Length < 3) return null; // Need at least "tests/ProjectName/File.cs"
+        return $"{parts[0]}/{parts[1]}";
+    }
+
+    /// <summary>
+    /// Gets the source project name from the workspace's .csproj file.
+    /// </summary>
+    private string GetSourceProjectName()
+    {
+        if (_workspace?.RepoPath is null) return "Project";
+        var csproj = Directory.EnumerateFiles(_workspace.RepoPath, "*.csproj", SearchOption.TopDirectoryOnly).FirstOrDefault();
+        return csproj is not null ? Path.GetFileNameWithoutExtension(csproj) : "Project";
+    }
+
+    /// <summary>
+    /// Generates a test .csproj with appropriate NuGet references for the project type.
+    /// </summary>
+    private static string GenerateTestCsproj(string sourceProjectName, string testDir, bool isBlazor)
+    {
+        // Calculate relative path from test dir to source .csproj
+        var depth = testDir.Replace('\\', '/').Split('/').Length; // e.g., "tests/Foo.Tests" = 2
+        var relPath = string.Join("/", Enumerable.Repeat("..", depth)) + $"/{sourceProjectName}.csproj";
+
+        var blazorPackages = isBlazor
+            ? "    <PackageReference Include=\"bunit\" Version=\"1.28.9\" />\n"
+            : "";
+
+        return $@"<Project Sdk=""Microsoft.NET.Sdk"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+{blazorPackages}    <PackageReference Include=""Microsoft.NET.Test.Sdk"" Version=""17.9.0"" />
+    <PackageReference Include=""Moq"" Version=""4.20.70"" />
+    <PackageReference Include=""xunit"" Version=""2.7.0"" />
+    <PackageReference Include=""xunit.runner.visualstudio"" Version=""2.5.7"" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include=""{relPath}"" />
+  </ItemGroup>
+</Project>
+";
     }
 
     private static string GetTierUserSuffix(TestTier tier, string techStack)
@@ -915,13 +1109,19 @@ public class TestEngineerAgent : AgentBase
         foreach (var file in testFiles)
             await _workspace.WriteFileAsync(file.Path, file.Content, ct);
 
+        // Ensure a unit/integration test .csproj exists — scaffold one if AI didn't generate it
+        EnsureTestProjectExists(testFiles);
+
         // Build to verify test files compile
         var buildResult = await _buildRunner!.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
         if (!buildResult.Success)
         {
-            Logger.LogWarning("TestEngineer: test build failed, attempting AI fix");
+            Logger.LogWarning("TestEngineer: test build failed, attempting AI fix (errors: {Errors})",
+                buildResult.ParsedErrors.Count > 0
+                    ? string.Join("; ", buildResult.ParsedErrors.Take(5))
+                    : buildResult.Errors[..Math.Min(500, buildResult.Errors.Length)]);
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -931,16 +1131,33 @@ public class TestEngineerAgent : AgentBase
                     ? string.Join("\n", buildResult.ParsedErrors.Take(20))
                     : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
 
+                // Include project context so AI can properly fix structural issues
                 var fixHistory = new ChatHistory();
+                fixHistory.AddSystemMessage(
+                    "You are a test engineer fixing build errors in test files. " +
+                    "You have full context about the project structure.\n" +
+                    (IsBlazorProject() ? GetBlazorTestGuidance() : "") +
+                    "Output ONLY corrected files using:\nFILE: path/to/file.ext\n```language\n<content>\n```\n" +
+                    "If a .csproj file is missing or has wrong references, include the corrected .csproj in your output.");
                 fixHistory.AddUserMessage(
-                    $"The test files have build errors:\n\n{errorSummary}\n\n" +
-                    "Fix the test files so they compile. Output ONLY corrected files using:\n" +
-                    "FILE: path/to/file.ext\n```language\n<content>\n```");
+                    $"Build attempt {attempt + 1}/{wsConfig.MaxBuildRetries} failed.\n\n" +
+                    $"## Build Errors\n\n{errorSummary}\n\n" +
+                    $"## Test files currently written\n\n" +
+                    string.Join("\n", testFiles.Select(f => $"- {f.Path}")) + "\n\n" +
+                    "Fix ALL errors. If the .csproj is missing or has wrong package references, output a corrected one.\n" +
+                    "If namespace errors occur, check the actual project namespace and fix the using statements.");
 
                 var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
                 var fixedFiles = CodeFileParser.ParseFiles(fixResponse.Content ?? "");
                 foreach (var file in fixedFiles)
                     await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+                // Update our tracked test files list with fixes
+                var fixedFileSet = new HashSet<string>(fixedFiles.Select(f => f.Path), StringComparer.OrdinalIgnoreCase);
+                testFiles = testFiles
+                    .Where(f => !fixedFileSet.Contains(f.Path))
+                    .Concat(fixedFiles)
+                    .ToList();
 
                 buildResult = await _buildRunner.BuildAsync(
                     _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
