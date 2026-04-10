@@ -1742,6 +1742,9 @@ public abstract class EngineerAgentBase : AgentBase
         foreach (var file in codeFiles)
             await Workspace!.WriteFileAsync(file.Path, file.Content, ct);
 
+        // REQ-WS-004: Ensure project files exist before building
+        EnsureProjectFiles(codeFiles);
+
         // Build with retry loop
         var (buildSuccess, lastBuildErrors) = await BuildWithRetryAsync(codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
 
@@ -1764,6 +1767,8 @@ public abstract class EngineerAgentBase : AgentBase
                 // Write regenerated files and try building again
                 foreach (var file in regeneratedFiles)
                     await Workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+                EnsureProjectFiles(regeneratedFiles);
 
                 (buildSuccess, lastBuildErrors) = await BuildWithRetryAsync(
                     regeneratedFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
@@ -2184,6 +2189,181 @@ public abstract class EngineerAgentBase : AgentBase
         if (Workspace is null) return;
         await Workspace.SyncWithMainAsync(ct);
         await Workspace.CreateBranchAsync(branchName, ct);
+    }
+
+    #endregion
+
+    #region Project File Scaffolding
+
+    /// <summary>
+    /// REQ-WS-004: After AI code generation, validate that .csproj and .sln files exist.
+    /// If .cs files are present without a .csproj, scaffold a minimal one.
+    /// If no .sln exists at repo root, scaffold one referencing all .csproj files.
+    /// </summary>
+    private void EnsureProjectFiles(IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> codeFiles)
+    {
+        if (Workspace?.RepoPath is null) return;
+
+        try
+        {
+            // Find directories with .cs files (from AI output + existing on disk)
+            var dirsWithCsFiles = codeFiles
+                .Where(f => f.Path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+                .Select(f => Path.GetDirectoryName(f.Path)?.Replace('\\', '/') ?? "")
+                .Where(d => !string.IsNullOrEmpty(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            // Walk up to find the project root for each .cs file dir
+            // (the nearest ancestor that has or should have a .csproj)
+            var projectDirs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var dir in dirsWithCsFiles)
+            {
+                var projDir = FindOrInferProjectDir(dir, codeFiles);
+                if (projDir is not null)
+                    projectDirs.Add(projDir);
+            }
+
+            foreach (var projDir in projectDirs)
+            {
+                // Check if AI already generated a .csproj or one exists on disk
+                var hasCsprojInOutput = codeFiles.Any(f =>
+                    f.Path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) &&
+                    f.Path.Replace('\\', '/').StartsWith(projDir.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase));
+
+                var fullDir = Path.Combine(Workspace.RepoPath, projDir);
+                var csprojOnDisk = Directory.Exists(fullDir) &&
+                    Directory.GetFiles(fullDir, "*.csproj").Length > 0;
+
+                if (hasCsprojInOutput || csprojOnDisk) continue;
+
+                // Scaffold a .csproj
+                var projectName = Path.GetFileName(projDir.TrimEnd('/', '\\'));
+                if (string.IsNullOrWhiteSpace(projectName)) projectName = "Project";
+
+                var isBlazor = codeFiles.Any(f =>
+                    f.Path.EndsWith(".razor", StringComparison.OrdinalIgnoreCase) ||
+                    f.Content.Contains("@page", StringComparison.OrdinalIgnoreCase) ||
+                    f.Content.Contains("RenderFragment", StringComparison.OrdinalIgnoreCase));
+
+                var csprojContent = GenerateAppCsproj(isBlazor);
+                var csprojPath = Path.Combine(projDir, $"{projectName}.csproj");
+                var fullPath = Path.Combine(Workspace.RepoPath, csprojPath);
+
+                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                File.WriteAllText(fullPath, csprojContent);
+                Logger.LogInformation("Scaffolded missing {CsprojPath} for project files", csprojPath);
+            }
+
+            // Check for .sln at repo root
+            EnsureSolutionFile(codeFiles);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Project file scaffolding check failed — continuing without it");
+        }
+    }
+
+    /// <summary>
+    /// Find the project directory for a .cs file — the nearest ancestor with a .csproj,
+    /// or the first significant directory (e.g., "src/ProjectName").
+    /// </summary>
+    private string? FindOrInferProjectDir(string csFileDir, IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> codeFiles)
+    {
+        if (Workspace?.RepoPath is null) return null;
+
+        // Walk up the path looking for an existing .csproj
+        var parts = csFileDir.Replace('\\', '/').Split('/');
+        for (var i = parts.Length; i >= 1; i--)
+        {
+            var candidate = string.Join('/', parts[..i]);
+            var fullCandidate = Path.Combine(Workspace.RepoPath, candidate);
+
+            if (Directory.Exists(fullCandidate) &&
+                Directory.GetFiles(fullCandidate, "*.csproj").Length > 0)
+                return null; // .csproj already exists — no scaffolding needed
+
+            // Check if AI output has a .csproj here
+            if (codeFiles.Any(f =>
+                f.Path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase) &&
+                Path.GetDirectoryName(f.Path)?.Replace('\\', '/') == candidate))
+                return null;
+        }
+
+        // No existing .csproj found — infer project root.
+        // For "src/ProjectName/Services/Foo.cs", the project root is "src/ProjectName"
+        // For "ProjectName/Models/Bar.cs", it's "ProjectName"
+        if (parts.Length >= 2 && parts[0].Equals("src", StringComparison.OrdinalIgnoreCase))
+            return $"{parts[0]}/{parts[1]}";
+        if (parts.Length >= 1)
+            return parts[0];
+
+        return csFileDir;
+    }
+
+    /// <summary>
+    /// Ensure a .sln file exists at the repo root. If not, scaffold one referencing all .csproj files.
+    /// </summary>
+    private void EnsureSolutionFile(IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> codeFiles)
+    {
+        if (Workspace?.RepoPath is null) return;
+
+        // Check if .sln already exists on disk or in AI output
+        var slnOnDisk = Directory.GetFiles(Workspace.RepoPath, "*.sln").Length > 0;
+        var slnInOutput = codeFiles.Any(f => f.Path.EndsWith(".sln", StringComparison.OrdinalIgnoreCase));
+        if (slnOnDisk || slnInOutput) return;
+
+        // Find all .csproj files (on disk + from AI output)
+        var csprojPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var csproj in Directory.EnumerateFiles(Workspace.RepoPath, "*.csproj", SearchOption.AllDirectories))
+        {
+            var relative = Path.GetRelativePath(Workspace.RepoPath, csproj).Replace('/', '\\');
+            csprojPaths.Add(relative);
+        }
+
+        foreach (var f in codeFiles.Where(f => f.Path.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)))
+            csprojPaths.Add(f.Path.Replace('/', '\\'));
+
+        if (csprojPaths.Count == 0) return;
+
+        // Generate a minimal .sln
+        var slnName = Path.GetFileName(Workspace.RepoPath);
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("Microsoft Visual Studio Solution File, Format Version 12.00");
+        sb.AppendLine("# Visual Studio Version 17");
+
+        foreach (var csprojPath in csprojPaths.OrderBy(p => p))
+        {
+            var projName = Path.GetFileNameWithoutExtension(csprojPath);
+            var projGuid = Guid.NewGuid().ToString("B").ToUpperInvariant();
+            sb.AppendLine($"Project(\"{{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}}\") = \"{projName}\", \"{csprojPath}\", \"{projGuid}\"");
+            sb.AppendLine("EndProject");
+        }
+
+        sb.AppendLine("Global");
+        sb.AppendLine("EndGlobal");
+
+        var slnPath = Path.Combine(Workspace.RepoPath, $"{slnName}.sln");
+        File.WriteAllText(slnPath, sb.ToString());
+        Logger.LogInformation("Scaffolded missing solution file {SlnPath} with {Count} projects",
+            $"{slnName}.sln", csprojPaths.Count);
+    }
+
+    /// <summary>
+    /// Generate a minimal .csproj for a web or console application.
+    /// </summary>
+    private static string GenerateAppCsproj(bool isBlazor)
+    {
+        var sdk = isBlazor ? "Microsoft.NET.Sdk.Web" : "Microsoft.NET.Sdk";
+        return $@"<Project Sdk=""{sdk}"">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+</Project>
+";
     }
 
     #endregion

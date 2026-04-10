@@ -578,6 +578,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         // Create native GitHub blocked-by dependency links between tasks
         await _taskManager.LinkTaskDependenciesAsync(_taskManager.Tasks.ToList(), ct);
 
+        // REQ-PE-009: Validate all PM enhancements have engineering tasks
+        await ValidateEnhancementCoverageAsync(enhancementIssues, ct);
+
         Logger.LogInformation("Engineering plan created with {Count} tasks from {IssueCount} issues",
             _taskManager.TotalCount, enhancementIssues.Count);
         LogActivity("task", $"📋 Engineering plan created: {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues");
@@ -600,6 +603,117 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
         UpdateStatus(AgentStatus.Idle, "Engineering plan complete, entering development loop");
         _planningComplete = true;
+    }
+
+    /// <summary>
+    /// REQ-PE-009: After creating the engineering plan, validate that every PM enhancement
+    /// issue has at least one linked engineering task. For missed enhancements, either create
+    /// additional tasks or post a justification comment explaining how it's covered.
+    /// </summary>
+    private async Task ValidateEnhancementCoverageAsync(
+        IReadOnlyList<AgentIssue> enhancementIssues, CancellationToken ct)
+    {
+        try
+        {
+            // Build set of parent issue numbers that have engineering tasks
+            var coveredParents = _taskManager.Tasks
+                .Where(t => t.ParentIssueNumber.HasValue)
+                .Select(t => t.ParentIssueNumber!.Value)
+                .ToHashSet();
+
+            var uncoveredEnhancements = enhancementIssues
+                .Where(e => !coveredParents.Contains(e.Number))
+                .ToList();
+
+            if (uncoveredEnhancements.Count == 0)
+            {
+                Logger.LogInformation("Enhancement coverage validation passed: all {Count} enhancements have engineering tasks",
+                    enhancementIssues.Count);
+                return;
+            }
+
+            Logger.LogWarning(
+                "Enhancement coverage gap: {UncoveredCount}/{TotalCount} enhancements have no engineering tasks: {Issues}",
+                uncoveredEnhancements.Count, enhancementIssues.Count,
+                string.Join(", ", uncoveredEnhancements.Select(e => $"#{e.Number}")));
+
+            // Ask AI to determine if each uncovered enhancement is covered by existing tasks or was missed
+            var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            var existingTasksSummary = string.Join("\n", _taskManager.Tasks.Select(t =>
+                $"- {t.Id}: {t.Name} (Parent: #{t.ParentIssueNumber}) — {t.Description?.Split('\n').FirstOrDefault()}"));
+
+            foreach (var enhancement in uncoveredEnhancements)
+            {
+                var history = new ChatHistory();
+                history.AddSystemMessage(
+                    "You are a Principal Engineer validating engineering plan coverage. " +
+                    "An enhancement (user story) has no dedicated engineering task. " +
+                    "Determine if this enhancement is COVERED by existing tasks or was MISSED.\n\n" +
+                    "If COVERED: respond with COVERED followed by which specific tasks address it and how.\n" +
+                    "If MISSED: respond with MISSED followed by what engineering task should be created.");
+
+                history.AddUserMessage(
+                    $"## Uncovered Enhancement #{enhancement.Number}: {enhancement.Title}\n{enhancement.Body}\n\n" +
+                    $"## Existing Engineering Tasks\n{existingTasksSummary}\n\n" +
+                    "Is this enhancement covered by the existing tasks, or was it missed?");
+
+                var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+                var responseText = response.Content ?? "";
+
+                if (responseText.Contains("COVERED", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Post justification comment on the enhancement issue
+                    var justification = responseText
+                        .Replace("COVERED", "").Replace("covered", "")
+                        .Trim().TrimStart('-', ':', ' ', '\n');
+
+                    await GitHub.AddIssueCommentAsync(enhancement.Number,
+                        $"📋 **Principal Engineer — Coverage Analysis**\n\n" +
+                        $"This user story does not have a dedicated engineering task, but its requirements are " +
+                        $"addressed by existing tasks in the engineering plan:\n\n{justification}",
+                        ct);
+
+                    Logger.LogInformation(
+                        "Enhancement #{Number} covered by existing tasks — justification posted",
+                        enhancement.Number);
+                }
+                else
+                {
+                    // Enhancement was missed — create an additional task
+                    var taskDescription = responseText
+                        .Replace("MISSED", "").Replace("missed", "")
+                        .Trim().TrimStart('-', ':', ' ', '\n');
+
+                    var newTaskId = $"T{_taskManager.TotalCount + 1}";
+                    var newTask = new EngineeringTask
+                    {
+                        Id = newTaskId,
+                        Name = $"Implement {enhancement.Title}",
+                        Description = $"Auto-created from uncovered enhancement #{enhancement.Number}.\n\n{taskDescription}",
+                        Complexity = "Medium",
+                        ParentIssueNumber = enhancement.Number,
+                        Dependencies = _taskManager.Tasks.Any(t => t.Id == "T1")
+                            ? new List<string> { "T1" }
+                            : new List<string>()
+                    };
+
+                    var created = await _taskManager.CreateTaskIssuesAsync(new[] { newTask }, ct);
+                    if (created.Count > 0)
+                    {
+                        Logger.LogInformation(
+                            "Created additional task {TaskId} (Issue #{IssueNumber}) for missed enhancement #{EnhancementNumber}",
+                            newTaskId, created[0].IssueNumber, enhancement.Number);
+                        LogActivity("task", $"📋 Created task {newTaskId} for missed enhancement #{enhancement.Number}: {enhancement.Title}");
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Enhancement coverage validation failed — continuing without validation");
+        }
     }
 
     /// <summary>
