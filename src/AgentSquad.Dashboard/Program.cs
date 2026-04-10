@@ -11,6 +11,7 @@ builder.Services.AddRazorComponents()
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<DashboardDataService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataService>());
+builder.Services.AddScoped<EngineeringPlanDataService>();
 
 var app = builder.Build();
 
