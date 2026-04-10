@@ -249,14 +249,17 @@ public class ArchitectAgent : AgentBase
         var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
         var research = await _projectFiles.GetResearchDocAsync(ct);
 
+        // 1b. Read visual design reference files directly for architecture decisions
+        var designContext = await ReadDesignReferencesAsync(ct);
+
         // 2. Use Semantic Kernel multi-turn conversation to design architecture
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var history = new ChatHistory();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
-        history.AddSystemMessage(
-            "You are a senior software architect on a development team. " +
+
+        var systemPrompt = "You are a senior software architect on a development team. " +
             "Your job is to design a complete, well-structured system architecture based on " +
             "the PM specification (business requirements) and research findings. " +
             "Ensure the architecture supports all business goals, user stories, and " +
@@ -265,7 +268,19 @@ public class ArchitectAgent : AgentBase
             $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
             "Your architecture MUST use this stack. Design all components, patterns, and " +
             "infrastructure around this technology. Do NOT recommend or use alternative stacks." +
-            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}");
+
+        if (!string.IsNullOrWhiteSpace(designContext))
+        {
+            systemPrompt += "\n\n## VISUAL DESIGN REFERENCE\n" +
+                "The repository contains visual design reference files that define the exact UI layout. " +
+                "Your architecture MUST define components that map directly to the visual sections in this design. " +
+                "Include a '## UI Component Architecture' section in your output that maps each visual section " +
+                "from the design to a specific component, its CSS layout strategy, data bindings, and interactions.\n\n" +
+                designContext;
+        }
+
+        history.AddSystemMessage(systemPrompt);
 
         var useSinglePass = _config.CopilotCli.SinglePassMode;
         string architectureDoc;
@@ -701,6 +716,53 @@ public class ArchitectAgent : AgentBase
         var cut = text[..maxLength];
         var lastPeriod = cut.LastIndexOf('.');
         return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
+    }
+
+    /// <summary>
+    /// Read visual design reference files from the repository for architecture decisions.
+    /// </summary>
+    private async Task<string?> ReadDesignReferencesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
+
+            var htmlDesignFiles = tree
+                .Where(f =>
+                {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    var name = Path.GetFileName(f).ToLowerInvariant();
+                    if (ext != ".html" && ext != ".htm") return false;
+                    // HTML in root or with design keywords
+                    return !f.StartsWith("src/", StringComparison.OrdinalIgnoreCase) ||
+                           designKeywords.Any(k => name.Contains(k));
+                })
+                .ToList();
+
+            if (htmlDesignFiles.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var file in htmlDesignFiles)
+            {
+                var content = await _github.GetFileContentAsync(file, ct: ct);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                sb.AppendLine($"### Design File: `{file}`");
+                sb.AppendLine();
+                sb.AppendLine("```html");
+                sb.AppendLine(content.Length > 6000 ? content[..6000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            return sb.Length > 0 ? sb.ToString().TrimEnd() : null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to read design reference files for architecture");
+            return null;
+        }
     }
 
     #endregion

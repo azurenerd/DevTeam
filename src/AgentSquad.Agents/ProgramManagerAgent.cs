@@ -1287,17 +1287,35 @@ public class ProgramManagerAgent : AgentBase
             var projectDescription = _config.Project.Description;
             var researchDoc = await _projectFiles.GetResearchDocAsync(ct);
 
+            // Read visual design reference files for inclusion in PMSpec
+            var designContext = await ReadDesignReferencesForSpecAsync(ct);
+
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
             var memoryContext = await GetMemoryContextAsync(ct: ct);
 
-            var history = new ChatHistory();
-            history.AddSystemMessage(
-                "You are a Program Manager creating a formal product specification document. " +
+            var systemPrompt = "You are a Program Manager creating a formal product specification document. " +
                 "Your goal is to translate research findings and a project description into a " +
                 "clear, actionable specification that architects and engineers can use to design " +
                 "and build the system. Be thorough, specific, and business-focused." +
-                (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
+                (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}");
+
+            if (!string.IsNullOrWhiteSpace(designContext))
+            {
+                systemPrompt += "\n\n## CRITICAL: VISUAL DESIGN REFERENCE\n" +
+                    "The repository contains visual design reference files that define the EXACT UI to be built. " +
+                    "You MUST:\n" +
+                    "1. Include a '## Visual Design Specification' section in PMSpec describing every visual element\n" +
+                    "2. Include a '## UI Interaction Scenarios' section with numbered scenarios (e.g., " +
+                    "'Scenario 1: User hovers over a milestone diamond and sees a tooltip with date and status')\n" +
+                    "3. Describe the exact layout: sections, grid structure, color scheme, typography\n" +
+                    "4. Reference the design file by name so engineers can consult it\n" +
+                    "5. Each user story that involves UI MUST reference the specific visual section from the design\n\n" +
+                    designContext;
+            }
+
+            var history = new ChatHistory();
+            history.AddSystemMessage(systemPrompt);
 
             // Turn 1: Analyze and identify business goals, user stories, success criteria
             var useSinglePass = _config.CopilotCli.SinglePassMode;
@@ -1320,7 +1338,20 @@ public class ProgramManagerAgent : AgentBase
                     "(Numbered list of concrete business objectives)\n\n" +
                     "## User Stories & Acceptance Criteria\n" +
                     "(Each story as: **As a [role]**, I want [capability], so that [benefit]. " +
-                    "Followed by acceptance criteria as a checklist.)\n\n" +
+                    "Followed by acceptance criteria as a checklist. " +
+                    "For UI stories, reference the specific visual section from the design file.)\n\n" +
+                    (string.IsNullOrWhiteSpace(designContext) ? "" :
+                        "## Visual Design Specification\n" +
+                        "(Describe every visual section from the design reference file: layout structure, " +
+                        "color scheme with exact hex codes, typography, grid/flex layout patterns, " +
+                        "component hierarchy. Reference the design file by name. " +
+                        "Include enough detail that an engineer could recreate the design from this description alone.)\n\n" +
+                        "## UI Interaction Scenarios\n" +
+                        "(Numbered scenarios describing user interactions derived from the design, e.g.:\n" +
+                        "Scenario 1: User views the dashboard and sees the project header with status badge, lead name, and summary.\n" +
+                        "Scenario 2: User scrolls to the milestone timeline and sees horizontal bars with diamond markers at key dates.\n" +
+                        "Include scenarios for: initial page load, hover states, click behaviors, data-driven rendering, " +
+                        "empty states, error states, and responsive behavior.)\n\n") +
                     "## Scope\n" +
                     "### In Scope\n(Bullet list)\n" +
                     "### Out of Scope\n(Bullet list — explicit exclusions to prevent scope creep)\n\n" +
@@ -1371,7 +1402,15 @@ public class ProgramManagerAgent : AgentBase
                 "(Numbered list of concrete business objectives)\n\n" +
                 "## User Stories & Acceptance Criteria\n" +
                 "(Each story as: **As a [role]**, I want [capability], so that [benefit]. " +
-                "Followed by acceptance criteria as a checklist.)\n\n" +
+                "Followed by acceptance criteria as a checklist. " +
+                "For UI stories, reference the specific visual section from the design file.)\n\n" +
+                (string.IsNullOrWhiteSpace(designContext) ? "" :
+                    "## Visual Design Specification\n" +
+                    "(Describe every visual section from the design: layout, colors with hex codes, " +
+                    "typography, grid patterns, component hierarchy. Enough detail to recreate the design.)\n\n" +
+                    "## UI Interaction Scenarios\n" +
+                    "(Numbered scenarios for user interactions: page load, hover, click, data rendering, " +
+                    "empty states, error states, responsive behavior.)\n\n") +
                 "## Scope\n" +
                 "### In Scope\n(Bullet list)\n" +
                 "### Out of Scope\n(Bullet list — explicit exclusions to prevent scope creep)\n\n" +
@@ -1485,9 +1524,13 @@ public class ProgramManagerAgent : AgentBase
                 "TITLE: [concise story title]\n" +
                 "DESCRIPTION:\n[Full user story in 'As a [role], I want [capability], so that [benefit]' format]\n\n" +
                 "[Detailed description of what needs to be built, including technical context]\n\n" +
+                "DESIGN_REFERENCE:\n[If this story involves UI, describe the specific visual section from the design file " +
+                "that applies. Include: layout type (grid/flex), colors (hex codes), component structure, " +
+                "key CSS patterns. If no design applies, write 'N/A']\n\n" +
                 "ACCEPTANCE_CRITERIA:\n- [ ] [criterion 1]\n- [ ] [criterion 2]\n...\n---\n\n" +
                 "Be thorough — each Issue should have enough detail for an engineer to implement it " +
-                "without needing the full PMSpec. Include all relevant acceptance criteria from the spec.");
+                "without needing the full PMSpec. Include all relevant acceptance criteria from the spec. " +
+                "For UI stories, include visual design details and interaction scenarios in the description.");
 
             history.AddUserMessage(
                 $"Extract all User Stories from this PM Specification and format them as described.\n\n" +
@@ -1506,14 +1549,24 @@ public class ProgramManagerAgent : AgentBase
 
                 var title = ExtractField(block, "TITLE:");
                 var description = ExtractField(block, "DESCRIPTION:");
+                var designReference = ExtractField(block, "DESIGN_REFERENCE:");
                 var acceptanceCriteria = ExtractField(block, "ACCEPTANCE_CRITERIA:");
 
                 if (string.IsNullOrWhiteSpace(title))
                     continue;
 
                 var issueBody = $"## User Story\n{description}\n\n" +
-                    $"## Acceptance Criteria\n{acceptanceCriteria}\n\n" +
-                    $"---\n_Created by {Identity.DisplayName} from PMSpec.md_";
+                    $"## Acceptance Criteria\n{acceptanceCriteria}\n\n";
+
+                // Include design reference if present and not N/A
+                if (!string.IsNullOrWhiteSpace(designReference) &&
+                    !designReference.Trim().Equals("N/A", StringComparison.OrdinalIgnoreCase))
+                {
+                    issueBody += $"## Visual Design Reference\n{designReference}\n\n" +
+                        "> **Note:** See `OriginalDesignConcept.html` in the repository root for the full design template.\n\n";
+                }
+
+                issueBody += $"---\n_Created by {Identity.DisplayName} from PMSpec.md_";
 
                 // Check if an issue with similar title already exists
                 var existingIssue = await _issueWorkflow.FindExistingIssueAsync(title, ct);
@@ -1846,7 +1899,7 @@ public class ProgramManagerAgent : AgentBase
         var lines = block.Split('\n');
         var collecting = false;
         var result = new List<string>();
-        var nextFieldPrefixes = new[] { "TITLE:", "DESCRIPTION:", "ACCEPTANCE_CRITERIA:" };
+        var nextFieldPrefixes = new[] { "TITLE:", "DESCRIPTION:", "DESIGN_REFERENCE:", "ACCEPTANCE_CRITERIA:" };
 
         foreach (var line in lines)
         {
@@ -1883,6 +1936,59 @@ public class ProgramManagerAgent : AgentBase
         var cut = text[..maxLength];
         var lastPeriod = cut.LastIndexOf('.');
         return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
+    }
+
+    /// <summary>
+    /// Read visual design reference files from the repository for inclusion in PMSpec.
+    /// Returns the raw HTML content that the AI can analyze to create the Visual Design Specification.
+    /// </summary>
+    private async Task<string?> ReadDesignReferencesForSpecAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
+
+            var htmlDesignFiles = tree
+                .Where(f =>
+                {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".html" && ext != ".htm") return false;
+                    var name = Path.GetFileName(f).ToLowerInvariant();
+                    return !f.StartsWith("src/", StringComparison.OrdinalIgnoreCase) ||
+                           designKeywords.Any(k => name.Contains(k));
+                })
+                .ToList();
+
+            if (htmlDesignFiles.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var file in htmlDesignFiles)
+            {
+                var content = await _github.GetFileContentAsync(file, ct: ct);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                sb.AppendLine($"### Design File: `{file}`");
+                sb.AppendLine();
+                sb.AppendLine("```html");
+                sb.AppendLine(content.Length > 10000 ? content[..10000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            if (sb.Length > 0)
+            {
+                Logger.LogInformation("Read {Count} visual design reference files for PMSpec", htmlDesignFiles.Count);
+                return sb.ToString().TrimEnd();
+            }
+
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to read design reference files for PMSpec");
+            return null;
+        }
     }
 
     #endregion

@@ -21,6 +21,7 @@ public class ResearcherAgent : AgentBase
 
     private readonly Queue<ResearchDirective> _researchQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
+    private string? _lastDesignSection; // Cached from ScanForDesignReferencesAsync
 
     public ResearcherAgent(
         AgentIdentity identity,
@@ -123,10 +124,13 @@ public class ResearcherAgent : AgentBase
 
                         var research = await ConductResearchAsync(directive, ct);
 
-                        // Build the full Research.md content
+                        // Build the full Research.md content (design section was cached during research)
                         var existingContent = await _projectFiles.GetResearchDocAsync(ct);
                         var newSection = FormatResearchSection(directive.Topic, research);
-                        var updatedDoc = existingContent.TrimEnd() + "\n\n" + newSection + "\n";
+                        var updatedDoc = existingContent.TrimEnd() + "\n\n" + newSection;
+                        if (!string.IsNullOrWhiteSpace(_lastDesignSection))
+                            updatedDoc += "\n\n" + _lastDesignSection;
+                        updatedDoc += "\n";
 
                         // Commit final content and auto-merge
                         UpdateStatus(AgentStatus.Working, "Committing Research.md and merging PR");
@@ -240,10 +244,14 @@ public class ResearcherAgent : AgentBase
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+        // Scan for design reference files FIRST so we can include them in research context
+        var designContext = await ScanForDesignReferencesAsync(ct);
+        _lastDesignSection = designContext; // Cache for appending to Research.md later
+
         var history = new ChatHistory();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
-        history.AddSystemMessage(
-            "You are a senior technical researcher on a software development team. " +
+
+        var systemPrompt = "You are a senior technical researcher on a software development team. " +
             "Your job is to perform deep, thorough research on assigned topics and produce structured, " +
             "actionable findings that architects and engineers can build from directly. " +
             "Go beyond surface-level recommendations — provide specific tools, version numbers, " +
@@ -253,7 +261,21 @@ public class ResearcherAgent : AgentBase
             "Your research MUST target this stack. Recommend libraries, patterns, and tools that are " +
             "native to or compatible with this stack. Do NOT recommend alternative tech stacks — " +
             "the decision is final." +
-            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}"));
+            (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}");
+
+        // If we found design files, add them to system context so research covers UI implementation needs
+        if (!string.IsNullOrWhiteSpace(designContext))
+        {
+            systemPrompt += "\n\n## VISUAL DESIGN REFERENCE\n" +
+                "The repository contains visual design reference files that define the exact UI to be built. " +
+                "Your research MUST include technology recommendations for implementing this specific design. " +
+                "Consider: CSS layout techniques needed (Grid, Flexbox), SVG/charting libraries for any " +
+                "visualizations, color theming approaches, responsive design strategies, and component " +
+                "architecture that maps to the design's visual sections.\n\n" +
+                designContext;
+        }
+
+        history.AddSystemMessage(systemPrompt);
 
         var useSinglePass = _config.CopilotCli.SinglePassMode;
         string synthesisContent;
@@ -542,6 +564,186 @@ public class ResearcherAgent : AgentBase
         var cut = text[..maxLength];
         var lastPeriod = cut.LastIndexOf('.');
         return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
+    }
+
+    /// <summary>
+    /// Scan the repository for visual design reference files (.html, .htm, .png, .fig, .sketch)
+    /// and return a formatted section describing them for Research.md.
+    /// </summary>
+    private async Task<string?> ScanForDesignReferencesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var designExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".html", ".htm"
+            };
+            var imageExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"
+            };
+            var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
+
+            var designFiles = new List<(string path, string type)>();
+
+            foreach (var filePath in tree)
+            {
+                var fileName = Path.GetFileName(filePath).ToLowerInvariant();
+                var ext = Path.GetExtension(filePath).ToLowerInvariant();
+
+                // Skip files deep in src/ or node_modules/
+                if (filePath.Contains("node_modules") || filePath.Contains("wwwroot/lib"))
+                    continue;
+
+                var nameHasDesignKeyword = designKeywords.Any(k => fileName.Contains(k));
+
+                if (designExtensions.Contains(ext) && nameHasDesignKeyword)
+                    designFiles.Add((filePath, "html-design"));
+                else if (imageExtensions.Contains(ext) && nameHasDesignKeyword)
+                    designFiles.Add((filePath, "image-design"));
+                else if (ext == ".html" && !filePath.StartsWith("src/", StringComparison.OrdinalIgnoreCase))
+                    designFiles.Add((filePath, "html-root")); // HTML in root is likely a design reference
+            }
+
+            if (designFiles.Count == 0)
+                return null;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("## Visual Design References");
+            sb.AppendLine();
+            sb.AppendLine("The following design reference files were found in the repository. " +
+                "These MUST be used as the canonical visual specification when building UI components.");
+            sb.AppendLine();
+
+            foreach (var (path, type) in designFiles)
+            {
+                sb.AppendLine($"### `{path}`");
+                sb.AppendLine();
+
+                if (type.StartsWith("html"))
+                {
+                    // Read HTML files to extract design details
+                    var content = await _github.GetFileContentAsync(path, ct: ct);
+                    if (!string.IsNullOrWhiteSpace(content))
+                    {
+                        // Extract key CSS patterns and layout structure
+                        var cssClasses = ExtractCssPatterns(content);
+                        var layoutDescription = ExtractLayoutStructure(content);
+
+                        sb.AppendLine("**Type:** HTML Design Template");
+                        sb.AppendLine();
+                        if (!string.IsNullOrWhiteSpace(layoutDescription))
+                        {
+                            sb.AppendLine("**Layout Structure:**");
+                            sb.AppendLine(layoutDescription);
+                            sb.AppendLine();
+                        }
+                        if (!string.IsNullOrWhiteSpace(cssClasses))
+                        {
+                            sb.AppendLine("**Key CSS Patterns:**");
+                            sb.AppendLine(cssClasses);
+                            sb.AppendLine();
+                        }
+                        sb.AppendLine("<details><summary>Full HTML Source</summary>");
+                        sb.AppendLine();
+                        sb.AppendLine("```html");
+                        sb.AppendLine(content.Length > 8000 ? content[..8000] + "\n<!-- truncated -->" : content);
+                        sb.AppendLine("```");
+                        sb.AppendLine("</details>");
+                    }
+                }
+                else
+                {
+                    sb.AppendLine($"**Type:** Design Image — engineers should reference this file visually");
+                }
+                sb.AppendLine();
+            }
+
+            Logger.LogInformation("Found {Count} visual design reference files in repository", designFiles.Count);
+            return sb.ToString().TrimEnd();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to scan for design reference files");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Extract key CSS patterns from HTML design file (grid layouts, color schemes, font families).
+    /// </summary>
+    private static string ExtractCssPatterns(string html)
+    {
+        var patterns = new List<string>();
+
+        // Extract grid layouts
+        if (html.Contains("display:grid") || html.Contains("display: grid"))
+            patterns.Add("- Uses CSS Grid layout");
+        if (html.Contains("display:flex") || html.Contains("display: flex"))
+            patterns.Add("- Uses Flexbox layout");
+
+        // Extract color scheme from CSS
+        var colorMatches = System.Text.RegularExpressions.Regex.Matches(html, @"(?:color|background|border-color|fill)\s*:\s*(#[0-9A-Fa-f]{3,8})", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        var colors = colorMatches.Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value.ToUpperInvariant())
+            .Distinct()
+            .Take(15)
+            .ToList();
+        if (colors.Count > 0)
+            patterns.Add($"- Color palette: {string.Join(", ", colors)}");
+
+        // Extract font families
+        var fontMatch = System.Text.RegularExpressions.Regex.Match(html, @"font-family\s*:\s*'?([^;'""]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (fontMatch.Success)
+            patterns.Add($"- Font: {fontMatch.Groups[1].Value.Trim()}");
+
+        // Extract grid template columns
+        var gridColMatch = System.Text.RegularExpressions.Regex.Match(html, @"grid-template-columns\s*:\s*([^;]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (gridColMatch.Success)
+            patterns.Add($"- Grid columns: `{gridColMatch.Groups[1].Value.Trim()}`");
+
+        // Extract viewport sizing
+        if (html.Contains("1920px") || html.Contains("1080px"))
+            patterns.Add("- Designed for 1920×1080 screenshot resolution");
+
+        return patterns.Count > 0 ? string.Join("\n", patterns) : "";
+    }
+
+    /// <summary>
+    /// Extract high-level layout structure from HTML by analyzing major div classes and sections.
+    /// </summary>
+    private static string ExtractLayoutStructure(string html)
+    {
+        var sections = new List<string>();
+
+        // Look for semantic class names that describe layout sections
+        var classMatches = System.Text.RegularExpressions.Regex.Matches(html,
+            @"class=""([^""]+)""", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        var majorClasses = classMatches.Cast<System.Text.RegularExpressions.Match>()
+            .Select(m => m.Groups[1].Value)
+            .Where(c => !c.Contains("it") || c.Length > 4) // Skip tiny utility classes
+            .Distinct()
+            .Take(20)
+            .ToList();
+
+        if (majorClasses.Any(c => c.Contains("hdr") || c.Contains("header")))
+            sections.Add("- **Header section** with title, subtitle, and legend");
+        if (majorClasses.Any(c => c.Contains("tl-") || c.Contains("timeline")))
+            sections.Add("- **Timeline/Gantt section** with SVG milestone visualization");
+        if (majorClasses.Any(c => c.Contains("hm-") || c.Contains("heatmap")))
+            sections.Add("- **Heatmap grid** — status rows × month columns, color-coded by category");
+        if (majorClasses.Any(c => c.Contains("ship")))
+            sections.Add("  - Shipped row (green tones)");
+        if (majorClasses.Any(c => c.Contains("prog")))
+            sections.Add("  - In Progress row (blue tones)");
+        if (majorClasses.Any(c => c.Contains("carry")))
+            sections.Add("  - Carryover row (yellow/amber tones)");
+        if (majorClasses.Any(c => c.Contains("block")))
+            sections.Add("  - Blockers row (red tones)");
+
+        return sections.Count > 0 ? string.Join("\n", sections) : "";
     }
 
     #endregion

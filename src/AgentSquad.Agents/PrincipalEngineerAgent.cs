@@ -399,6 +399,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         // Fetch repo structure so PE can include file path guidance in tasks
         var repoStructure = await GetRepoStructureForContextAsync(ct);
 
+        // Read visual design reference files for UI task context
+        var designContext = await ReadDesignReferencesAsync(ct);
+
         var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -459,6 +462,17 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         {
             userPromptBuilder.AppendLine("## Existing Repository Structure (main branch)");
             userPromptBuilder.AppendLine(repoStructure);
+            userPromptBuilder.AppendLine();
+        }
+
+        if (!string.IsNullOrWhiteSpace(designContext))
+        {
+            userPromptBuilder.AppendLine("## Visual Design Reference");
+            userPromptBuilder.AppendLine("The repository contains design reference files that define the EXACT UI to be built. " +
+                "For any UI-related task, include the relevant design details in the task description: " +
+                "specific CSS patterns, color hex codes, layout structure, and component hierarchy. " +
+                "Every UI task description MUST say: 'Reference: OriginalDesignConcept.html in repository root for exact visual spec.'");
+            userPromptBuilder.AppendLine(designContext);
             userPromptBuilder.AppendLine();
         }
 
@@ -2972,6 +2986,55 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Read visual design reference files from the repository for inclusion in engineering task context.
+    /// </summary>
+    private async Task<string?> ReadDesignReferencesAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tree = await GitHub.GetRepositoryTreeAsync("main", ct);
+            var designFiles = tree
+                .Where(f =>
+                {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".html" && ext != ".htm") return false;
+                    var name = Path.GetFileName(f).ToLowerInvariant();
+                    return name.Contains("design") || name.Contains("concept") ||
+                           name.Contains("mockup") || name.Contains("wireframe") ||
+                           name.Contains("prototype") || name.Contains("reference");
+                })
+                .ToList();
+
+            if (designFiles.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var file in designFiles)
+            {
+                var content = await GitHub.GetFileContentAsync(file, ct: ct);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                sb.AppendLine($"### Design File: `{file}`");
+                sb.AppendLine("```html");
+                sb.AppendLine(content.Length > 8000 ? content[..8000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            if (sb.Length > 0)
+            {
+                Logger.LogInformation("Read {Count} visual design reference files for engineering plan", designFiles.Count);
+                return sb.ToString().TrimEnd();
+            }
+            return null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to read design reference files for engineering plan");
+            return null;
+        }
     }
 
     #endregion

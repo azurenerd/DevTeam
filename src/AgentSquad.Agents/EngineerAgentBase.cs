@@ -630,6 +630,11 @@ public abstract class EngineerAgentBase : AgentBase
             contextBuilder.AppendLine($"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n");
             contextBuilder.AppendLine($"## PR Description\n{pr.Body}\n");
 
+            // Include visual design context for UI-related tasks
+            var designCtx = await GetDesignContextAsync(ct);
+            if (!string.IsNullOrWhiteSpace(designCtx))
+                contextBuilder.AppendLine(designCtx + "\n");
+
             if (completedSteps.Count > 0)
             {
                 contextBuilder.AppendLine("## Previously Completed Steps");
@@ -650,6 +655,9 @@ public abstract class EngineerAgentBase : AgentBase
             contextBuilder.AppendLine("FILE: path/to/file.ext\n```language\n<file content>\n```\n");
             contextBuilder.AppendLine($"Use the {techStack} technology stack. ");
             contextBuilder.AppendLine("Every file MUST use the FILE: marker format.");
+            contextBuilder.AppendLine("IMPORTANT: File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
+                "Do NOT put code, directives, brackets, or instructions in the file path. " +
+                "Do NOT use (APPEND) or similar suffixes — always output the complete file content.");
             if (completedSteps.Count > 0)
                 contextBuilder.AppendLine("If you need to update a file from a previous step, include the COMPLETE updated file content.");
 
@@ -847,16 +855,25 @@ public abstract class EngineerAgentBase : AgentBase
         var history = new ChatHistory();
         history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
 
-        history.AddUserMessage(
-            $"## PM Specification\n{pmSpec}\n\n" +
-            $"## Architecture\n{archDoc}\n\n" +
-            $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n" +
-            $"## PR Description\n{pr.Body}\n\n" +
-            "Produce a complete implementation. Output each file using this format:\n\n" +
-            "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
-            $"Use the {techStack} technology stack. " +
+        var promptBuilder = new System.Text.StringBuilder();
+        promptBuilder.AppendLine($"## PM Specification\n{pmSpec}\n");
+        promptBuilder.AppendLine($"## Architecture\n{archDoc}\n");
+        promptBuilder.AppendLine($"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n");
+        promptBuilder.AppendLine($"## PR Description\n{pr.Body}\n");
+
+        var designCtx = await GetDesignContextAsync(ct);
+        if (!string.IsNullOrWhiteSpace(designCtx))
+            promptBuilder.AppendLine(designCtx + "\n");
+
+        promptBuilder.AppendLine("Produce a complete implementation. Output each file using this format:\n");
+        promptBuilder.AppendLine("FILE: path/to/file.ext\n```language\n<file content>\n```\n");
+        promptBuilder.AppendLine($"Use the {techStack} technology stack. " +
             "Include all source code files, configuration, and tests. " +
-            "Every file MUST use the FILE: marker format.");
+            "Every file MUST use the FILE: marker format. " +
+            "File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
+            "Do NOT put code, directives, brackets, or instructions in the file path.");
+
+        history.AddUserMessage(promptBuilder.ToString());
 
         var implResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
         history.AddAssistantMessage(implResponse.Content ?? "");
@@ -1495,7 +1512,9 @@ public abstract class EngineerAgentBase : AgentBase
                     "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
                     $"Use the {techStack} technology stack. " +
                     "Include all source code files, configuration, and tests. " +
-                    "Every file MUST use the FILE: marker format.");
+                    "Every file MUST use the FILE: marker format. " +
+                    "File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
+                    "Do NOT put code, directives, brackets, or instructions in the file path.");
 
                 var implResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 history.AddAssistantMessage(implResponse.Content ?? "");
@@ -1563,6 +1582,8 @@ public abstract class EngineerAgentBase : AgentBase
                     contextBuilder.AppendLine("Implement ONLY this step. Output each file using this format:\n");
                     contextBuilder.AppendLine("FILE: path/to/file.ext\n```language\n<file content>\n```\n");
                     contextBuilder.AppendLine($"Use the {techStack} technology stack. Every file MUST use the FILE: marker format.");
+                    contextBuilder.AppendLine("File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
+                        "Do NOT put code, directives, brackets, or instructions in the file path.");
                     if (completedSteps.Count > 0)
                         contextBuilder.AppendLine("If you need to update a file from a previous step, include the COMPLETE updated file content.");
 
@@ -1683,6 +1704,63 @@ public abstract class EngineerAgentBase : AgentBase
     /// <summary>Get Architecture content. Junior overrides to truncate for budget models.</summary>
     protected virtual Task<string> GetArchitectureForContextAsync(CancellationToken ct)
         => ProjectFiles.GetArchitectureDocAsync(ct);
+
+    /// <summary>
+    /// Read visual design reference files from the repository for UI implementation context.
+    /// Cached per-agent instance to avoid repeated reads within the same task.
+    /// </summary>
+    private string? _cachedDesignContext;
+    private bool _designContextLoaded;
+
+    protected async Task<string?> GetDesignContextAsync(CancellationToken ct)
+    {
+        if (_designContextLoaded) return _cachedDesignContext;
+        _designContextLoaded = true;
+
+        try
+        {
+            var tree = await GitHub.GetRepositoryTreeAsync("main", ct);
+            var designFiles = tree
+                .Where(f =>
+                {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".html" && ext != ".htm") return false;
+                    var name = Path.GetFileName(f).ToLowerInvariant();
+                    return name.Contains("design") || name.Contains("concept") ||
+                           name.Contains("mockup") || name.Contains("wireframe");
+                })
+                .ToList();
+
+            if (designFiles.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("## Visual Design Reference");
+            sb.AppendLine("The following design files define the EXACT UI to be built. " +
+                "Match the layout, colors, typography, and component structure precisely.\n");
+
+            foreach (var file in designFiles)
+            {
+                var content = await GitHub.GetFileContentAsync(file, ct: ct);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                sb.AppendLine($"### `{file}`");
+                sb.AppendLine("```html");
+                sb.AppendLine(content.Length > 6000 ? content[..6000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            _cachedDesignContext = sb.ToString().TrimEnd();
+            Logger.LogInformation("{Role} {Name} loaded {Count} design reference files",
+                Identity.Role, Identity.DisplayName, designFiles.Count);
+            return _cachedDesignContext;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to read design reference files");
+            return null;
+        }
+    }
 
     /// <summary>
     /// Get the repository's file tree from main branch (cached for 5 minutes).

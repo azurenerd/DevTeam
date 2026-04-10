@@ -16,6 +16,37 @@ public static partial class CodeFileParser
     public record CodeFile(string Path, string Content, string? Language = null);
 
     /// <summary>
+    /// Characters that are never valid in file path segments.
+    /// Covers Windows invalid chars plus code-fragment chars that indicate parsing errors.
+    /// </summary>
+    private static readonly HashSet<char> InvalidPathChars =
+    [
+        '{', '}', '[', ']', '|', '<', '>', '?', '*', ';', '=', '!', '#', '$', '%', '^', '&',
+        '"', '\'', '`', '\t', '\r', '\0'
+    ];
+
+    /// <summary>
+    /// Known file extensions for code, config, and documentation files.
+    /// </summary>
+    private static readonly HashSet<string> KnownExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".cs", ".csx", ".csproj", ".sln", ".props", ".targets",
+        ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs",
+        ".html", ".htm", ".css", ".scss", ".sass", ".less",
+        ".razor", ".cshtml", ".vbhtml",
+        ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".env",
+        ".py", ".pyx", ".pyi", ".rb", ".go", ".rs", ".java", ".kt", ".swift",
+        ".c", ".cpp", ".h", ".hpp",
+        ".sh", ".bash", ".ps1", ".psm1", ".bat", ".cmd",
+        ".md", ".txt", ".rst", ".adoc",
+        ".sql", ".graphql", ".gql",
+        ".proto", ".wasm", ".wat",
+        ".dockerfile", ".dockerignore", ".editorconfig", ".gitignore", ".gitattributes",
+        ".config", ".settings", ".resx", ".xaml",
+        ".svg", ".ico",
+    };
+
+    /// <summary>
     /// Parse AI output text and extract all code files with their paths and content.
     /// </summary>
     public static List<CodeFile> ParseFiles(string aiOutput)
@@ -36,13 +67,18 @@ public static partial class CodeFileParser
         if (files.Count == 0)
             files.AddRange(ParseHeaderPathFormat(aiOutput));
 
-        // Deduplicate by path (last occurrence wins)
+        // Deduplicate by path (last occurrence wins), validating each path
         var deduplicated = new Dictionary<string, CodeFile>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
             var normalizedPath = NormalizePath(file.Path);
-            if (!string.IsNullOrWhiteSpace(normalizedPath) && !string.IsNullOrWhiteSpace(file.Content))
-                deduplicated[normalizedPath] = file with { Path = normalizedPath };
+            if (string.IsNullOrWhiteSpace(normalizedPath) || string.IsNullOrWhiteSpace(file.Content))
+                continue;
+
+            if (!IsValidFilePath(normalizedPath))
+                continue; // Skip malformed paths — code fragments, directives, etc.
+
+            deduplicated[normalizedPath] = file with { Path = normalizedPath };
         }
 
         return [.. deduplicated.Values];
@@ -131,6 +167,9 @@ public static partial class CodeFileParser
             normalized = normalized[1..];
         normalized = normalized.Replace('\\', '/');
 
+        // Strip AI directives like "(APPEND)", "(CREATE)", "(MODIFY)" from path
+        normalized = DirectiveSuffixRegex().Replace(normalized, "").TrimEnd();
+
         // Strip absolute Windows path prefixes (e.g., C:/Git/AgentSquad/src/...)
         var driveMatch = System.Text.RegularExpressions.Regex.Match(normalized, @"^[A-Za-z]:/");
         if (driveMatch.Success)
@@ -147,6 +186,63 @@ public static partial class CodeFileParser
         }
 
         return normalized;
+    }
+
+    /// <summary>
+    /// Validates that a normalized path is a legitimate file path, not a code fragment or directive.
+    /// </summary>
+    internal static bool IsValidFilePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Length < 2)
+            return false;
+
+        // Reject paths that contain invalid characters (code fragments, brackets, etc.)
+        foreach (var ch in path)
+        {
+            if (InvalidPathChars.Contains(ch))
+                return false;
+        }
+
+        // Reject paths starting with @ (Razor directives like @using, @page, @inject)
+        if (path.StartsWith('@'))
+            return false;
+
+        // Every path segment must be non-empty and not start with a dot followed by a space
+        var segments = path.Split('/');
+        foreach (var segment in segments)
+        {
+            if (string.IsNullOrWhiteSpace(segment))
+                continue; // trailing slash is okay
+            if (segment.All(c => !char.IsLetterOrDigit(c)))
+                return false; // segment is all punctuation
+        }
+
+        // The final segment (filename) must have a recognized extension or at least contain a dot
+        var fileName = segments[^1];
+        if (string.IsNullOrWhiteSpace(fileName))
+            return false;
+
+        // Dotfiles like .gitignore, .editorconfig are valid
+        if (fileName.StartsWith('.') && fileName.Length > 1 && !fileName[1..].Contains('.'))
+        {
+            // Check it's a known dotfile extension
+            var asDotFile = fileName.ToLowerInvariant();
+            return KnownExtensions.Contains(asDotFile) ||
+                   asDotFile is ".gitignore" or ".gitattributes" or ".editorconfig" or ".dockerignore" or ".env";
+        }
+
+        // Must have a file extension
+        var extIdx = fileName.LastIndexOf('.');
+        if (extIdx < 0 || extIdx == fileName.Length - 1)
+            return false;
+
+        // Check the extension is recognized (if not, still allow if it looks reasonable)
+        var ext = fileName[extIdx..].ToLowerInvariant();
+        if (KnownExtensions.Contains(ext))
+            return true;
+
+        // Allow unknown extensions if the rest of the path looks reasonable (has path separator)
+        return path.Contains('/') && ext.Length <= 8 && ext.All(c => char.IsLetterOrDigit(c) || c == '.');
     }
 
     private static bool LooksLikeFilePath(string text)
@@ -179,4 +275,10 @@ public static partial class CodeFileParser
         @"(?:^|\n)\s*(?:#{2,5}\s*|\*\*)?(?:`)?(?<path>[^\n`*]+\.\w+)(?:`)?(?:\*\*)?\s*\n+\s*```(?<lang>\w*)\n(?<content>.*?)```",
         RegexOptions.Singleline)]
     private static partial Regex HeaderPathRegex();
+
+    // AI directive suffixes like (APPEND), (CREATE), (MODIFY), (NEW) at end of path
+    [GeneratedRegex(
+        @"\s*\((?:APPEND|CREATE|MODIFY|NEW|UPDATE|REPLACE|DELETE)\)\s*$",
+        RegexOptions.IgnoreCase)]
+    private static partial Regex DirectiveSuffixRegex();
 }

@@ -582,6 +582,21 @@ public class TestEngineerAgent : AgentBase
             userPrompt.AppendLine();
         }
 
+        // For UI tests, include visual design context so tests verify design conformance
+        if (tier == TestTier.UI)
+        {
+            var designCtx = await ReadDesignReferencesForTestsAsync(ct);
+            if (!string.IsNullOrWhiteSpace(designCtx))
+            {
+                userPrompt.AppendLine("## Visual Design Reference");
+                userPrompt.AppendLine("The following design files define the expected UI. " +
+                    "Generate assertions that verify: correct CSS classes, element visibility, " +
+                    "color schemes, layout structure, and component hierarchy match the design.\n");
+                userPrompt.AppendLine(designCtx);
+                userPrompt.AppendLine();
+            }
+        }
+
         userPrompt.AppendLine(GetTierUserSuffix(tier, techStack));
         history.AddUserMessage(userPrompt.ToString());
 
@@ -1747,6 +1762,49 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             _prSessionIds[prNumber] = sessionId;
         }
         SetCliSession(sessionId);
+    }
+
+    /// <summary>
+    /// Read visual design reference files from the repository for UI test generation.
+    /// </summary>
+    private async Task<string?> ReadDesignReferencesForTestsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var designFiles = tree
+                .Where(f =>
+                {
+                    var ext = Path.GetExtension(f).ToLowerInvariant();
+                    if (ext != ".html" && ext != ".htm") return false;
+                    var name = Path.GetFileName(f).ToLowerInvariant();
+                    return name.Contains("design") || name.Contains("concept") ||
+                           name.Contains("mockup") || name.Contains("wireframe");
+                })
+                .ToList();
+
+            if (designFiles.Count == 0) return null;
+
+            var sb = new System.Text.StringBuilder();
+            foreach (var file in designFiles)
+            {
+                var content = await _github.GetFileContentAsync(file, ct: ct);
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                sb.AppendLine($"### Design File: `{file}`");
+                sb.AppendLine("```html");
+                sb.AppendLine(content.Length > 5000 ? content[..5000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine("```");
+                sb.AppendLine();
+            }
+
+            return sb.Length > 0 ? sb.ToString().TrimEnd() : null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to read design reference files for test generation");
+            return null;
+        }
     }
 
     #endregion
