@@ -56,6 +56,14 @@ internal sealed partial class EngineeringTaskIssueManager
             _cache.Count, openIssues.Count, closedIssues.Count);
     }
 
+    /// <summary>Clear the in-memory cache (e.g., when stale tasks from a prior run are detected).</summary>
+    public void ClearCache()
+    {
+        _cache = new();
+        _cacheLoaded = false;
+        _logger.LogInformation("Cleared engineering task cache");
+    }
+
     /// <summary>True if <see cref="LoadTasksAsync"/> has been called.</summary>
     public bool IsLoaded => _cacheLoaded;
 

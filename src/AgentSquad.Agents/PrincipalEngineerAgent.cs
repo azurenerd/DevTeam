@@ -203,7 +203,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     await ProcessOwnReworkAsync(ct);
 
                     // Check if all tasks are complete → integration phase (LEADER ONLY)
-                    if (!_allTasksComplete && isLeader)
+                    // Guard: only check completion if planning is done and tasks were created
+                    if (!_allTasksComplete && isLeader && _planningComplete)
                     {
                         await CheckAllTasksCompleteAsync(ct);
                     }
@@ -340,6 +341,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 Logger.LogWarning(
                     "Found {Count} engineering-task issues but they don't match current enhancement issues — ignoring stale tasks",
                     _taskManager.TotalCount);
+                _taskManager.ClearCache();
                 // Fall through to create a fresh plan
             }
             else
@@ -350,6 +352,18 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 _planningComplete = true;
                 UpdateStatus(AgentStatus.Working,
                     $"Loaded {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)");
+
+                // Emit the plan-ready signal so workflow can advance
+                await MessageBus.PublishAsync(new StatusUpdateMessage
+                {
+                    FromAgentId = Identity.Id,
+                    ToAgentId = "*",
+                    MessageType = "EngineeringPlanReady",
+                    NewStatus = AgentStatus.Working,
+                    CurrentTask = "Engineering Planning",
+                    Details = $"Restored engineering plan with {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)."
+                }, ct);
+
                 return;
             }
         }

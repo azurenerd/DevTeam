@@ -129,7 +129,24 @@ public static partial class CodeFileParser
             normalized = normalized[2..];
         if (normalized.StartsWith('/'))
             normalized = normalized[1..];
-        return normalized.Replace('\\', '/');
+        normalized = normalized.Replace('\\', '/');
+
+        // Strip absolute Windows path prefixes (e.g., C:/Git/AgentSquad/src/...)
+        var driveMatch = System.Text.RegularExpressions.Regex.Match(normalized, @"^[A-Za-z]:/");
+        if (driveMatch.Success)
+        {
+            // Find the first path segment that looks like a project root (src/, lib/, app/, etc.)
+            var srcIdx = normalized.IndexOf("/src/", StringComparison.OrdinalIgnoreCase);
+            if (srcIdx >= 0)
+                normalized = normalized[(srcIdx + 1)..]; // keep "src/..."
+            else
+            {
+                // Fallback: strip drive and common prefix directories
+                normalized = normalized[driveMatch.Length..];
+            }
+        }
+
+        return normalized;
     }
 
     private static bool LooksLikeFilePath(string text)
