@@ -223,11 +223,11 @@ public class HealthMonitor : IHostedService, IDisposable
         }
 
         // --- Engineering Planning signals ---
-        // Infer plan ready if: PE has issues/PRs, OR any engineers are spawned and working
+        // Infer plan ready if: PE is actively orchestrating tasks, OR any engineers are spawned
         if (!_workflow.HasSignal(WorkflowStateMachine.Signals.EngineeringPlanReady))
         {
             bool planReady =
-                HasReasonContaining(AgentRole.PrincipalEngineer, "pr #", "implementing", "assigned", "reviewing", "plan", "creating issues", "engineering plan") ||
+                HasReasonContaining(AgentRole.PrincipalEngineer, "orchestrating", "tasks complete", "assigned task", "task done") ||
                 agents.Any(a => a.Identity.Role is AgentRole.SeniorEngineer or AgentRole.JuniorEngineer);
 
             if (planReady)

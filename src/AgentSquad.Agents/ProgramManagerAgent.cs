@@ -1443,13 +1443,14 @@ public class ProgramManagerAgent : AgentBase
 
         try
         {
-            // Idempotency: check if enhancement issues already exist (open OR closed)
+            // Idempotency: check if OPEN enhancement issues already exist
+            // Only skip if there are open ones — closed issues from prior runs don't count
             var existingEnhancements = await _github.GetIssuesByLabelAsync(
-                IssueWorkflow.Labels.Enhancement, "all", ct);
+                IssueWorkflow.Labels.Enhancement, "open", ct);
             if (existingEnhancements.Count > 0)
             {
                 Logger.LogInformation(
-                    "Found {Count} existing enhancement issues, skipping creation",
+                    "Found {Count} existing open enhancement issues, skipping creation",
                     existingEnhancements.Count);
                 _userStoryIssuesCreated = true;
 
