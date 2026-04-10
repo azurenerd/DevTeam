@@ -177,8 +177,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     var total = _taskManager.TotalCount;
                     var hasWork = pending > 0 || _reviewQueue.Count > 0 || !_allTasksComplete || !_integrationPrCreated;
                     var leaderTag = isLeader ? "Leader" : $"Worker#{Identity.Rank}";
+                    var statusVerb = isLeader ? "Orchestrating" : "Working on";
                     UpdateStatus(hasWork ? AgentStatus.Working : AgentStatus.Idle,
-                        $"[{leaderTag}] Orchestrating tasks ({done}/{total} done, {pending} pending, {_reviewQueue.Count} PRs queued)");
+                        $"[{leaderTag}] {statusVerb} tasks ({done}/{total} done, {pending} pending, {_reviewQueue.Count} PRs queued)");
 
                     // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
                     await RecoverReadyForReviewPRsAsync(ct);
@@ -1172,14 +1173,24 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
 
                 // BUG FIX: Force-approve after max rework cycles to prevent infinite loops.
+                // Only actually force-approve if we're a required reviewer for this PR —
+                // otherwise we'd create redundant approval comments.
                 bool approved;
                 string? reviewBody;
                 if (_forceApprovalPrs.Contains(prNumber))
                 {
+                    _forceApprovalPrs.Remove(prNumber);
+                    var authorRole = PullRequestWorkflow.DetectAuthorRole(pr.Title);
+                    var requiredReviewers = PullRequestWorkflow.GetRequiredReviewers(authorRole);
+                    if (!requiredReviewers.Any(r => r.Contains("PrincipalEngineer", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Logger.LogInformation("PE is not a required reviewer for PR #{Number} — skipping force-approval", prNumber);
+                        _reviewedPrNumbers.Add(prNumber);
+                        continue;
+                    }
                     approved = true;
                     reviewBody = $"Force-approving after maximum rework cycles. " +
                         $"The engineer has made best-effort improvements across multiple iterations.";
-                    _forceApprovalPrs.Remove(prNumber);
                 }
                 else
                 {

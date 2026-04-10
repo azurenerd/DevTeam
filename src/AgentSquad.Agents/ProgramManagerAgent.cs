@@ -878,16 +878,23 @@ public class ProgramManagerAgent : AgentBase
                 UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
 
                 // BUG FIX: After max rework cycles, force-approve instead of continuing
-                // to request changes. Prevents infinite rework loops.
+                // to request changes. Only if PM is a required reviewer for this PR.
                 bool approved;
                 string? reviewBody;
                 if (_forceApprovalPrs.Contains(prNumber))
                 {
+                    _forceApprovalPrs.Remove(prNumber);
+                    var requiredReviewers = PullRequestWorkflow.GetRequiredReviewers(authorRole);
+                    if (!requiredReviewers.Any(r => r.Contains("ProgramManager", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Logger.LogInformation("PM is not a required reviewer for PR #{Number} — skipping force-approval", prNumber);
+                        _reviewedPrNumbers.Add(prNumber);
+                        continue;
+                    }
                     approved = true;
                     reviewBody = $"Force-approving after maximum rework cycles reached. " +
                         $"The PR has been through multiple review iterations and the engineer " +
                         $"has made best-effort improvements.";
-                    _forceApprovalPrs.Remove(prNumber);
                 }
                 else
                 {

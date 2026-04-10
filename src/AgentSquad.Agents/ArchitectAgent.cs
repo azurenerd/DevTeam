@@ -505,15 +505,22 @@ public class ArchitectAgent : AgentBase
                 Logger.LogInformation("Reviewing PR #{Number} for architectural alignment: {Title}",
                     pr.Number, pr.Title);
 
-                // Force-approve after max rework cycles to prevent infinite loops
+                // Force-approve after max rework cycles — only if Architect is a required reviewer
                 string verdict;
                 string reasoning;
                 if (_forceApprovalPrs.Contains(prNumber))
                 {
+                    _forceApprovalPrs.Remove(prNumber);
+                    var requiredReviewers = PullRequestWorkflow.GetRequiredReviewers(authorRole);
+                    if (!requiredReviewers.Any(r => r.Contains("Architect", StringComparison.OrdinalIgnoreCase)))
+                    {
+                        Logger.LogInformation("Architect is not a required reviewer for PR #{Number} — skipping force-approval", prNumber);
+                        _reviewedPrNumbers.Add(prNumber);
+                        continue;
+                    }
                     verdict = "APPROVED";
                     reasoning = "Force-approving after maximum rework cycles reached. " +
                         "The engineer has made best-effort improvements across multiple iterations.";
-                    _forceApprovalPrs.Remove(prNumber);
                 }
                 else
                 {

@@ -921,10 +921,20 @@ public partial class PullRequestWorkflow
                 var conflicts = await _conflictDetector.DetectConflictsAsync(resolvedFiles, ct);
                 if (conflicts.Count > 0)
                 {
-                    var warningComment = "## ⚠️ Conflict Detection Warnings\n\n" +
-                        string.Join("\n\n", conflicts) +
-                        "\n\n_These warnings were generated automatically. Please review for potential duplicate code._";
-                    await _github.AddPullRequestCommentAsync(prNumber, warningComment, ct);
+                    // Dedup: skip if a conflict warning with the same content already exists on this PR
+                    var existingComments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+                    var alreadyWarned = existingComments.Any(c =>
+                        c.Body.Contains("Conflict Detection Warnings", StringComparison.OrdinalIgnoreCase)
+                        && conflicts.All(conflict => c.Body.Contains(
+                            conflict.Length > 60 ? conflict[..60] : conflict, StringComparison.OrdinalIgnoreCase)));
+
+                    if (!alreadyWarned)
+                    {
+                        var warningComment = "## ⚠️ Conflict Detection Warnings\n\n" +
+                            string.Join("\n\n", conflicts) +
+                            "\n\n_These warnings were generated automatically. Please review for potential duplicate code._";
+                        await _github.AddPullRequestCommentAsync(prNumber, warningComment, ct);
+                    }
                     _logger.LogWarning("Detected {Count} potential conflicts for PR #{Number}", conflicts.Count, prNumber);
                 }
             }

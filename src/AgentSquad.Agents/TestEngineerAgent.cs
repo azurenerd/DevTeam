@@ -162,6 +162,9 @@ public class TestEngineerAgent : AgentBase
                 // Priority 3: Scan for new merged PRs to test
                 await ScanMergedPRsForTestingAsync(ct);
 
+                // Check if all code-bearing merged PRs have been tested → signal completion
+                await CheckTestCoverageCompleteAsync(ct);
+
                 await RefreshDiagnosticWithMemoryAsync(ct);
 
                 // Poll less frequently than other agents
@@ -267,6 +270,53 @@ public class TestEngineerAgent : AgentBase
             {
                 Logger.LogWarning(ex, "Failed to generate tests for merged PR #{Number}", pr.Number);
             }
+        }
+    }
+
+    /// <summary>
+    /// Checks whether all code-bearing merged PRs from this session have been tested.
+    /// When coverage is complete and no test PRs are pending review, updates status
+    /// to trigger the HealthMonitor's testing.coverage.met signal.
+    /// </summary>
+    private async Task CheckTestCoverageCompleteAsync(CancellationToken ct)
+    {
+        // Don't signal if we have an active test PR in progress or pending rework
+        if (_currentTestPrNumber is not null || !_reworkQueue.IsEmpty)
+            return;
+
+        var mergedPRs = await _github.GetMergedPullRequestsAsync(ct);
+        var untestedCodePRs = 0;
+
+        foreach (var pr in mergedPRs)
+        {
+            // Skip PRs from before this session
+            if (pr.MergedAt.HasValue && pr.MergedAt.Value < _sessionStartUtc)
+                continue;
+
+            // Skip already-tracked PRs
+            if (_testedPRs.Contains(pr.Number))
+                continue;
+
+            // Skip our own test PRs
+            if (PullRequestWorkflow.ParseAgentNameFromTitle(pr.Title) is { } agent &&
+                agent.Equals(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            // Check if it has testable code
+            var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
+            if (changedFiles.Any(f => TestableExtensions.Contains(Path.GetExtension(f))))
+            {
+                untestedCodePRs++;
+            }
+        }
+
+        if (untestedCodePRs == 0 && _testedPRs.Count > 0)
+        {
+            UpdateStatus(AgentStatus.Idle,
+                $"All {_testedPRs.Count} merged PRs tested — coverage met, tests complete");
+            Logger.LogInformation(
+                "Test coverage complete: all {Count} merged code PRs have been tested",
+                _testedPRs.Count);
         }
     }
 
