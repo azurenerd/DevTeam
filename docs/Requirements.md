@@ -34,7 +34,8 @@
 22. [Local Workspace & Build System Requirements](#22-local-workspace--build-system-requirements)
 23. [Multi-Tier Test Execution Requirements](#23-multi-tier-test-execution-requirements)
 24. [AI Conversation Mode Requirements](#24-ai-conversation-mode-requirements)
-25. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+25. [GitHub API Rate Limit Handling](#25-github-api-rate-limit-handling)
+26. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -199,6 +200,26 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-PM-007a**: When PM cannot answer a clarification, it creates an `executive-request` Issue assigned to the Executive GitHub username (configurable, default "azurenerd").
 - **REQ-PM-007b**: PM monitors executive-request Issues for responses and relays answers back to the original engineer's Issue.
 
+### REQ-PM-008: Enhancement Issue Completion Review
+
+- **REQ-PM-008a**: PM periodically reviews open Enhancement Issues (`ReviewEnhancementIssueCompletionAsync`). When all sub-issues (engineering tasks) for an enhancement are closed, PM does a final AI-powered acceptance review against the original acceptance criteria.
+- **REQ-PM-008b**: If the AI review returns APPROVED, PM posts a summary comment and closes the enhancement issue. If NEEDS_MORE_WORK, PM posts the gap analysis as a comment but keeps the issue open.
+- **REQ-PM-008c**: **Orphaned Enhancement Detection:** PM MUST detect enhancement issues with zero sub-issues after the engineering phase has started. If an enhancement has been open with no linked engineering tasks for more than one full engineering loop cycle, PM should flag it with a comment noting the gap and notify the PE (rather than silently skipping it forever).
+- **REQ-PM-008d**: PM tracks reviewed enhancements in `_reviewedEnhancementIssues` to prevent re-reviewing the same issue every loop.
+
+**Scenario: PM Closes Completed Enhancement**
+1. PM created Enhancement Issue #53 "User Authentication" with 3 engineering-task sub-issues (#60, #61, #62)
+2. All 3 sub-issues closed (PRs merged) → PM detects all closed
+3. AI acceptance review: compares acceptance criteria vs. completed tasks → APPROVED
+4. PM posts: "✅ PM Final Review — APPROVED. All 3 tasks delivered." → closes #53
+
+**Scenario: Orphaned Enhancement Detected**
+1. PM created Enhancement Issue #55 "Data Export" — PE's engineering plan missed it
+2. PE created tasks for all other enhancements but none referencing #55
+3. PM's enhancement review: #55 has 0 sub-issues → skipped (old behavior was silent)
+4. After engineering phase started: PM detects #55 has been orphaned → flags with comment: "⚠️ This enhancement has no linked engineering tasks. Notifying PE for resolution."
+5. PE receives notification → creates additional engineering tasks or comments with justification
+
 ---
 
 ## 5. Researcher Agent Requirements
@@ -345,6 +366,22 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-PE-008d**: Default configuration (PE=2, SE=0, JE=0) means only additional PE agents are spawned — no Senior or Junior engineers. This is the recommended configuration because PE-tier prompts produce more robust code.
 - **REQ-PE-008e**: Alternative configuration example: PE=0, SE=2, JE=1 allows up to 2 Senior Engineers and 1 Junior Engineer to be spawned (classic behavior), with no additional PEs.
 - **REQ-PE-008f**: The `AgentSpawnManager` enforces per-role limits independently. It tracks `_spawnedPEs`, `_spawnedSEs`, `_spawnedJEs` separately and checks the correct pool for each spawn request.
+
+### REQ-PE-009: Enhancement Coverage Validation
+
+- **REQ-PE-009a**: After the PE finalizes the engineering plan (all engineering-task issues created), it MUST validate that every open PM Enhancement issue has at least one linked engineering-task.
+- **REQ-PE-009b**: For each enhancement with zero engineering tasks: PE asks AI whether the enhancement was intentionally covered by other tasks (e.g., "JSON data layer is fully addressed by tasks T3 and T7") or was genuinely missed.
+- **REQ-PE-009c**: If the enhancement was missed: PE creates additional engineering tasks and links them as sub-issues of the enhancement.
+- **REQ-PE-009d**: If the enhancement was intentionally not given dedicated tasks (covered by other tasks): PE adds a comment on the enhancement issue explaining the justification (e.g., "This user story is fully addressed by engineering tasks T3 (#458) and T7 (#462) which implement the data models, service layer, and template file specified in the acceptance criteria.").
+- **REQ-PE-009e**: This validation prevents orphaned enhancement issues that can never be closed by the PM's `ReviewEnhancementIssueCompletionAsync` (which requires at least one sub-issue to evaluate completion).
+
+**Scenario: PE Catches Missing Enhancement Coverage**
+1. PM creates 10 Enhancement Issues (#447-#456)
+2. PE creates engineering plan: 9 tasks covering #447-#452, #454, #456 — but #453 and #455 missed
+3. PE validation pass: iterates all 10 enhancements → finds #453 has 0 linked tasks, #455 has 0
+4. AI analysis for #453: "This user story's requirements are fully addressed by T2 (data models) and T5 (service layer)" → PE posts justification comment on #453
+5. AI analysis for #455: "This user story was missed — needs a dedicated task for report theming" → PE creates new task T10 linked to #455
+6. Result: all enhancements have either engineering tasks or documented justification
 
 ---
 
@@ -790,6 +827,24 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-DASH-006a**: Dashboard port configurable via `AgentSquad:Dashboard:Port` (default: 5050). Value wired to Kestrel at startup via `builder.WebHost.UseUrls()`.
 - **REQ-DASH-006b**: Dashboard is non-essential — port conflict or binding failure MUST NOT crash the agent runner.
 
+### REQ-DASH-007: Engineering Plan Visualization Tab
+
+- **REQ-DASH-007a**: Dedicated Engineering Plan page (`/engineering-plan`) accessible from the nav menu (📊 icon). Visualizes engineering tasks as an interactive dependency graph using Cytoscape.js with the dagre hierarchical layout.
+- **REQ-DASH-007b**: Task nodes are color-coded by status: completed (green), in-progress (yellow/amber), pending (gray), blocked (red). Node labels show task ID, name, and complexity.
+- **REQ-DASH-007c**: Dependency edges shown as directed arrows between task nodes. Edge validation: skip edges where source/target node IDs don't exist (prevents layout crashes from stale cross-run data).
+- **REQ-DASH-007d**: Side detail panel: clicking a task node opens a slide-out panel showing full task details (description, status, assignee, linked issue, parent enhancement, complexity, dependencies).
+- **REQ-DASH-007e**: Progress summary bar at top: shows completion percentage, task counts by status, and current workflow phase.
+- **REQ-DASH-007f**: `EngineeringPlanDataService` provides task data sourced from `AgentStateStore` (SQLite), registered as a scoped service in DI.
+- **REQ-DASH-007g**: Layout fallback: if dagre layout fails (e.g., orphaned edges, plugin not registered), fall back to grid layout rather than showing an empty canvas. Console logging for debugging.
+- **REQ-DASH-007h**: DOM readiness: graph initialization must wait for the container element to be rendered (150ms delay after `OnAfterRenderAsync`) and retry on failure rather than setting `_graphInitialized` prematurely.
+
+**Scenario: Engineering Plan Graph Usage**
+1. User navigates to `/engineering-plan` → sees dependency graph with 9 task nodes
+2. T1 (foundation) at top with no incoming edges → T2-T5 depend on T1 (arrows from T1)
+3. T1 is green (completed), T2-T4 yellow (in-progress), T5-T9 gray (pending)
+4. User clicks T3 node → detail panel slides open showing: description, assigned to "Senior Engineer 1", Issue #460, complexity Medium
+5. T7 shows red (blocked) with incoming dependency edge from T5 which is still pending
+
 **Scenario: Dashboard Issues Tab Usage**
 1. User navigates to `/issues` → sees all open issues with count badges
 2. Filters by label "engineering-task" → sees only engineering work items
@@ -1095,6 +1150,13 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-WS-003b**: Test results in PR bodies MUST come from actual local test execution, not AI-generated summaries. The PR body includes raw test output excerpts.
 - **REQ-WS-003c**: If build/test fails and AI fix retries are exhausted (`MaxTestRetries`), the agent reports the failure in the PR body and marks it for review rather than committing broken code.
 
+### REQ-WS-004: Project File Scaffolding Validation
+
+- **REQ-WS-004a**: All generated code projects MUST have proper `.csproj` (or equivalent project file for the configured tech stack) and a `.sln` solution file at the repository root. Code without project files cannot be built or tested.
+- **REQ-WS-004b**: After AI code generation, agents MUST validate that project files exist. If `.cs` files are present but no `.csproj` exists in the same directory, auto-scaffold a minimal `.csproj` with appropriate SDK, target framework, and package references inferred from the code (similar to the TE's `EnsureTestProjectExists()` pattern).
+- **REQ-WS-004c**: If no `.sln` file exists at the repository root, auto-scaffold one referencing all `.csproj` files in the tree.
+- **REQ-WS-004d**: PE's foundation task (T1) SHOULD include project scaffolding as part of its scope. Downstream tasks inherit the project structure from T1 rather than each creating their own.
+
 **Scenario: Agent Workspace Lifecycle**
 1. PE assigns Issue #45 to Senior Engineer 1
 2. Senior Engineer 1 clones repo to `C:\Agents\senior-engineer-1\` (or pulls latest if exists)
@@ -1142,6 +1204,55 @@ Each phase has gate conditions that must be met before advancing:
 
 ---
 
+## 25. GitHub API Rate Limit Handling
+
+### REQ-RL-001: Rate Limit Architecture
+
+- **REQ-RL-001a**: `RateLimitManager` is a singleton service injected into `GitHubService`. ALL GitHub API calls (76 `_client` call sites across 42 public methods) are wrapped with `_rl.ExecuteAsync()` for centralized rate limit handling.
+- **REQ-RL-001b**: `SemaphoreSlim(10, 10)` limits concurrent API calls to 10. This prevents burst-flooding GitHub while allowing reasonable parallelism for 7+ agents.
+- **REQ-RL-001c**: After each successful API call, `TrackRateLimit()` reads `_client.GetLastApiInfo()?.RateLimit` to update the remaining quota and reset timestamp. This keeps proactive throttling accurate.
+- **REQ-RL-001d**: Three methods are excluded from wrapping: `GetRateLimitAsync` (circular — would rate-limit the rate limit check), `GetPullRequestsForAgentAsync` and `GetIssuesForAgentAsync` (delegate to already-wrapped methods with no direct `_client` calls).
+
+### REQ-RL-002: Smart Reset-Timestamp Pausing (Not Exponential Backoff)
+
+- **REQ-RL-002a**: When a `RateLimitExceededException` is caught, the manager reads the exact reset timestamp from `ex.Reset.UtcDateTime` and pauses ALL API callers until that time + 5 second buffer. This replaces blind exponential backoff which can spiral to absurd wait times.
+- **REQ-RL-002b**: **Global pause**: When any single API call triggers a rate limit, `_pauseUntil` is set globally so ALL callers (all agents) wait. This prevents other agents from burning remaining quota while one agent already hit the limit.
+- **REQ-RL-002c**: For `AbuseException` (secondary rate limit), use `RetryAfterSeconds` from the exception (or default 60s). For generic 403 Forbidden, use the tracked reset timestamp if available, otherwise 60s.
+- **REQ-RL-002d**: Maximum 3 retries per call (not 5). With smart reset-timestamp waiting, retries should succeed on the first attempt after the pause.
+
+### REQ-RL-003: Proactive Throttling
+
+- **REQ-RL-003a**: **Slowdown at <200 remaining**: 300ms delay injected between API calls. This is a light brake — the system is consuming quota faster than expected.
+- **REQ-RL-003b**: **Heavy slowdown at <50 remaining**: 2-second delay between calls. Getting dangerously close to the limit.
+- **REQ-RL-003c**: **Full pause at <10 remaining**: All API calls blocked until the rate limit window resets. This prevents the system from hitting zero and getting a 403 error.
+- **REQ-RL-003d**: Thresholds are based on the remaining quota tracked from GitHub response headers. The goal is to never actually hit the rate limit — instead, gradually slow down to spread remaining calls across the time until reset.
+
+### REQ-RL-004: GitHub Rate Limit Reference
+
+- **REQ-RL-004a**: Authenticated PAT: 5000 requests/hour (rolling window). Secondary limits: 100 concurrent requests, 900 reads/minute, 180 writes/minute.
+- **REQ-RL-004b**: Response headers: `X-RateLimit-Limit` (max), `X-RateLimit-Remaining` (left), `X-RateLimit-Reset` (Unix timestamp when window resets). Accessed via Octokit's `_client.GetLastApiInfo()`.
+- **REQ-RL-004c**: Exception types: `RateLimitExceededException` (primary, has `Reset` property), `AbuseException` (secondary, has `RetryAfterSeconds`), `ApiException` with 403 status (generic).
+
+**Scenario: Rate Limit Proactive Throttling**
+```
+1. Run starts — 5000 API calls available. Agents poll every 30s, each making 2-5 API calls/poll.
+2. After 30 minutes: 4800 calls used, 200 remaining. Proactive throttling kicks in: 300ms delays.
+3. Agents continue but slower. At 50 remaining: heavy 2s delays between calls.
+4. At 10 remaining: full pause. Agents log "Rate limit critically low, pausing 18.5 min until reset"
+5. All agents sleep until the hourly window resets → quota restored to 5000 → normal speed resumes.
+```
+
+**Scenario: Rate Limit Hit and Recovery**
+```
+1. Agent's API call throws RateLimitExceededException. ex.Reset = 22:47:00 UTC.
+2. RateLimitManager sets _pauseUntil = 22:47:05 UTC (reset + 5s buffer)
+3. ALL other agents' next API call: WaitForPauseAsync() detects global pause → sleeps until 22:47:05
+4. After pause: retry succeeds, quota is restored, normal operation resumes
+5. Total downtime: exactly the remaining time until reset. No exponential spiral.
+```
+
+---
+
 ## Appendix: Known Bugs Fixed
 
 These bugs were discovered during scenario analysis and fixed. Listed here as regression test targets:
@@ -1165,3 +1276,10 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 | Octokit UpdateIssue NullRef | CRITICAL | `UpdateIssueAsync` crashes on every call | `IssueUpdate.Labels` is null by default; calling `.Clear()` throws NullRef | Use `ClearLabels()` + `AddLabel()` which safely initializes the collection |
 | PE spawn cooldown blocks solo work | CRITICAL | PE sits idle despite pending tasks when no engineers exist | When `allEngineers.Count == 0` and spawn requested, PE deferred ALL tasks | Only defer when engineers exist but are busy; PE takes tasks itself when solo |
 | PM stale dashboard status | MODERATE | PM shows "Reviewing PR #X" for already-merged PR | `ReviewPullRequestsAsync` sets Working status but never resets after reviews complete | Added `UpdateStatus(AgentStatus.Idle, "Monitoring team progress")` after review foreach loop |
+| TE Playwright scaffold swapped args | CRITICAL | TE crashes with IOException: path contains URL (`C:\Agents\...\http:\localhost:5000\tests`) | `GeneratePlaywrightTestScaffold()` called with projectName and testProjectDir arguments swapped — URL passed as directory path | Fixed argument order: `GetSourceProjectName()` as projectName, `"tests/UITests"` as testProjectDir |
+| TE infinite retry on failed PRs | MODERATE | TE retries failed PR creation every scan cycle, flooding logs | Failed test PRs not added to `_testedPRs` set — dedup check never triggered for failed attempts | Add PR to `_testedPRs` in catch block to prevent infinite retry loops |
+| Engineering Plan graph empty canvas | MODERATE | Engineering Plan page shows blank graph despite valid data | Multiple causes: cytoscape-dagre extension not explicitly registered, `_graphInitialized` flag set before JS call (preventing retry on failure), no edge source/target validation, no DOM readiness delay | Added explicit dagre registration, moved flag after success, added 150ms delay, edge validation, dagre→grid fallback layout |
+| EngineeringPlanDataService missing from DI | CRITICAL | Engineering Plan page crashes on navigation with DI resolution error | `EngineeringPlanDataService` registered in Dashboard project but not in Runner's `Program.cs` | Added `AddScoped<EngineeringPlanDataService>()` to Runner DI registration |
+| TE missing .csproj scaffolding | MODERATE | AI-generated test code has no .csproj, build fails | Test Engineer AI sometimes omits .csproj file in generated output | Added auto-scaffolding: detect .cs files without .csproj → generate test .csproj with xUnit + Playwright packages |
+| PE misses PM enhancements | MODERATE | Enhancement issues stay open forever with no engineering tasks | PE's AI-generated engineering plan doesn't always cover all PM enhancement issues; PM's completion review skips enhancements with 0 sub-issues | TODO: Add PE enhancement coverage validation pass + PM orphaned enhancement detection |
+| RateLimitManager never wired into GitHubService | CRITICAL | Rate limit handling existed in code but was completely inactive — all 76 API calls bypassed it | `RateLimitManager` was registered in DI as singleton but never injected into `GitHubService` constructor; all `_client` calls went directly to Octokit with no throttling | Added constructor injection of `RateLimitManager`, wrapped all 42 public methods with `_rl.ExecuteAsync()`, added `TrackRateLimit()` after each API call |
