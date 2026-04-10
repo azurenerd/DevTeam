@@ -1,0 +1,31 @@
+@page "/"
+@using Microsoft.AspNetCore.Components.Web
+@inject DashboardDataService DataService
+@rendermode RenderMode.InteractiveServer
+
+<div class="dashboard-container">
+    @if (!string.IsNullOrEmpty(_data.ErrorMessage))
+    {
+        <div class="error-banner">
+            <strong>⚠ Data Error:</strong> @_data.ErrorMessage
+        </div>
+    }
+    else
+    {
+        <ProjectHeader Project="_data.Project" />
+        <MonthlySummary Summary="_data.CurrentMonth" />
+        <MilestoneTimeline Milestones="_data.Milestones" />
+        <ShippedItems Items="_data.Shipped" />
+        <InProgressItems Items="_data.InProgress" />
+        <CarriedOverItems Items="_data.CarriedOver" />
+    }
+</div>
+
+@code {
+    private DashboardData _data = new();
+
+    protected override async Task OnInitializedAsync()
+    {
+        _data = await DataService.LoadDataAsync();
+    }
+}

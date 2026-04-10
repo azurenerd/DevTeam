@@ -1,0 +1,39 @@
+@if (Summary is not null)
+{
+    <div class="section monthly-summary">
+        <h2>@(Summary.Month ?? "Current Month") Summary</h2>
+        <div class="metrics-grid">
+            <div class="metric-card">
+                <span class="metric-value">@Summary.TotalItems</span>
+                <span class="metric-label">Total Items</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-value">@Summary.CompletedItems</span>
+                <span class="metric-label">Completed</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-value">@Summary.CarriedItems</span>
+                <span class="metric-label">Carried Over</span>
+            </div>
+            <div class="metric-card">
+                <span class="metric-value health-@GetHealthClass()">@Summary.OverallHealth</span>
+                <span class="metric-label">Overall Health</span>
+            </div>
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public MonthSummary? Summary { get; set; }
+
+    private string GetHealthClass()
+    {
+        return (Summary?.OverallHealth?.ToLowerInvariant()) switch
+        {
+            "on track" or "on-track" => "on-track",
+            "at risk" or "at-risk" => "at-risk",
+            "behind" => "behind",
+            _ => "unknown"
+        };
+    }
+}

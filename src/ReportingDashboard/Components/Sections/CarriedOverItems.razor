@@ -1,0 +1,36 @@
+@if (Items.Count > 0)
+{
+    <div class="section carried-over-items">
+        <h2>Carried Over</h2>
+        <div class="work-items">
+            @foreach (var item in Items)
+            {
+                <div class="work-item border-carried-over">
+                    <div class="item-header">
+                        <span class="item-title">@item.Title</span>
+                        @if (!string.IsNullOrEmpty(item.Category))
+                        {
+                            <span class="item-category">@item.Category</span>
+                        }
+                    </div>
+                    @if (!string.IsNullOrEmpty(item.Description))
+                    {
+                        <p class="item-description">@item.Description</p>
+                    }
+                    @if (!string.IsNullOrEmpty(item.CarryOverReason))
+                    {
+                        <p class="carry-over-reason"><strong>Reason:</strong> @item.CarryOverReason</p>
+                    }
+                    <div class="progress-bar-container">
+                        <div class="progress-bar progress-carried-over" style="width: @(item.PercentComplete)%"></div>
+                        <span class="progress-label">@(item.PercentComplete)%</span>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public List<WorkItem> Items { get; set; } = [];
+}

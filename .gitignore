@@ -71,3 +71,6 @@ coverage/
 _ReSharper.Caches/
 
 appsettings.OG.json
+
+# Dashboard user data - contains project-specific info, use data.template.json as reference
+src/ReportingDashboard/wwwroot/data/data.json

@@ -1,0 +1,32 @@
+@if (Items.Count > 0)
+{
+    <div class="section in-progress-items">
+        <h2>In Progress</h2>
+        <div class="work-items">
+            @foreach (var item in Items)
+            {
+                <div class="work-item border-in-progress">
+                    <div class="item-header">
+                        <span class="item-title">@item.Title</span>
+                        @if (!string.IsNullOrEmpty(item.Category))
+                        {
+                            <span class="item-category">@item.Category</span>
+                        }
+                    </div>
+                    @if (!string.IsNullOrEmpty(item.Description))
+                    {
+                        <p class="item-description">@item.Description</p>
+                    }
+                    <div class="progress-bar-container">
+                        <div class="progress-bar progress-in-progress" style="width: @(item.PercentComplete)%"></div>
+                        <span class="progress-label">@(item.PercentComplete)%</span>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+}
+
+@code {
+    [Parameter] public List<WorkItem> Items { get; set; } = [];
+}
