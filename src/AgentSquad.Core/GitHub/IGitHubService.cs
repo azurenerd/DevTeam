@@ -58,6 +58,15 @@ public interface IGitHubService
     Task<bool> BranchExistsAsync(string branchName, CancellationToken ct = default);
     Task DeleteBranchAsync(string branchName, CancellationToken ct = default);
 
+    /// <summary>Lists all branches matching a prefix (e.g., "agent/").</summary>
+    Task<IReadOnlyList<string>> ListBranchesAsync(string? prefix = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Atomically resets the repo to contain only the specified files.
+    /// Uses Git tree API for a single commit instead of deleting files one by one.
+    /// </summary>
+    Task CleanRepoToBaselineAsync(IReadOnlyList<string> preserveFiles, string commitMessage, string branch = "main", CancellationToken ct = default);
+
     /// <summary>
     /// Merge the base branch (main) into a PR branch to bring it up to date.
     /// Returns true if the update succeeded or branch is already up to date,

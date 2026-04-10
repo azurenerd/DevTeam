@@ -268,51 +268,61 @@ public sealed class ConfigurationService
                 }
             }
 
-            // 2c. Delete agent branches (not main/master)
+            // 2c. Delete ALL agent branches (not just PR branches — catch orphans too)
             _logger.LogWarning("CLEANUP: Deleting agent branches in {Repo}", config.GitHubRepo);
-            var openPrs = allPrs.Where(p => p.State == "open" || p.HeadBranch?.StartsWith("agent/") == true).ToList();
-            foreach (var pr in openPrs)
-            {
-                if (!string.IsNullOrEmpty(pr.HeadBranch) &&
-                    pr.HeadBranch != config.DefaultBranch &&
-                    pr.HeadBranch != "main" &&
-                    pr.HeadBranch != "master")
-                {
-                    try
-                    {
-                        await _github.DeleteBranchAsync(pr.HeadBranch, ct);
-                        result.BranchesDeleted++;
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogWarning(ex, "Failed to delete branch {Branch}", pr.HeadBranch);
-                    }
-                }
-            }
-
-            // 2d. Delete all files from default branch (except preserved ones)
-            _logger.LogWarning("CLEANUP: Deleting files from {Branch} in {Repo}",
-                config.DefaultBranch, config.GitHubRepo);
-            var files = await _github.GetRepositoryTreeAsync(config.DefaultBranch, ct);
-            var filesToDelete = files
-                .Where(f => !IsFilePreserved(f, preserveFiles))
-                .ToList();
-
-            foreach (var file in filesToDelete)
+            var allAgentBranches = await _github.ListBranchesAsync("agent/", ct);
+            foreach (var branch in allAgentBranches)
             {
                 try
                 {
-                    await _github.DeleteFileAsync(file, $"Cleanup: remove {file}", config.DefaultBranch, ct);
-                    result.FilesDeleted++;
+                    await _github.DeleteBranchAsync(branch, ct);
+                    result.BranchesDeleted++;
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Failed to delete file {File}", file);
-                    result.Errors.Add($"Failed to delete {file}: {ex.Message}");
+                    _logger.LogWarning(ex, "Failed to delete branch {Branch}", branch);
                 }
             }
 
-            result.FilesPreserved = files.Count - filesToDelete.Count;
+            // 2d. Atomically reset repo to baseline (single commit, not file-by-file)
+            _logger.LogWarning("CLEANUP: Resetting repo to baseline files in {Repo}", config.GitHubRepo);
+            var files = await _github.GetRepositoryTreeAsync(config.DefaultBranch, ct);
+            var filesToKeep = files.Where(f => IsFilePreserved(f, preserveFiles)).ToList();
+
+            // Always preserve .gitignore
+            if (!filesToKeep.Any(f => f.Equals(".gitignore", StringComparison.OrdinalIgnoreCase)))
+            {
+                if (files.Any(f => f.Equals(".gitignore", StringComparison.OrdinalIgnoreCase)))
+                    filesToKeep.Add(".gitignore");
+            }
+
+            try
+            {
+                await _github.CleanRepoToBaselineAsync(filesToKeep, "Clean slate reset via Dashboard", config.DefaultBranch, ct);
+                result.FilesDeleted = files.Count - filesToKeep.Count;
+                result.FilesPreserved = filesToKeep.Count;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Atomic repo clean failed, falling back to file-by-file deletion");
+                result.Errors.Add($"Atomic clean failed: {ex.Message}");
+
+                // Fallback: delete files one by one
+                var filesToDelete = files.Where(f => !IsFilePreserved(f, preserveFiles)).ToList();
+                foreach (var file in filesToDelete)
+                {
+                    try
+                    {
+                        await _github.DeleteFileAsync(file, $"Cleanup: remove {file}", config.DefaultBranch, ct);
+                        result.FilesDeleted++;
+                    }
+                    catch (Exception ex2)
+                    {
+                        _logger.LogWarning(ex2, "Failed to delete file {File}", file);
+                    }
+                }
+                result.FilesPreserved = files.Count - result.FilesDeleted;
+            }
 
             // ── Phase 3: Reset internal state ────────────────────────
             _logger.LogWarning("CLEANUP Phase 3/4: Resetting workflow state...");
@@ -326,6 +336,46 @@ public sealed class ConfigurationService
 
             // Reset dashboard caches
             _dashboard.ResetCaches();
+
+            // Delete SQLite DB files (checkpoint/state persistence)
+            try
+            {
+                var runnerDir = Path.GetDirectoryName(_appSettingsPath) ?? ".";
+                var dbFiles = Directory.GetFiles(runnerDir, "agentsquad_*.db*");
+                foreach (var db in dbFiles)
+                {
+                    File.Delete(db);
+                    _logger.LogInformation("Deleted DB file: {File}", Path.GetFileName(db));
+                }
+                result.DbFilesDeleted = dbFiles.Length;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete DB files");
+                result.Errors.Add($"DB cleanup failed: {ex.Message}");
+            }
+
+            // Clean agent workspace directories
+            var workspaceRoot = _config.Value.Workspace.RootPath;
+            if (!string.IsNullOrEmpty(workspaceRoot) && Directory.Exists(workspaceRoot))
+            {
+                try
+                {
+                    var dirs = Directory.GetDirectories(workspaceRoot);
+                    foreach (var dir in dirs)
+                    {
+                        Directory.Delete(dir, recursive: true);
+                        result.WorkspaceDirsDeleted++;
+                    }
+                    _logger.LogInformation("Cleaned {Count} workspace directories from {Root}",
+                        dirs.Length, workspaceRoot);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to clean workspace directories at {Root}", workspaceRoot);
+                    result.Errors.Add($"Workspace cleanup failed: {ex.Message}");
+                }
+            }
 
             _logger.LogInformation("Internal state reset to Initialization");
 
@@ -368,8 +418,10 @@ public sealed class ConfigurationService
             result.Success = true;
             _logger.LogWarning(
                 "✅ CLEANUP COMPLETE: {Issues} issues deleted, {Prs} PRs closed, " +
-                "{Files} files deleted, {Stopped} agents stopped, {Started} agents restarted",
-                result.IssuesDeleted, result.PrsClosed, result.FilesDeleted,
+                "{Branches} branches deleted, {Files} files deleted, {Db} DB files deleted, " +
+                "{Workspaces} workspaces cleaned, {Stopped} agents stopped, {Started} agents restarted",
+                result.IssuesDeleted, result.PrsClosed, result.BranchesDeleted,
+                result.FilesDeleted, result.DbFilesDeleted, result.WorkspaceDirsDeleted,
                 result.AgentsStopped, result.AgentsStarted);
         }
         catch (Exception ex)
@@ -463,6 +515,8 @@ public sealed class CleanupResult
     public int FilesDeleted { get; set; }
     public int FilesPreserved { get; set; }
     public int BranchesDeleted { get; set; }
+    public int DbFilesDeleted { get; set; }
+    public int WorkspaceDirsDeleted { get; set; }
     public int AgentsStopped { get; set; }
     public int AgentsStarted { get; set; }
     public List<string> Errors { get; set; } = new();

@@ -142,7 +142,7 @@ public sealed partial class CliInteractiveWatchdog
     private static partial Regex CredentialPatternRegex();
 
     private static bool IsCredentialPrompt(string line) =>
-        CredentialPatternRegex().IsMatch(line);
+        line.Length < 80 && CredentialPatternRegex().IsMatch(line);
 
     [GeneratedRegex(@"(^error:.*permission denied|^error:.*unauthorized|^(401|403)\s|(?<!no\s)authentication (failed|required|error)|^not (logged in|authenticated)$|^access denied$)", RegexOptions.IgnoreCase)]
     private static partial Regex AuthFailurePatternRegex();

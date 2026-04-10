@@ -826,6 +826,73 @@ public class GitHubService : IGitHubService
         }
     }
 
+    public async Task<IReadOnlyList<string>> ListBranchesAsync(string? prefix = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var refs = await _client.Git.Reference.GetAll(_owner, _repo);
+            var branches = refs
+                .Where(r => r.Ref.StartsWith("refs/heads/"))
+                .Select(r => r.Ref.Replace("refs/heads/", ""))
+                .Where(b => prefix is null || b.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            return branches;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to list branches with prefix {Prefix}", prefix);
+            return Array.Empty<string>();
+        }
+    }
+
+    public async Task CleanRepoToBaselineAsync(IReadOnlyList<string> preserveFiles, string commitMessage, string branch = "main", CancellationToken ct = default)
+    {
+        try
+        {
+            // Get current commit SHA for the branch
+            var branchRef = await _client.Git.Reference.Get(_owner, _repo, $"heads/{branch}");
+            var currentSha = branchRef.Object.Sha;
+
+            // Get current tree
+            var commit = await _client.Git.Commit.Get(_owner, _repo, currentSha);
+            var tree = await _client.Git.Tree.GetRecursive(_owner, _repo, commit.Tree.Sha);
+
+            // Build new tree with only preserved files (blobs only, not trees)
+            var preserveSet = new HashSet<string>(preserveFiles, StringComparer.OrdinalIgnoreCase);
+            var keepItems = tree.Tree
+                .Where(item => item.Type == TreeType.Blob && preserveSet.Contains(item.Path))
+                .Select(item => new NewTreeItem
+                {
+                    Path = item.Path,
+                    Mode = item.Mode,
+                    Type = TreeType.Blob,
+                    Sha = item.Sha
+                })
+                .ToList();
+
+            var newTree = new NewTree();
+            foreach (var item in keepItems)
+                newTree.Tree.Add(item);
+
+            var createdTree = await _client.Git.Tree.Create(_owner, _repo, newTree);
+
+            // Create new commit
+            var newCommit = await _client.Git.Commit.Create(_owner, _repo,
+                new NewCommit(commitMessage, createdTree.Sha, currentSha));
+
+            // Update branch ref
+            await _client.Git.Reference.Update(_owner, _repo, $"heads/{branch}",
+                new ReferenceUpdate(newCommit.Sha, true));
+
+            _logger.LogInformation("Repo cleaned to baseline: kept {Count} files in single commit", keepItems.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to clean repo to baseline");
+            throw;
+        }
+    }
+
     public async Task<bool> UpdatePullRequestBranchAsync(int prNumber, CancellationToken ct = default)
     {
         try
