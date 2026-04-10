@@ -2354,7 +2354,16 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var reviewContextBuilder = new System.Text.StringBuilder();
             reviewContextBuilder.AppendLine($"## Architecture\n{architectureDoc}\n");
             reviewContextBuilder.AppendLine($"## PM Specification\n{pmSpec}\n");
-            reviewContextBuilder.AppendLine($"## Engineering Plan\n{engineeringPlan}\n");
+
+            // Filter engineering plan to focus on the linked task to prevent cross-task confusion
+            var planContext = engineeringPlan;
+            if (issueNumber.HasValue && !string.IsNullOrEmpty(engineeringPlan))
+            {
+                var taskSection = ExtractTaskSectionFromPlan(engineeringPlan, issueNumber.Value, pr.Title);
+                if (!string.IsNullOrEmpty(taskSection))
+                    planContext = $"(Filtered to task relevant to this PR)\n\n{taskSection}";
+            }
+            reviewContextBuilder.AppendLine($"## Engineering Plan\n{planContext}\n");
 
             if (!string.IsNullOrEmpty(repoStructure))
             {
@@ -2446,6 +2455,56 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     #endregion
 
     #region Helpers
+
+    /// <summary>
+    /// Extracts just the section of the engineering plan that corresponds to the given
+    /// issue number or PR title. Prevents the review AI from confusing tasks when
+    /// the full plan with all tasks is in context.
+    /// </summary>
+    private static string? ExtractTaskSectionFromPlan(string plan, int issueNumber, string prTitle)
+    {
+        var lines = plan.Split('\n');
+        var result = new System.Text.StringBuilder();
+        bool capturing = false;
+        int headerLevel = 0;
+
+        // Patterns to match: "T1", "T2", issue #number, or the task title
+        var issueRef = $"#{issueNumber}";
+        var taskTitle = PullRequestWorkflow.ParseTaskTitleFromTitle(prTitle);
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            var line = lines[i];
+            var trimmed = line.TrimStart();
+
+            // Detect markdown headers (## Task, ### T1, etc.)
+            if (trimmed.StartsWith('#'))
+            {
+                var level = trimmed.TakeWhile(c => c == '#').Count();
+
+                if (capturing && level <= headerLevel)
+                {
+                    // Hit a same-level or higher header — stop capturing
+                    break;
+                }
+
+                // Check if this header matches our task
+                if (!capturing &&
+                    (line.Contains(issueRef, StringComparison.OrdinalIgnoreCase) ||
+                     (taskTitle is not null && line.Contains(taskTitle, StringComparison.OrdinalIgnoreCase))))
+                {
+                    capturing = true;
+                    headerLevel = level;
+                }
+            }
+
+            if (capturing)
+                result.AppendLine(line);
+        }
+
+        var extracted = result.ToString().Trim();
+        return string.IsNullOrEmpty(extracted) ? null : extracted;
+    }
 
     /// <summary>
     /// Filters out numbered review items that complain about truncated or invisible code.

@@ -1734,7 +1734,7 @@ public abstract class EngineerAgentBase : AgentBase
             await Workspace!.WriteFileAsync(file.Path, file.Content, ct);
 
         // Build with retry loop
-        var buildSuccess = await BuildWithRetryAsync(codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
+        var (buildSuccess, lastBuildErrors) = await BuildWithRetryAsync(codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
 
         if (!buildSuccess)
         {
@@ -1756,7 +1756,7 @@ public abstract class EngineerAgentBase : AgentBase
                 foreach (var file in regeneratedFiles)
                     await Workspace.WriteFileAsync(file.Path, file.Content, ct);
 
-                buildSuccess = await BuildWithRetryAsync(
+                (buildSuccess, lastBuildErrors) = await BuildWithRetryAsync(
                     regeneratedFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
 
                 if (buildSuccess)
@@ -1779,10 +1779,15 @@ public abstract class EngineerAgentBase : AgentBase
 
                 await Workspace!.RevertUncommittedChangesAsync(ct);
 
+                // Include actual build errors in the PR comment for diagnostics
+                var errorDetails = !string.IsNullOrWhiteSpace(lastBuildErrors)
+                    ? $"\n\n<details>\n<summary>Build Errors (last attempt)</summary>\n\n```\n{Truncate(lastBuildErrors, 3000)}\n```\n</details>"
+                    : "";
+
                 await GitHub.AddPullRequestCommentAsync(pr.Number,
                     $"❌ **Build Blocked:** Step {stepNumber}/{totalSteps} (`{Truncate(stepDescription, 80)}`) was **not committed** " +
                     $"because build errors could not be resolved after {wsConfig.MaxBuildRetries} fix attempts + full code regeneration.\n\n" +
-                    $"This step needs manual review or will be addressed in a follow-up.", ct);
+                    $"This step needs manual review or will be addressed in a follow-up.{errorDetails}", ct);
 
                 return false;
             }
@@ -1809,7 +1814,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogWarning("{Role} {Name} post-test-fix build failed for step {Step}/{Total}, running build fix loop",
                     Identity.Role, Identity.DisplayName, stepNumber, totalSteps);
 
-                var postTestBuildOk = await BuildWithRetryAsync(
+                var (postTestBuildOk, _) = await BuildWithRetryAsync(
                     codeFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
 
                 if (!postTestBuildOk)
@@ -1832,14 +1837,17 @@ public abstract class EngineerAgentBase : AgentBase
 
     /// <summary>
     /// Build the project locally, feeding errors back to AI for fix attempts.
+    /// Returns success flag and the last build error summary (if any) for diagnostics.
     /// </summary>
-    private async Task<bool> BuildWithRetryAsync(
+    private async Task<(bool Success, string? LastErrors)> BuildWithRetryAsync(
         IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> originalFiles,
         IChatCompletionService chat,
         WorkspaceConfig wsConfig,
         int stepNumber, int totalSteps, string stepDescription,
         CancellationToken ct)
     {
+        string? lastErrorSummary = null;
+
         for (int attempt = 0; attempt <= wsConfig.MaxBuildRetries; attempt++)
         {
             _ = Metrics?.RecordBuildAttemptAsync(Identity.Id, ct);
@@ -1852,8 +1860,13 @@ public abstract class EngineerAgentBase : AgentBase
                 if (attempt > 0)
                     Logger.LogInformation("{Role} {Name} build succeeded after {Attempt} fix attempt(s)",
                         Identity.Role, Identity.DisplayName, attempt);
-                return true;
+                return (true, null);
             }
+
+            // Capture error summary for diagnostics
+            lastErrorSummary = buildResult.ParsedErrors.Count > 0
+                ? string.Join("\n", buildResult.ParsedErrors.Take(20))
+                : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
 
             if (attempt >= wsConfig.MaxBuildRetries)
             {
@@ -1867,16 +1880,11 @@ public abstract class EngineerAgentBase : AgentBase
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxBuildRetries + 1, buildResult.ParsedErrors.Count);
             LogActivity("build", $"🔧 Build failed (attempt {attempt + 1}), asking AI to fix {buildResult.ParsedErrors.Count} errors");
 
-            // Feed errors to AI for fix
-            var errorSummary = buildResult.ParsedErrors.Count > 0
-                ? string.Join("\n", buildResult.ParsedErrors.Take(20))
-                : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
-
             var fixPrompt = $"""
                 The code from step {stepNumber}/{totalSteps} ({stepDescription}) has build errors.
                 
                 BUILD ERRORS:
-                {errorSummary}
+                {lastErrorSummary}
                 
                 Fix ALL build errors. Output ONLY the corrected files using this format:
                 FILE: path/to/file.ext
@@ -1896,7 +1904,7 @@ public abstract class EngineerAgentBase : AgentBase
                 await Workspace.WriteFileAsync(file.Path, file.Content, ct);
         }
 
-        return false;
+        return (false, lastErrorSummary);
     }
 
     /// <summary>
@@ -1984,7 +1992,7 @@ public abstract class EngineerAgentBase : AgentBase
                     Identity.Role, Identity.DisplayName, attempt + 1);
 
                 // Try to fix the build error introduced by the test fix
-                var buildFixOk = await BuildWithRetryAsync(
+                var (buildFixOk, _) = await BuildWithRetryAsync(
                     fixedFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
                 if (!buildFixOk)
                 {
@@ -2056,7 +2064,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             if (!buildResult.Success)
             {
-                var buildFixed = await BuildWithRetryAsync(
+                var (buildFixed, _) = await BuildWithRetryAsync(
                     updatedFiles, chat, wsConfig, stepNumber, totalSteps, stepDescription, ct);
                 if (!buildFixed)
                 {
