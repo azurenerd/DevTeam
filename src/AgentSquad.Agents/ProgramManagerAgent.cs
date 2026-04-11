@@ -918,8 +918,9 @@ public class ProgramManagerAgent : AgentBase
 
                 if (approved)
                 {
+                    var requireTests = _config.Workspace.IsInlineTestWorkflow;
                     var result = await _prWorkflow.ApproveAndMaybeMergeAsync(
-                        pr.Number, "ProgramManager", reviewBody, ct: ct);
+                        pr.Number, "ProgramManager", reviewBody, requireTests, ct);
                     if (result == MergeAttemptResult.Merged)
                     {
                         Logger.LogInformation("PM approved and merged PR #{Number}", pr.Number);
@@ -927,6 +928,11 @@ public class ProgramManagerAgent : AgentBase
                         await RememberAsync(MemoryType.Decision,
                             $"Approved and merged PR #{pr.Number}: {pr.Title}",
                             TruncateForMemory(reviewBody), ct);
+                    }
+                    else if (result == MergeAttemptResult.AwaitingTests)
+                    {
+                        Logger.LogInformation("PM approved PR #{Number}, waiting for Test Engineer to add tests before merge", pr.Number);
+                        LogActivity("task", $"✅ Approved PR #{pr.Number}, awaiting TE tests before merge");
                     }
                     else if (result == MergeAttemptResult.ConflictBlocked)
                     {
