@@ -180,14 +180,16 @@ Each phase has gate conditions that must be met before advancing:
 4. PM posts comment on Issue #42: "**Program Manager** responding to clarification: Based on the PMSpec..."
 5. PM sends `ClarificationResponseMessage { IssueNumber=42, Response="..." }` to the Junior Engineer's agent Id
 
-### REQ-PM-005: PR Review (Business Alignment)
+### REQ-PM-005: PR Review — Phase 3 Final Business Review
 
-- **REQ-PM-005a**: PM subscribes to `ReviewRequestMessage` and queues PR numbers for review.
-- **REQ-PM-005b**: PM reviews PRs against PMSpec business requirements — but ONLY against the PR's own scope (not the entire PMSpec).
-- **REQ-PM-005c**: Review must evaluate: business goal alignment, user story coverage for THIS task, acceptance criteria fulfillment.
-- **REQ-PM-005d**: PM posts approval or changes-requested comment on the PR.
-- **REQ-PM-005e**: If changes requested, PM sends `ChangesRequestedMessage` (broadcast) so the author engineer can rework.
-- **REQ-PM-005f**: After completing all pending PR reviews, PM resets its status to Idle ("Monitoring team progress") so the dashboard accurately reflects current activity.
+- **REQ-PM-005a**: PM is the **final reviewer** in the sequential pipeline (Phase 3). PM only reviews PRs that have the `tests-added` label (indicating TE has completed Phase 2). PM does NOT review PRs without this label.
+- **REQ-PM-005b**: PM proactively scans each cycle for open PRs with `tests-added` but without `pm-approved` — this is a polling gate, not triggered by `ReviewRequestMessage`.
+- **REQ-PM-005c**: PM reviews PRs against PMSpec business requirements — but ONLY against the PR's own scope (not the entire PMSpec).
+- **REQ-PM-005d**: Review must evaluate: business goal alignment, user story coverage for THIS task, acceptance criteria fulfillment, AND visual evidence from TE screenshots/videos posted as PR comments.
+- **REQ-PM-005e**: PM gathers TE visual evidence by scanning PR comments for image URLs and video links. This evidence is included in the AI review prompt so the model can validate design and business outcomes visually.
+- **REQ-PM-005f**: On **APPROVED**: PM posts `[ProgramManager] APPROVED` comment and adds the `pm-approved` label. PM does NOT call `ApproveAndMaybeMergeAsync` — merge is handled by the PE merge gate. PM sends a `StatusUpdateMessage` to notify PE that the PR is ready for merge.
+- **REQ-PM-005g**: On **CHANGES REQUESTED**: PM sends `ChangesRequestedMessage` (broadcast) so the author engineer can rework. Max `MaxPmReworkCycles` retries (default 3).
+- **REQ-PM-005h**: After completing all pending PR reviews, PM resets its status to Idle ("Monitoring team progress") so the dashboard accurately reflects current activity.
 
 ### REQ-PM-006: Resource Management
 
@@ -254,19 +256,22 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-ARCH-001f**: Idempotent: if Architecture.md already has meaningful content, skip.
 - **REQ-ARCH-001g**: Incorporates the configured TechStack into architecture decisions.
 
-### REQ-ARCH-002: PR Review (Architecture Alignment)
+### REQ-ARCH-002: PR Review — Phase 1 Gatekeeper (Architecture Alignment)
 
-- **REQ-ARCH-002a**: Architect subscribes to `ReviewRequestMessage`.
+- **REQ-ARCH-002a**: Architect subscribes to `ReviewRequestMessage` and is the **first reviewer** in the sequential pipeline (Phase 1).
 - **REQ-ARCH-002b**: Reviews code PRs for architecture pattern compliance — scoped to the PR's own task, not the entire architecture.
 - **REQ-ARCH-002c**: Architect review reads Architecture.md + PMSpec.md + linked issue + actual code files from the PR branch.
-- **REQ-ARCH-002d**: Architect also reviews PE-authored PRs (part of the reviewer substitution when PE is the author — see REQ-REV-005).
-- **REQ-ARCH-002e**: Architect uses `NeedsReviewFromAsync` to prevent duplicate reviews across restarts.
+- **REQ-ARCH-002d**: On **APPROVED**: Architect adds the `architect-approved` label to the PR. Architect does NOT call `ApproveAndMaybeMergeAsync` and does NOT trigger merge — it is decoupled from merge logic entirely.
+- **REQ-ARCH-002e**: On **CHANGES REQUESTED**: Architect sends `ChangesRequestedMessage` for the author engineer to rework. Max `MaxArchitectReworkCycles` retries (default 3).
+- **REQ-ARCH-002f**: Architect skips PRs that already have the `architect-approved` label to prevent duplicate reviews.
+- **REQ-ARCH-002g**: Architect also reviews PE-authored PRs (part of the reviewer substitution when PE is the author — see REQ-REV-005).
+- **REQ-ARCH-002h**: Architect uses `NeedsReviewFromAsync` to prevent duplicate reviews across restarts.
 
 **Scenario: Architecture Phase**
 1. Architect receives PMSpecReady → reads PMSpec.md + Research.md
 2. Opens document PR → 5-turn AI conversation → produces Architecture.md
 3. Commits → auto-merges → broadcasts ArchitectureComplete
-4. Later: receives ReviewRequest for PE's PR #37 → reads actual code files from branch + Architecture.md + PMSpec.md + linked issue → evaluates → posts APPROVED or REWORK comment
+4. Later: receives ReviewRequest for Senior's PR #35 → reads actual code files from branch + Architecture.md + PMSpec.md + linked issue → evaluates → APPROVED → adds `architect-approved` label (Phase 1 complete, TE Phase 2 can begin)
 
 ---
 
@@ -435,9 +440,9 @@ Each phase has gate conditions that must be met before advancing:
 
 ## 9. Test Engineer Requirements
 
-### REQ-TEST-001: Test Generation from Merged PRs
+### REQ-TEST-001: Test Generation — Phase 2 of Sequential Pipeline
 
-- **REQ-TEST-001a**: Test Engineer monitors merged PRs (via `GetMergedPullRequestsAsync`) every 3× poll interval and generates real, runnable test code for any PR that contains testable code files.
+- **REQ-TEST-001a**: Test Engineer is the **Phase 2 reviewer** in the sequential PR pipeline. TE scans for open PRs with the `architect-approved` label (indicating Phase 1 is complete) and generates real, runnable test code for any PR that contains testable code files.
 - **REQ-TEST-001b**: Testable code files are identified by extension: `.cs`, `.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.java`, `.go`, `.rs`, `.razor`, `.blazor`, `.vue`, `.svelte`, `.rb`, `.php`, `.swift`, `.kt`. PRs with only non-code files (markdown, images, config) are skipped.
 - **REQ-TEST-001c**: Test Engineer skips PRs it created (self-authored test PRs) to avoid circular testing.
 - **REQ-TEST-001d**: Test Engineer uses standard model tier for all AI work.
@@ -445,65 +450,81 @@ Each phase has gate conditions that must be met before advancing:
 ### REQ-TEST-002: Business Context for Test Generation
 
 - **REQ-TEST-002a**: Before generating tests, the Test Engineer MUST gather full business context: linked issue (user story + acceptance criteria from PR body "Closes #N"), PMSpec.md, and Architecture.md.
-- **REQ-TEST-002b**: The AI prompt includes: (1) linked issue acceptance criteria, (2) PM Specification, (3) Architecture document patterns, (4) actual source code files from the merged PR, and (5) PR title and description.
+- **REQ-TEST-002b**: The AI prompt includes: (1) linked issue acceptance criteria, (2) PM Specification, (3) Architecture document patterns, (4) actual source code files from the PR, and (5) PR title and description.
 - **REQ-TEST-002c**: Tests MUST validate both acceptance criteria (business behavior) and technical implementation (code correctness). Prioritize business behavior tests over structural code coverage.
 - **REQ-TEST-002d**: The Test Engineer uses `ProjectFileManager` to read PMSpec.md and Architecture.md, and `IGitHubService.GetIssueAsync` to read linked issue details.
 
-### REQ-TEST-003: Test PR Workflow
+### REQ-TEST-003: Same-PR Test Workflow
 
-- **REQ-TEST-003a**: Test PRs are created on branches named `agent/testengineer/{sourcepr-number}-tests`.
-- **REQ-TEST-003b**: After creating a test PR, the Test Engineer marks it ready-for-review and sends a `ReviewRequestMessage` to request PE review.
-- **REQ-TEST-003c**: The PE reviews test PRs before they are merged, using the same review loop as code PRs.
-- **REQ-TEST-003d**: After successful test generation, the Test Engineer applies a `tested` label to the source PR. This label persists across restarts and is the primary dedup mechanism.
+- **REQ-TEST-003a**: TE adds tests to the **same PR branch** as the author engineer — it does NOT create a separate test PR. This ensures the code and its tests are reviewed and merged together as a single unit.
+- **REQ-TEST-003b**: After adding tests, the TE runs the full test suite (unit, integration, UI) locally in the workspace. All tests must pass before proceeding.
+- **REQ-TEST-003c**: After tests pass, the TE adds the `tests-added` label to the PR. This label is the gate for Phase 3 (PM Final Review).
+- **REQ-TEST-003d**: The `tested` label on source PRs persists across restarts and is the primary dedup mechanism.
 
-### REQ-TEST-004: Test Engineer Rework Loop
+### REQ-TEST-004: Visual Evidence (Screenshots & Videos)
 
-- **REQ-TEST-004a**: Test Engineer subscribes to `ChangesRequestedMessage` and enqueues rework items when feedback targets its test PR.
-- **REQ-TEST-004b**: Rework follows the same pattern as engineer agents: read feedback → AI fixes → commit → re-mark ready-for-review → re-request review.
-- **REQ-TEST-004c**: Maximum 3 rework attempts per test PR before force-completing.
+- **REQ-TEST-004a**: After tests pass, the TE MUST post screenshots and/or videos as comments on the PR showing what the application actually looks like.
+- **REQ-TEST-004b**: Screenshots capture the rendered UI for any frontend changes (Blazor pages, components, forms). Videos capture interactive flows (navigation, form submission, animations).
+- **REQ-TEST-004c**: Visual evidence is used by the PM in Phase 3 to validate that the implementation matches the design and business outcome expectations from the PMSpec.
+- **REQ-TEST-004d**: If the PR has no frontend changes (backend-only), screenshots/videos are optional. The TE should still post test execution output (pass/fail summary, coverage metrics) as a PR comment.
 
-### REQ-TEST-005: Test Engineer Restart Recovery
+### REQ-TEST-005: Test Engineer Rework Loop
 
-- **REQ-TEST-005a**: On restart, Test Engineer scans for open test PRs it authored (matching branch pattern).
-- **REQ-TEST-005b**: If an open test PR has unaddressed CHANGES_REQUESTED feedback (from GitHub comments), the feedback is queued for rework.
-- **REQ-TEST-005c**: If an open test PR has no reviews, it re-requests review.
-- **REQ-TEST-005d**: `_testedPRs` HashSet is populated from the `tested` label on source PRs (persisted on GitHub, not in-memory only).
-- **REQ-TEST-005e**: If source files from a merged PR no longer exist on main (e.g., files were deleted), the PR is marked as tested and skipped. It MUST NOT retry every cycle.
+- **REQ-TEST-005a**: Test Engineer subscribes to `ChangesRequestedMessage` and enqueues rework items when feedback targets its test PR.
+- **REQ-TEST-005b**: Rework follows the same pattern as engineer agents: read feedback → AI fixes → commit → re-mark ready-for-review → re-request review.
+- **REQ-TEST-005c**: Maximum `MaxTestReworkCycles` (default 3) rework attempts per PR before force-completing.
 
-### REQ-TEST-006: Multi-Tier Test Strategy
+### REQ-TEST-006: Test Engineer Restart Recovery
 
-- **REQ-TEST-006a**: Before generating tests, the `TestStrategyAnalyzer` determines which test tiers are needed using code-based heuristics (no AI calls). Three tiers exist: Unit (always for code changes), Integration (service/API layer), UI/Playwright (frontend components).
-- **REQ-TEST-006b**: **File extension rules:** `.razor`, `.cshtml`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.html` trigger UI tests. File name patterns containing `Controller`, `Service`, `Repository`, `Handler`, `Gateway`, `Middleware`, `Hub`, `Client`, `Startup`, `Program` trigger integration tests.
-- **REQ-TEST-006c**: **Keyword detection:** PR body and linked issue body are searched for UI keywords (`page`, `form`, `button`, `navigation`, `modal`, `click`, etc.) and integration keywords (`api`, `endpoint`, `database`, `http`, `authentication`, etc.).
-- **REQ-TEST-006d**: **Acceptance criteria extraction:** `ExtractAcceptanceCriteria` parses checklist items (`- [ ]`, `* [ ]`) and numbered items from the issue body's acceptance criteria section. UI keywords in criteria add UI test scenarios.
-- **REQ-TEST-006e**: Each tier gets a separate AI prompt with tier-specific guidance: unit tests use mocking patterns, integration tests use `WebApplicationFactory`, UI tests use Playwright Page Object Model.
-- **REQ-TEST-006f**: Test files use `[Trait("Category", "Unit")]` / `[Trait("Category", "Integration")]` / `[Trait("Category", "UI")]` for xUnit tier filtering.
-- **REQ-TEST-006g**: `TestStrategy` record includes `RequiredTiers` (yields active `TestTier` enum values), `Rationale` (human-readable explanation), and `UITestScenarios` (extracted from acceptance criteria).
+- **REQ-TEST-006a**: On restart, Test Engineer scans for open PRs with `architect-approved` label that need testing.
+- **REQ-TEST-006b**: If a PR has unaddressed CHANGES_REQUESTED feedback (from GitHub comments), the feedback is queued for rework.
+- **REQ-TEST-006c**: `_testedPRs` HashSet is populated from the `tested` label on source PRs (persisted on GitHub, not in-memory only).
+- **REQ-TEST-006d**: If source files from a PR no longer exist on main (e.g., files were deleted), the PR is marked as tested and skipped. It MUST NOT retry every cycle.
 
-### REQ-TEST-007: Tiered Test Execution Pipeline
+### REQ-TEST-007: Multi-Tier Test Strategy
 
-- **REQ-TEST-007a**: Tests execute in priority order: Unit (fast feedback) → Integration → UI/Playwright. Each tier runs only if all prior tiers passed.
-- **REQ-TEST-007b**: Each tier uses its own command from `WorkspaceConfig`: `UnitTestCommand`, `IntegrationTestCommand`, `UITestCommand`. Null values fall back to the generic `TestCommand`.
-- **REQ-TEST-007c**: Each tier has independent timeout settings: `UnitTestTimeoutSeconds` (60), `IntegrationTestTimeoutSeconds` (180), `UITestTimeoutSeconds` (300).
-- **REQ-TEST-007d**: Each tier gets its own AI fix-retry loop (up to `MaxTestRetries`). If unit tests fail, do NOT attempt integration/UI tests.
-- **REQ-TEST-007e**: Results are collected as `AggregateTestResult` with per-tier breakdown. PR body uses `FormatAsMarkdown()` for visual reporting (✅/❌ per tier, pass/fail counts, failure details).
+- **REQ-TEST-007a**: Before generating tests, the `TestStrategyAnalyzer` determines which test tiers are needed using code-based heuristics (no AI calls). Three tiers exist: Unit (always for code changes), Integration (service/API layer), UI/Playwright (frontend components).
+- **REQ-TEST-007b**: **File extension rules:** `.razor`, `.cshtml`, `.tsx`, `.jsx`, `.vue`, `.svelte`, `.html` trigger UI tests. File name patterns containing `Controller`, `Service`, `Repository`, `Handler`, `Gateway`, `Middleware`, `Hub`, `Client`, `Startup`, `Program` trigger integration tests.
+- **REQ-TEST-007c**: **Keyword detection:** PR body and linked issue body are searched for UI keywords (`page`, `form`, `button`, `navigation`, `modal`, `click`, etc.) and integration keywords (`api`, `endpoint`, `database`, `http`, `authentication`, etc.).
+- **REQ-TEST-007d**: **Acceptance criteria extraction:** `ExtractAcceptanceCriteria` parses checklist items (`- [ ]`, `* [ ]`) and numbered items from the issue body's acceptance criteria section. UI keywords in criteria add UI test scenarios.
+- **REQ-TEST-007e**: Each tier gets a separate AI prompt with tier-specific guidance: unit tests use mocking patterns, integration tests use `WebApplicationFactory`, UI tests use Playwright Page Object Model.
+- **REQ-TEST-007f**: Test files use `[Trait("Category", "Unit")]` / `[Trait("Category", "Integration")]` / `[Trait("Category", "UI")]` for xUnit tier filtering.
+- **REQ-TEST-007g**: `TestStrategy` record includes `RequiredTiers` (yields active `TestTier` enum values), `Rationale` (human-readable explanation), and `UITestScenarios` (extracted from acceptance criteria).
 
-### REQ-TEST-008: Playwright UI Test Support
+### REQ-TEST-008: Tiered Test Execution Pipeline
 
-- **REQ-TEST-008a**: When `WorkspaceConfig.EnableUITests` is true and UI tests are needed, the `PlaywrightRunner` manages Playwright infrastructure.
-- **REQ-TEST-008b**: Chromium browsers are auto-installed idempotently — checks for `chromium*` directory in shared cache at `{RootPath}/.playwright-browsers/`. Install uses `pwsh playwright.ps1 install chromium` (.NET) or `npx playwright install chromium` (Node).
-- **REQ-TEST-008c**: All UI tests run **headless only** (`CreateNoWindow = true`, `HEADED=0` env var, `PlaywrightHeadless = true` config). Tests MUST NOT take over the user's screen.
-- **REQ-TEST-008d**: App-under-test lifecycle: start application process → poll HTTP 200 readiness (up to `AppStartupTimeoutSeconds`) → run tests → kill process tree on completion.
-- **REQ-TEST-008e**: When UI tests are needed and no Playwright test project exists in the workspace, auto-scaffold one via `PlaywrightRunner.GeneratePlaywrightTestScaffold()` (creates `.csproj` with Playwright + xUnit packages, `PlaywrightFixture` base class with browser lifecycle management).
-- **REQ-TEST-008f**: `AppBaseUrl` is configurable (default `http://localhost:5000`) for the app-under-test address.
+- **REQ-TEST-008a**: Tests execute in priority order: Unit (fast feedback) → Integration → UI/Playwright. Each tier runs only if all prior tiers passed.
+- **REQ-TEST-008b**: Each tier uses its own command from `WorkspaceConfig`: `UnitTestCommand`, `IntegrationTestCommand`, `UITestCommand`. Null values fall back to the generic `TestCommand`.
+- **REQ-TEST-008c**: Each tier has independent timeout settings: `UnitTestTimeoutSeconds` (60), `IntegrationTestTimeoutSeconds` (180), `UITestTimeoutSeconds` (300).
+- **REQ-TEST-008d**: Each tier gets its own AI fix-retry loop (up to `MaxTestRetries`). If unit tests fail, do NOT attempt integration/UI tests.
+- **REQ-TEST-008e**: Results are collected as `AggregateTestResult` with per-tier breakdown. PR body uses `FormatAsMarkdown()` for visual reporting (✅/❌ per tier, pass/fail counts, failure details).
+
+### REQ-TEST-009: Playwright UI Test Support
+
+- **REQ-TEST-009a**: When `WorkspaceConfig.EnableUITests` is true and UI tests are needed, the `PlaywrightRunner` manages Playwright infrastructure.
+- **REQ-TEST-009b**: Chromium browsers are auto-installed idempotently — checks for `chromium*` directory in shared cache at `{RootPath}/.playwright-browsers/`. Install uses `pwsh playwright.ps1 install chromium` (.NET) or `npx playwright install chromium` (Node).
+- **REQ-TEST-009c**: All UI tests run **headless only** (`CreateNoWindow = true`, `HEADED=0` env var, `PlaywrightHeadless = true` config). Tests MUST NOT take over the user's screen.
+- **REQ-TEST-009d**: App-under-test lifecycle: start application process → poll HTTP 200 readiness (up to `AppStartupTimeoutSeconds`) → run tests → kill process tree on completion.
+- **REQ-TEST-009e**: When UI tests are needed and no Playwright test project exists in the workspace, auto-scaffold one via `PlaywrightRunner.GeneratePlaywrightTestScaffold()` (creates `.csproj` with Playwright + xUnit packages, `PlaywrightFixture` base class with browser lifecycle management).
+- **REQ-TEST-009f**: `AppBaseUrl` is configurable (default `http://localhost:5000`) for the app-under-test address.
+
+**Scenario: Phase 2 — TE Tests on Same PR**
+1. Architect approves PR #35 → adds `architect-approved` label (Phase 1 complete)
+2. TE scans open PRs → finds PR #35 with `architect-approved` and 4 testable files
+3. TE parses "Closes #43" → fetches Issue #43 (acceptance criteria) + PMSpec.md + Architecture.md
+4. AI generates unit + integration + UI tests → TE commits test files to PR #35's branch
+5. TE runs tests locally: ✅ Unit (12 passed) → ✅ Integration (5 passed) → ✅ UI (3 passed)
+6. TE captures screenshots of rendered UI pages → posts as PR comments
+7. TE posts test summary comment: "✅ Unit: 12 passed | ✅ Integration: 5 passed | ✅ UI: 3 passed"
+8. TE adds `tests-added` label → Phase 3 (PM) can begin
 
 **Scenario: Multi-Tier Test Generation**
-1. PE merges PR #45 containing `AuthController.cs` + `Login.razor`
-2. Test Engineer picks up PR #45 → `TestStrategyAnalyzer.Analyze()` returns: `NeedsUnitTests=true` (code file), `NeedsIntegrationTests=true` (Controller pattern), `NeedsUITests=true` (.razor extension)
+1. PR #45 contains `AuthController.cs` + `Login.razor`
+2. TE picks up PR #45 → `TestStrategyAnalyzer.Analyze()` returns: `NeedsUnitTests=true` (code file), `NeedsIntegrationTests=true` (Controller pattern), `NeedsUITests=true` (.razor extension)
 3. AI generates unit tests → integration tests → UI/Playwright tests with tier-specific prompts
-4. Test Engineer creates branch, scaffolds Playwright project (first time), writes all test files
+4. TE scaffolds Playwright project (first time), writes all test files to PR #45's branch
 5. Build succeeds → run unit tests (2s, 12 passed) → run integration tests (8s, 5 passed) → run UI tests headless (15s, 3 passed)
-6. Creates test PR with aggregated results: "✅ Unit: 12 passed | ✅ Integration: 5 passed | ✅ UI: 3 passed"
+6. Posts screenshots + test summary → adds `tests-added` label
 
 ---
 
@@ -576,13 +597,15 @@ Each phase has gate conditions that must be met before advancing:
 
 ## 12. PR Review & Merge Requirements
 
-### REQ-REV-001: Dual-Agent Approval
+### REQ-REV-001: Sequential Three-Phase PR Review Pipeline
 
-- **REQ-REV-001a**: Code PRs require approval from BOTH PM ("ProgramManager") and PE ("PrincipalEngineer") before merging.
-- **REQ-REV-001b**: Reviewers post comments with `**[AgentName] APPROVED**` or `**[AgentName] CHANGES REQUESTED**` markers. Approval comments should be simple — just the APPROVED marker with no additional validation text or context.
-- **REQ-REV-001c**: The last approver (whoever sees both have approved) triggers the merge.
-- **REQ-REV-001d**: All merges use squash-and-merge (`PullRequestMergeMethod.Squash`).
-- **REQ-REV-001e**: Head branch is deleted after merge.
+Code PRs go through a **sequential three-phase** review pipeline. Each phase has a gate condition (a label) that must be present before the next phase begins. This ensures Architect validates architecture before tests are written, and PM validates business outcomes only after tests and visual evidence are available.
+
+- **REQ-REV-001a**: **Phase 1 — Architect Review:** Architect is the first reviewer for all engineer-authored PRs. On approval, Architect adds the `architect-approved` label to the PR. Architect does NOT trigger merge. On changes requested, Architect sends `ChangesRequestedMessage` for the author to rework (max `MaxArchitectReworkCycles` retries, default 3).
+- **REQ-REV-001b**: **Phase 2 — Test Engineer:** TE scans for open PRs with the `architect-approved` label (not `approved`). TE adds tests to the **same PR branch** as the author engineer (not a separate test PR). After tests pass and visual evidence (screenshots/videos) is posted, TE adds the `tests-added` label.
+- **REQ-REV-001c**: **Phase 3 — PM Final Review:** PM only reviews PRs that have the `tests-added` label. PM proactively scans each cycle for PRs with `tests-added` but without `pm-approved`. PM validates: business alignment with PMSpec, acceptance criteria, AND visual evidence from TE screenshots/videos. On approval, PM posts `[ProgramManager] APPROVED` comment and adds `pm-approved` label. On changes requested, PM sends `ChangesRequestedMessage` (max `MaxPmReworkCycles` retries, default 3).
+- **REQ-REV-001d**: **Merge Gate:** PE's `MergeTestedPRsAsync` merges PRs ONLY when both `pm-approved` AND `tests-added` labels are present. All merges use squash-and-merge (`PullRequestMergeMethod.Squash`). Head branch is deleted after merge.
+- **REQ-REV-001e**: The three review labels (`architect-approved`, `tests-added`, `pm-approved`) are defined as constants in `PullRequestWorkflow.Labels`.
 
 ### REQ-REV-002: Review Scope
 
@@ -596,19 +619,20 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-REV-002.5a**: ALL reviewers MUST read the actual code files committed in the PR (via `GetPRCodeContextAsync`), not just the PR title and description. Reviews based only on PR body text are insufficient.
 - **REQ-REV-002.5b**: ALL reviewers MUST read the linked issue (user story + acceptance criteria) parsed from the PR body ("Closes #N") via `ParseLinkedIssueNumber` + `GetIssueAsync`.
 - **REQ-REV-002.5c**: Each reviewer reads the context documents appropriate to their expertise:
-  - **Architect**: Architecture.md + PMSpec.md + linked issue + code files
-  - **PM (ProgramManager)**: PMSpec.md + linked issue + code files
-  - **PE (PrincipalEngineer)**: Architecture.md + PMSpec.md + linked issue + code files
+  - **Architect** (Phase 1): Architecture.md + PMSpec.md + linked issue + code files
+  - **PM** (Phase 3): PMSpec.md + linked issue + code files + TE visual evidence (screenshots/videos from PR comments)
+  - **PE** (code review): Architecture.md + PMSpec.md + linked issue + code files
 - **REQ-REV-002.5d**: The AI review prompt MUST explicitly instruct the model to evaluate the actual code, not just the PR description.
 - **REQ-REV-002.5e**: Code files are read from the PR's head branch and truncated per-file at 8,000 characters to stay within token budgets. Non-code files (images, binary) are excluded.
 - **REQ-REV-002.5f**: `PullRequestWorkflow.GetPRCodeContextAsync(prNumber, headBranch)` is the shared helper for building code context. It reads changed files, filters to code extensions, and formats them for AI prompts.
 
 ### REQ-REV-003: Review Triggering
 
-- **REQ-REV-003a**: Reviews are triggered ONLY by `ReviewRequestMessage` via message bus (not by polling labels).
-- **REQ-REV-003b**: PM and PE subscribe to `ReviewRequestMessage` and queue PR numbers.
-- **REQ-REV-003c**: `NeedsReviewFromAsync` detects if a rework `ReviewRequest` was posted after the reviewer's last comment (requires re-review).
-- **REQ-REV-003d**: Agents should NOT review PRs until engineering agents are done (content beyond metadata is committed).
+- **REQ-REV-003a**: **Architect** (Phase 1): subscribes to `ReviewRequestMessage` via message bus. This is the initial trigger from the engineer marking ready-for-review.
+- **REQ-REV-003b**: **TE** (Phase 2): proactively polls for PRs with `architect-approved` label each scan cycle. Does not wait for a bus message — label presence is the gate.
+- **REQ-REV-003c**: **PM** (Phase 3): proactively polls for PRs with `tests-added` label but without `pm-approved` each review cycle. Does not wait for a bus message — label presence is the gate.
+- **REQ-REV-003d**: `NeedsReviewFromAsync` detects if a rework `ReviewRequest` was posted after the reviewer's last comment (requires re-review).
+- **REQ-REV-003e**: Agents should NOT review PRs until engineering agents are done (content beyond metadata is committed).
 
 ### REQ-REV-004: Preventing Review Spam
 
@@ -616,6 +640,7 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-REV-004b**: `HandleReviewRequestAsync` removes from `_reviewedPrNumbers` when rework is submitted (so re-review happens).
 - **REQ-REV-004c**: `HasAgentReviewedAsync` returns true for ANY review (approved OR changes-requested) — prevents duplicate reviews.
 - **REQ-REV-004d**: Architect MUST call `NeedsReviewFromAsync` before reviewing to prevent duplicate reviews across restarts. The in-memory `_reviewedPrNumbers` is lost on restart; `NeedsReviewFromAsync` checks GitHub comments as source of truth.
+- **REQ-REV-004e**: Architect skips PRs that already have the `architect-approved` label (prevents re-reviewing already-approved PRs).
 
 ### REQ-REV-005: PE-Authored PR Reviewer Substitution
 
@@ -623,11 +648,31 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-REV-005b**: `GetRequiredReviewers(prAuthorRole)` returns `["ProgramManager", "Architect"]` when the author is PrincipalEngineer.
 - **REQ-REV-005c**: The Architect agent subscribes to `ReviewRequestMessage` and reviews PRs alongside the PM when the PE is the author.
 
-**Scenario: Dual Review and Merge**
+### REQ-REV-006: PM Visual Validation
+
+- **REQ-REV-006a**: During Phase 3 review, PM gathers TE visual evidence (screenshots and videos) from PR comments by scanning for image URLs and video links.
+- **REQ-REV-006b**: PM's AI prompt includes this visual evidence alongside the PMSpec, linked issue, and code files to validate whether the PR meets design and business outcome expectations.
+- **REQ-REV-006c**: After approval, PM sends a `StatusUpdateMessage` to notify the PE that the PR is ready for merge.
+
+**Scenario: Sequential Three-Phase PR Review and Merge**
 1. Engineer marks PR #35 ready-for-review → broadcasts `ReviewRequestMessage`
-2. PM receives → queues PR #35 → next review loop: reads actual code files from branch + linked issue acceptance criteria + PMSpec → AI evaluates business alignment → APPROVE → posts comment, checks if PE also approved → PE hasn't → waits
-3. PE receives → queues PR #35 → reads actual code files + linked issue + Architecture + PMSpec → AI evaluates technical quality → APPROVE → posts comment, checks if PM approved → PM has → triggers squash merge → deletes branch
-4. Issue #43 auto-closes because PR body contained "Closes #43"
+2. **Phase 1**: Architect receives → reads actual code files + Architecture.md + PMSpec.md + linked issue → AI evaluates architecture alignment → APPROVED → posts comment, adds `architect-approved` label
+3. **Phase 2**: TE scans open PRs → finds PR #35 with `architect-approved` → adds tests to the same PR branch → runs unit/integration/UI tests → posts screenshots/videos as PR comments → adds `tests-added` label
+4. **Phase 3**: PM scans PRs → finds PR #35 with `tests-added` but no `pm-approved` → reads code + linked issue + PMSpec + TE screenshots/videos → AI validates business alignment + visual evidence → APPROVED → posts comment, adds `pm-approved` label → notifies PE
+5. PE's `MergeTestedPRsAsync` → sees `pm-approved` + `tests-added` → squash merge → delete branch → Issue auto-closes
+
+**Scenario: Architect Requests Changes (Phase 1 Rework)**
+1. Engineer marks PR #35 ready-for-review
+2. Architect reviews → CHANGES REQUESTED ("component doesn't follow Architecture §4.2 pattern") → sends `ChangesRequestedMessage`
+3. Engineer reworks → commits fixes → re-marks ready-for-review → sends new `ReviewRequestMessage`
+4. Architect re-reviews → APPROVED → adds `architect-approved` label → TE proceeds to Phase 2
+5. Max `MaxArchitectReworkCycles` (default 3) rework attempts before force-approval
+
+**Scenario: PM Requests Changes (Phase 3 Rework)**
+1. TE completes Phase 2 → adds `tests-added` label with passing tests + screenshots
+2. PM reviews → CHANGES REQUESTED ("acceptance criteria #3 not met per screenshot") → sends `ChangesRequestedMessage`
+3. Engineer reworks → commits fixes → TE re-tests → updates screenshots → PM re-reviews
+4. Max `MaxPmReworkCycles` (default 3) rework attempts before force-approval
 
 ---
 
@@ -648,19 +693,28 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-REWORK-002d**: PR is re-marked ready-for-review → new `ReviewRequestMessage` broadcast.
 - **REQ-REWORK-002e**: This creates a loop: review → changes requested → rework → re-review → until approved.
 
-### REQ-REWORK-003: PR State Tracking
+### REQ-REWORK-003: Multi-Phase Rework Cycles
 
-- **REQ-REWORK-003a**: Engineers check if their tracked PR has been merged/closed each loop iteration. If so, clear `CurrentPrNumber` and `AssignedPullRequest`.
-- **REQ-REWORK-003b**: Recovery after restart: if an open PR is found with `ready-for-review` label, re-track it (set `CurrentPrNumber`) so rework feedback can still reach the engineer. Do NOT re-implement it.
-- **REQ-REWORK-003c**: Recovery after restart: if an open PR is found with `in-progress` label (no ready-for-review), treat it as needing implementation via `WorkOnExistingPrAsync`.
+Each phase of the sequential pipeline has its **own independent retry limit**:
 
-**Scenario: Rework Loop**
-1. PM reviews PR #35 → AI finds missing error handling → posts "CHANGES REQUESTED" comment → sends `ChangesRequestedMessage { PrNumber=35, Feedback="Missing null checks in auth controller..." }`
-2. Senior Engineer receives broadcast → `CurrentPrNumber == 35` → matches → enqueues `ReworkItem`
-3. Next loop: dequeues rework → AI reads original PR + feedback + PMSpec + Architecture → produces fixed files
-4. Commits fixes to PR #35 branch → re-marks ready-for-review → sends new `ReviewRequestMessage`
-5. PM receives ReviewRequest → `_reviewedPrNumbers.Remove(35)` → re-reviews → this time approves
-6. PE reviews → approves → merge triggered
+- **REQ-REWORK-003a**: **Architect rework** (Phase 1): `MaxArchitectReworkCycles` (default 3). After max retries, force-approval is triggered.
+- **REQ-REWORK-003b**: **TE test rework** (Phase 2): `MaxTestReworkCycles` (default 3). After max retries, TE force-completes and marks coverage as met.
+- **REQ-REWORK-003c**: **PM rework** (Phase 3): `MaxPmReworkCycles` (default 3). After max retries, force-approval is triggered.
+- **REQ-REWORK-003d**: All three retry limits are independently configurable in `LimitsConfig` so each review phase can be tuned separately.
+- **REQ-REWORK-003e**: Rework cycles reset when the PR moves to the next phase (e.g., Architect rework count doesn't carry over to PM rework count).
+
+### REQ-REWORK-004: PR State Tracking
+
+- **REQ-REWORK-004a**: Engineers check if their tracked PR has been merged/closed each loop iteration. If so, clear `CurrentPrNumber` and `AssignedPullRequest`.
+- **REQ-REWORK-004b**: Recovery after restart: if an open PR is found with `ready-for-review` label, re-track it (set `CurrentPrNumber`) so rework feedback can still reach the engineer. Do NOT re-implement it.
+- **REQ-REWORK-004c**: Recovery after restart: if an open PR is found with `in-progress` label (no ready-for-review), treat it as needing implementation via `WorkOnExistingPrAsync`.
+
+**Scenario: Multi-Phase Rework Loop**
+1. Engineer creates PR #35 → marks ready-for-review → ReviewRequestMessage broadcast
+2. **Phase 1 rework**: Architect reviews → CHANGES REQUESTED ("missing interface from Architecture §4.2") → Engineer reworks → Architect re-reviews → APPROVED → adds `architect-approved`
+3. **Phase 2**: TE picks up PR #35 → adds tests → tests pass → posts screenshots → adds `tests-added`
+4. **Phase 3 rework**: PM reviews → CHANGES REQUESTED ("acceptance criteria #3 not met per screenshot") → Engineer reworks → TE re-runs tests → PM re-reviews → APPROVED → adds `pm-approved`
+5. PE merges PR #35 (both `pm-approved` + `tests-added` present)
 
 ---
 
@@ -709,6 +763,13 @@ Each phase has gate conditions that must be met before advancing:
 
 - **REQ-CFG-002a**: `ExecutiveGitHubUsername` in `ProjectConfig` (default: "azurenerd").
 - **REQ-CFG-002b**: `MaxClarificationRoundTrips` in `LimitsConfig` (default: 5).
+
+### REQ-CFG-002.5: Rework Cycle Configuration
+
+- **REQ-CFG-002.5a**: `MaxArchitectReworkCycles` in `LimitsConfig` (default: 3) — maximum rework attempts during Phase 1 (Architect review) before force-approval.
+- **REQ-CFG-002.5b**: `MaxPmReworkCycles` in `LimitsConfig` (default: 3) — maximum rework attempts during Phase 3 (PM final review) before force-approval.
+- **REQ-CFG-002.5c**: `MaxTestReworkCycles` in `LimitsConfig` (default: 3) — maximum rework attempts during Phase 2 (TE testing) before force-completion.
+- **REQ-CFG-002.5d**: All three limits are independently configurable so each review phase can be tuned separately without affecting the others.
 
 ### REQ-CFG-003: General Configuration
 
@@ -770,7 +831,16 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-IDEM-004e**: PE recovery for own PRs MUST check GitHub comments for unaddressed feedback (CHANGES_REQUESTED) using `GetPendingChangesRequestedAsync`, not just labels. If feedback exists, populate the ReworkQueue directly. If all reviewers approved, auto-merge. Only re-broadcast ReviewRequestMessage if no reviews exist at all.
 - **REQ-IDEM-004f**: The in-process message bus (`InProcessMessageBus`) is volatile — ALL messages are lost on restart. Recovery logic MUST use GitHub API (comments, labels, PR state) as the source of truth, never depend on bus message replay.
 - **REQ-IDEM-004g**: PE reconciles task statuses against merged PRs on startup. Tasks whose PRs are already merged are marked Done (issue closed) using `GetMergedPullRequestsAsync`.
-- **REQ-IDEM-004h**: Test Engineer recovery: scans for open test PRs, checks GitHub comments for unaddressed feedback, re-requests review for PRs with no reviews. Uses `tested` label on source PRs as persistent dedup marker.
+- **REQ-IDEM-004h**: Test Engineer recovery: scans for open PRs with `architect-approved` label, checks GitHub comments for unaddressed feedback, re-requests review for PRs with no reviews. Uses `tested` label on source PRs as persistent dedup marker.
+
+### REQ-IDEM-005: Runner Startup vs Fresh Reset (Task File Preservation)
+
+- **REQ-IDEM-005a**: **Runner startup MUST NOT delete task files** (`.agentsquad/*.task` marker files, `TeamMembers.md`, local workspace directories). These must persist so the runner can resume work after an accidental exit, computer restart, or crash. The runner startup path is the "resume" path.
+- **REQ-IDEM-005b**: **Fresh reset (via dashboard or CLI script) MUST delete everything** needed for a clean start: all GitHub PRs (closed), all GitHub Issues (closed with appropriate labels), all non-default branches deleted, all repo files removed (except preserved files like `OriginalDesignConcept.html` and `.gitignore`), the SQLite state database, and local workspace directories.
+- **REQ-IDEM-005c**: The fresh reset script (`scripts/fresh-reset.ps1`) and dashboard cleanup endpoint perform the same complete cleanup. Both MUST verify the cleanup was successful (0 open issues, 0 open PRs, 0 agent branches) before reporting completion. If verification fails, retry until clean.
+- **REQ-IDEM-005d**: The fresh reset MUST close all GitHub issues by adding appropriate labels (e.g., `stale-cleanup`) so they don't appear as open work in future runs.
+- **REQ-IDEM-005e**: The fresh reset MUST close all open PRs before deleting branches to avoid GitHub API errors on branch deletion.
+- **REQ-IDEM-005f**: After a fresh reset, the runner starts from the Initialization phase with no prior state — identical to a first-ever run.
 
 **Scenario: System Restart Recovery**
 1. System crashes while Senior Engineer 1 has PR #35 (ready-for-review) and Junior Engineer 1 has PR #36 (in-progress)
@@ -915,7 +985,7 @@ Each phase has gate conditions that must be met before advancing:
 
 ## 20. End-to-End Workflow Scenarios
 
-### Scenario A: Happy Path — Full Project Lifecycle
+### Scenario A: Happy Path — Full Project Lifecycle (Sequential Pipeline)
 
 ```
 1. PM starts → reads project description → creates Research Issue → sends TaskAssignment to Researcher
@@ -925,15 +995,14 @@ Each phase has gate conditions that must be met before advancing:
 5. Architect receives PMSpecReady → creates Architecture.md (5 turns) → document PR → auto-merge
 6. PE receives PlanningComplete + Architecture.md → reads 6 Enhancement Issues → creates 14 engineering-task Issues in GitHub
 7. PE starts T1 (High) itself (no engineers spawned yet), assigns T2 (Medium) to Senior Engineer when available
-8. Junior reads Issue → creates PR → implements → marks ready-for-review
-9. Senior reads Issue → creates PR → implements → self-reviews → marks ready-for-review
-10. PE implements T1 → marks ready-for-review
-11. PM reviews Junior's PR (reads code, linked issue, PMSpec) → approves; PE reviews (reads code, architecture) → approves → squash merge → branch deleted
-12. Senior's PR: PM approves, PE requests changes → Senior reworks → re-review → both approve → merge
-13. PE's PR: PM + Architect review (PE can't self-review) → both read actual code against PMSpec + Architecture → both approve → squash merge
+8. Senior reads Issue → creates PR → implements → marks ready-for-review → ReviewRequestMessage broadcast
+9. Phase 1: Architect receives ReviewRequest → reads code + Architecture + PMSpec + linked issue → APPROVED → adds `architect-approved` label
+10. Phase 2: TE scans for architect-approved PRs → finds Senior's PR → adds tests to same branch → runs tests → posts screenshots → adds `tests-added` label
+11. Phase 3: PM scans for tests-added PRs → finds Senior's PR → reads code + PMSpec + linked issue + TE screenshots → APPROVED → adds `pm-approved` label → notifies PE
+12. PE's MergeTestedPRsAsync → sees `pm-approved` + `tests-added` → squash merge → branch deleted → Issue auto-closed
+13. PE's PR: PM + Architect review (PE can't self-review) → Architect Phase 1 → TE Phase 2 → PM Phase 3 → merge
 14. T1 complete (issue closed) → T4 depends on T1 → dependency met → PE assigns T4 to Junior
-15. Test Engineer scans merged PRs → generates tests for Junior's PR with full business context (linked issue + PMSpec + Architecture) → creates test PR → PE reviews test PR → approve → merge
-16. All engineering-task issues closed → PE creates integration PR → PM + Architect review → merge → Completion phase
+15. All engineering-task issues closed → PE creates integration PR → PM + Architect review → merge → Completion phase
 ```
 
 ### Scenario B: Clarification Loop with Multiple Rounds
@@ -950,16 +1019,17 @@ Each phase has gate conditions that must be met before advancing:
 9. Junior creates PR → implements → review cycle
 ```
 
-### Scenario C: Rework Feedback Loop (3 iterations)
+### Scenario C: Multi-Phase Rework Feedback Loop
 
 ```
 1. Senior creates PR #35 → implements → marks ready-for-review
-2. PM reviews → APPROVE; PE reviews → CHANGES REQUESTED ("missing input validation")
-3. Senior receives ChangesRequested → enqueues ReworkItem → AI fixes → commits → re-marks ready
-4. PM: _reviewedPrNumbers.Remove(35) → re-reviews → APPROVE (validation now present)
-5. PE: _reviewedPrNumbers.Remove(35) → re-reviews → CHANGES REQUESTED ("validation messages not i18n")
-6. Senior reworks again → commits → re-marks ready
-7. Both reviewers re-review → both APPROVE → squash merge → branch deleted → Issue auto-closed
+2. Phase 1: Architect reviews → CHANGES REQUESTED ("missing shared interface") → Senior reworks → re-submits
+3. Architect re-reviews → APPROVED → adds `architect-approved` label
+4. Phase 2: TE picks up PR #35 → adds tests + screenshots → adds `tests-added` label
+5. Phase 3: PM reviews (code + screenshots + PMSpec) → CHANGES REQUESTED ("acceptance criteria #2 not met per screenshot")
+6. Senior reworks → commits fixes → TE re-runs tests → updates screenshots → PM re-reviews
+7. PM re-reviews → APPROVED → adds `pm-approved` label → notifies PE
+8. PE merges → squash merge → branch deleted → Issue auto-closed
 ```
 
 ### Scenario D: System Restart Mid-Work
@@ -1008,42 +1078,43 @@ Each phase has gate conditions that must be met before advancing:
 11. All tasks eventually assigned and completed through the review cycle
 ```
 
-### Scenario F: Test Engineer Generates Tests with Business Context
+### Scenario F: Test Engineer Phase 2 — Same-PR Testing with Visual Evidence
 
 ```
-1. Senior Engineer's PR #35 (Issue #43 "Export reports") is reviewed, approved, and merged
-2. Test Engineer scans merged PRs → finds PR #35 with 4 testable .ts files → not in _testedPRs, no "tested" label
-3. Test Engineer parses "Closes #43" from PR body → fetches Issue #43 (acceptance criteria: "supports PDF and Excel export")
-4. Test Engineer reads PMSpec.md (business requirements) and Architecture.md (tech patterns)
+1. Architect approves Senior's PR #35 (Issue #43 "Export reports") → adds `architect-approved` label
+2. TE scans open PRs → finds PR #35 with `architect-approved` and 4 testable .ts files → not in _testedPRs, no "tested" label
+3. TE parses "Closes #43" from PR body → fetches Issue #43 (acceptance criteria: "supports PDF and Excel export")
+4. TE reads PMSpec.md (business requirements) and Architecture.md (tech patterns)
 5. AI generates tests targeting: (a) acceptance criteria from Issue #43, (b) code correctness of the 4 source files, (c) edge cases
-6. Creates test PR "TestEngineer: Tests for PR #35 - Export reports" on branch agent/testengineer/35-tests
-7. Commits test files → marks ready-for-review → sends ReviewRequestMessage
-8. PE reviews test PR → APPROVE → merge
-9. Test Engineer applies "tested" label to source PR #35
+6. TE commits test files to PR #35's branch (same PR, not a separate test PR)
+7. TE runs tests locally: ✅ Unit (12 passed) → ✅ Integration (5 passed) → ✅ UI (3 passed)
+8. TE captures screenshots of rendered export pages → posts as PR comments with test summary
+9. TE adds `tests-added` label → Phase 3 (PM review) can begin
 10. On next restart: _testedPRs populated from "tested" label → PR #35 skipped
 ```
 
-### Scenario G: Test Engineer Rework After PE Review
+### Scenario G: Test Engineer Rework After Feedback
 
 ```
-1. Test Engineer creates test PR #40 for merged PR #35
-2. PE reviews test PR #40 → CHANGES REQUESTED ("Missing test for error handling in export service")
-3. Test Engineer receives ChangesRequestedMessage → matches _currentTestPrNumber → enqueues rework
-4. AI reads feedback + original source + existing test code → generates additional error handling tests
-5. Commits fixes → re-marks ready-for-review → sends ReviewRequestMessage
-6. PE re-reviews → APPROVE → merge → "tested" label applied to source PR #35
+1. TE adds tests to PR #35 → tests fail (3 unit test failures)
+2. AI reads failure output + original source + test code → fixes test assertions
+3. Re-runs tests → all pass → posts screenshots → adds `tests-added` label
+4. PM reviews (Phase 3) → CHANGES REQUESTED ("screenshot shows wrong layout")
+5. Engineer reworks code → TE re-tests → TE updates screenshots → PM re-reviews → APPROVED
 ```
 
-### Scenario H: PE-Authored PR Review (Reviewer Substitution)
+### Scenario H: PE-Authored PR Review (Sequential Pipeline with Reviewer Substitution)
 
 ```
 1. PE implements T3 (High complexity) → creates PR #37 "PrincipalEngineer: Implement content schema"
 2. PE marks PR #37 ready-for-review → broadcasts ReviewRequestMessage
 3. GetRequiredReviewers("PrincipalEngineer") returns ["ProgramManager", "Architect"] (not PE + PM)
-4. PM receives ReviewRequest → reads PR #37 code files, linked issue, PMSpec → AI reviews → APPROVE
-5. Architect receives ReviewRequest → reads PR #37 code files, linked issue, Architecture.md + PMSpec → AI reviews → REWORK ("component should use shared interface from Architecture §4.2")
-6. PE receives ChangesRequestedMessage → enqueues rework → AI fixes → commits → re-marks ready
-7. Architect re-reviews → APPROVE; PM already approved → triggers squash merge
+4. Phase 1: Architect receives ReviewRequest → reads PR #37 code files, linked issue, Architecture.md + PMSpec → AI reviews → REWORK ("component should use shared interface from Architecture §4.2")
+5. PE receives ChangesRequestedMessage → enqueues rework → AI fixes → commits → re-marks ready
+6. Architect re-reviews → APPROVED → adds `architect-approved` label
+7. Phase 2: TE picks up PR #37 → adds tests → runs locally → posts screenshots → adds `tests-added` label
+8. Phase 3: PM reviews → reads code + PMSpec + screenshots → APPROVED → adds `pm-approved` label
+9. PE's MergeTestedPRsAsync → sees `pm-approved` + `tests-added` → squash merge
 ```
 
 ### Scenario I: Network Outage / Hibernate Recovery
@@ -1059,15 +1130,18 @@ Each phase has gate conditions that must be met before advancing:
 8. If manual restart is needed: recovery follows Scenario D (GitHub is source of truth, bus is volatile)
 ```
 
-### Scenario J: Force-Approval After Max Rework Cycles
+### Scenario J: Force-Approval After Max Rework Cycles (Per Phase)
 
 ```
-1. PM reviews Senior's PR #35 → CHANGES REQUESTED (round 1)
-2. Senior reworks → re-submits → PM reviews → CHANGES REQUESTED again (round 2)
-3. Senior reworks → re-submits → PM reviews → CHANGES REQUESTED again (round 3 = max)
-4. Senior: _reworkAttempts[35] == 3 → adds PR #35 to _forceApprovalPrs set → re-submits one more time
-5. PM receives ReviewRequest → checks _forceApprovalPrs → force-approves with note
-6. PE reviews → APPROVE → squash merge → prevents infinite rework loop
+1. Phase 1: Architect reviews Senior's PR #35 → CHANGES REQUESTED (round 1)
+2. Senior reworks → re-submits → Architect reviews → CHANGES REQUESTED (round 2)
+3. Senior reworks → re-submits → Architect reviews → CHANGES REQUESTED (round 3 = MaxArchitectReworkCycles)
+4. Force-approval triggered → Architect adds `architect-approved` label with note
+5. Phase 2: TE adds tests → adds `tests-added` label
+6. Phase 3: PM reviews → CHANGES REQUESTED (round 1)
+7. Senior reworks → TE re-tests → PM re-reviews → CHANGES REQUESTED (round 2)
+8. Senior reworks → TE re-tests → PM re-reviews → CHANGES REQUESTED (round 3 = MaxPmReworkCycles)
+9. Force-approval triggered → PM adds `pm-approved` label with note → PE merges
 ```
 
 ### Scenario K: Incremental Multi-Step Implementation
