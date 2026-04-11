@@ -217,87 +217,136 @@ public sealed class ConfigurationService
             // Parse caveats to find files to preserve
             var preserveFiles = ParseCaveats(caveats);
 
-            // 2a. Delete ALL issues (open + closed) — uses GraphQL deleteIssue, falls back to close
+            // 2a. Delete ALL issues (open + closed) — with verify-and-retry
             _logger.LogWarning("CLEANUP: Deleting all issues in {Repo}", config.GitHubRepo);
-            var allIssues = await _github.GetAllIssuesAsync(ct);
-            foreach (var issue in allIssues)
+            const int maxCleanupRetries = 3;
+            for (var attempt = 1; attempt <= maxCleanupRetries; attempt++)
             {
-                try
+                var allIssues = await _github.GetAllIssuesAsync(ct);
+                if (allIssues.Count == 0) break;
+
+                foreach (var issue in allIssues)
                 {
-                    var deleted = await _github.DeleteIssueAsync(issue.Number, ct);
-                    if (deleted)
-                        result.IssuesDeleted++;
-                    else
-                        result.IssuesClosed++; // fallback to close
+                    try
+                    {
+                        var deleted = await _github.DeleteIssueAsync(issue.Number, ct);
+                        if (deleted)
+                            result.IssuesDeleted++;
+                        else
+                            result.IssuesClosed++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to delete issue #{Number}", issue.Number);
+                        result.Errors.Add($"Failed to delete issue #{issue.Number}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+
+                // Verify: re-check for any remaining open issues
+                await Task.Delay(2000, ct);
+                var remaining = await _github.GetAllIssuesAsync(ct);
+                var openRemaining = remaining.Where(i => i.State == "open").ToList();
+                if (openRemaining.Count == 0)
                 {
-                    _logger.LogWarning(ex, "Failed to delete issue #{Number}", issue.Number);
-                    result.Errors.Add($"Failed to delete issue #{issue.Number}: {ex.Message}");
+                    _logger.LogInformation("Issue cleanup verified — 0 open issues remain");
+                    break;
                 }
+                _logger.LogWarning("Issue cleanup attempt {Attempt}/{Max}: {Count} open issues still remain, retrying...",
+                    attempt, maxCleanupRetries, openRemaining.Count);
             }
 
-            // 2b. Close all open PRs and label all merged PRs as "tested"
+            // 2b. Close all open PRs (with verify-and-retry) and label merged PRs
             _logger.LogWarning("CLEANUP: Closing open PRs and labeling merged PRs in {Repo}", config.GitHubRepo);
-            var allPrs = await _github.GetAllPullRequestsAsync(ct);
-
-            foreach (var pr in allPrs)
+            for (var attempt = 1; attempt <= maxCleanupRetries; attempt++)
             {
-                try
-                {
-                    if (pr.State == "open" && !pr.IsMerged)
-                    {
-                        await _github.ClosePullRequestAsync(pr.Number, ct);
-                        result.PrsClosed++;
-                    }
+                var allPrs = await _github.GetAllPullRequestsAsync(ct);
+                var openPrs = allPrs.Where(p => p.State == "open" && !p.IsMerged).ToList();
+                if (openPrs.Count == 0 && attempt > 1) break; // skip label pass on retries
 
-                    if (!pr.Labels.Contains("tested", StringComparer.OrdinalIgnoreCase))
+                foreach (var pr in allPrs)
+                {
+                    try
                     {
-                        var updatedLabels = pr.Labels
-                            .Append("tested")
-                            .Distinct(StringComparer.OrdinalIgnoreCase)
-                            .ToArray();
-                        await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
-                        result.PrsLabeled++;
+                        if (pr.State == "open" && !pr.IsMerged)
+                        {
+                            await _github.ClosePullRequestAsync(pr.Number, ct);
+                            result.PrsClosed++;
+                        }
+
+                        if (!pr.Labels.Contains("tested", StringComparer.OrdinalIgnoreCase))
+                        {
+                            var updatedLabels = pr.Labels
+                                .Append("tested")
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToArray();
+                            await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
+                            result.PrsLabeled++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to process PR #{Number}", pr.Number);
+                        result.Errors.Add($"Failed to process PR #{pr.Number}: {ex.Message}");
                     }
                 }
-                catch (Exception ex)
+
+                // Verify: re-check for any remaining open PRs
+                await Task.Delay(2000, ct);
+                var remainingPrs = await _github.GetAllPullRequestsAsync(ct);
+                var stillOpen = remainingPrs.Where(p => p.State == "open" && !p.IsMerged).ToList();
+                if (stillOpen.Count == 0)
                 {
-                    _logger.LogWarning(ex, "Failed to process PR #{Number}", pr.Number);
-                    result.Errors.Add($"Failed to process PR #{pr.Number}: {ex.Message}");
+                    _logger.LogInformation("PR cleanup verified — 0 open PRs remain");
+                    break;
                 }
+                _logger.LogWarning("PR cleanup attempt {Attempt}/{Max}: {Count} open PRs still remain, retrying...",
+                    attempt, maxCleanupRetries, stillOpen.Count);
             }
 
-            // 2c. Delete ALL agent branches (not just PR branches — catch orphans too)
+            // 2c. Delete ALL agent branches (with verify-and-retry)
             _logger.LogWarning("CLEANUP: Deleting agent branches in {Repo}", config.GitHubRepo);
-            var allAgentBranches = await _github.ListBranchesAsync("agent/", ct);
-            foreach (var branch in allAgentBranches)
+            for (var attempt = 1; attempt <= maxCleanupRetries; attempt++)
             {
-                try
+                var allAgentBranches = await _github.ListBranchesAsync("agent/", ct);
+                if (allAgentBranches.Count == 0) break;
+
+                foreach (var branch in allAgentBranches)
                 {
-                    await _github.DeleteBranchAsync(branch, ct);
-                    result.BranchesDeleted++;
+                    try
+                    {
+                        await _github.DeleteBranchAsync(branch, ct);
+                        result.BranchesDeleted++;
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to delete branch {Branch}", branch);
+                    }
                 }
-                catch (Exception ex)
+
+                // Verify
+                await Task.Delay(1000, ct);
+                var remainingBranches = await _github.ListBranchesAsync("agent/", ct);
+                if (remainingBranches.Count == 0)
                 {
-                    _logger.LogWarning(ex, "Failed to delete branch {Branch}", branch);
+                    _logger.LogInformation("Branch cleanup verified — 0 agent branches remain");
+                    break;
                 }
+                _logger.LogWarning("Branch cleanup attempt {Attempt}/{Max}: {Count} agent branches still remain, retrying...",
+                    attempt, maxCleanupRetries, remainingBranches.Count);
             }
 
-            // 2d. Atomically reset repo to baseline (single commit, not file-by-file)
+            // 2d. Atomically reset repo to baseline via Git Trees API (~4 API calls total)
             _logger.LogWarning("CLEANUP: Resetting repo to baseline files in {Repo}", config.GitHubRepo);
             var files = await _github.GetRepositoryTreeAsync(config.DefaultBranch, ct);
 
             List<string> filesToKeep;
             if (!string.IsNullOrWhiteSpace(config.BaselineCommitSha))
             {
-                // Use baseline commit tree — the definitive "clean" file set
                 _logger.LogInformation("Using BaselineCommitSha {Sha} for repo reset", config.BaselineCommitSha[..Math.Min(8, config.BaselineCommitSha.Length)]);
                 filesToKeep = (await _github.GetRepositoryTreeForCommitAsync(config.BaselineCommitSha, ct)).ToList();
             }
             else
             {
-                // Fallback: preserve files from caveats list
                 filesToKeep = files.Where(f => IsFilePreserved(f, preserveFiles)).ToList();
             }
 
@@ -316,24 +365,8 @@ public sealed class ConfigurationService
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Atomic repo clean failed, falling back to file-by-file deletion");
-                result.Errors.Add($"Atomic clean failed: {ex.Message}");
-
-                // Fallback: delete files one by one
-                var filesToDelete = files.Where(f => !IsFilePreserved(f, preserveFiles)).ToList();
-                foreach (var file in filesToDelete)
-                {
-                    try
-                    {
-                        await _github.DeleteFileAsync(file, $"Cleanup: remove {file}", config.DefaultBranch, ct);
-                        result.FilesDeleted++;
-                    }
-                    catch (Exception ex2)
-                    {
-                        _logger.LogWarning(ex2, "Failed to delete file {File}", file);
-                    }
-                }
-                result.FilesPreserved = files.Count - result.FilesDeleted;
+                _logger.LogError(ex, "Atomic repo clean failed");
+                result.Errors.Add($"Repo file cleanup failed: {ex.Message}");
             }
 
             // ── Phase 3: Reset internal state ────────────────────────
