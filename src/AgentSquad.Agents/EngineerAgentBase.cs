@@ -627,7 +627,9 @@ public abstract class EngineerAgentBase : AgentBase
                     "Do NOT create files that duplicate existing functionality. " +
                     "Place new files in the appropriate existing directories. " +
                     "Use namespaces consistent with existing code. " +
-                    "If you need to add functionality that relates to an existing file, MODIFY that file instead of creating a new one.\n");
+                    "If you need to add functionality that relates to an existing file, MODIFY that file instead of creating a new one. " +
+                    "ESPECIALLY for model/type definitions: check if the type already exists in an existing file (e.g., a shared Models file) before creating a new file for it. " +
+                    "Creating a duplicate type definition in a separate file will cause build errors.\n");
             }
 
             contextBuilder.AppendLine($"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n");

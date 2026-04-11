@@ -1,46 +1,27 @@
+using System.Text.Json.Serialization;
+
 namespace ReportingDashboard.Models;
 
-public record DashboardData
+public class DashboardData
 {
-    public ProjectInfo? Project { get; init; }
-    public List<Milestone> Milestones { get; init; } = [];
-    public List<WorkItem> Shipped { get; init; } = [];
-    public List<WorkItem> InProgress { get; init; } = [];
-    public List<WorkItem> CarriedOver { get; init; } = [];
-    public MonthSummary? CurrentMonth { get; init; }
-    public string? ErrorMessage { get; init; }
-}
+    [JsonPropertyName("title")]
+    public string Title { get; set; } = "";
 
-public record ProjectInfo
-{
-    public string Name { get; init; } = "Untitled Project";
-    public string? Lead { get; init; }
-    public string Status { get; init; } = "Unknown";
-    public string? LastUpdated { get; init; }
-    public string? Summary { get; init; }
-}
+    [JsonPropertyName("subtitle")]
+    public string Subtitle { get; set; } = "";
 
-public record Milestone
-{
-    public string Title { get; init; } = "";
-    public string? TargetDate { get; init; }
-    public string Status { get; init; } = "Upcoming";
-}
+    [JsonPropertyName("backlogLink")]
+    public string BacklogLink { get; set; } = "";
 
-public record WorkItem
-{
-    public string Title { get; init; } = "";
-    public string? Description { get; init; }
-    public string? Category { get; init; }
-    public int PercentComplete { get; init; }
-    public string? CarryOverReason { get; init; }
-}
+    [JsonPropertyName("currentMonth")]
+    public string CurrentMonth { get; set; } = "";
 
-public record MonthSummary
-{
-    public string? Month { get; init; }
-    public int TotalItems { get; init; }
-    public int CompletedItems { get; init; }
-    public int CarriedItems { get; init; }
-    public string OverallHealth { get; init; } = "Unknown";
+    [JsonPropertyName("months")]
+    public List<string> Months { get; set; } = new();
+
+    [JsonPropertyName("timeline")]
+    public TimelineData Timeline { get; set; } = new();
+
+    [JsonPropertyName("heatmap")]
+    public HeatmapData Heatmap { get; set; } = new();
 }
