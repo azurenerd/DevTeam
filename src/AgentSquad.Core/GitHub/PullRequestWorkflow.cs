@@ -32,6 +32,10 @@ public partial class PullRequestWorkflow
         public const string Approved = "approved";
         public const string InProgress = "in-progress";
         public const string TestsAdded = "tests-added";
+        /// <summary>Architect approved (Phase 1 gate) — triggers TE testing.</summary>
+        public const string ArchitectApproved = "architect-approved";
+        /// <summary>PM approved (Phase 3 final gate) — triggers merge.</summary>
+        public const string PmApproved = "pm-approved";
         public const string HighComplexity = "complexity-high";
         public const string MediumComplexity = "complexity-medium";
         public const string LowComplexity = "complexity-low";

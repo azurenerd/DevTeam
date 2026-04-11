@@ -508,6 +508,13 @@ public class ArchitectAgent : AgentBase
                     continue;
                 }
 
+                // Skip PRs already architect-approved (Phase 1 complete)
+                if (pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
+                {
+                    _reviewedPrNumbers.Add(prNumber);
+                    continue;
+                }
+
                 // Dedup across restarts: check GitHub comments to see if we already reviewed
                 // BUT always process force-approval PRs regardless
                 if (!_forceApprovalPrs.Contains(prNumber) &&
@@ -556,18 +563,35 @@ public class ArchitectAgent : AgentBase
 
                 if (verdict == "APPROVED")
                 {
-                    var requireTests = _config.Workspace.IsInlineTestWorkflow;
-                    var result = await _prWorkflow.ApproveAndMaybeMergeAsync(
-                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}",
-                        requireTests, ct);
+                    // Phase 1 complete: Architect approved → add architect-approved label, do NOT merge.
+                    // The TE will pick up the PR next (Phase 2), then PM reviews last (Phase 3).
+                    var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
+                    await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
                     Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
-                    if (result == MergeAttemptResult.AwaitingTests)
-                        LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title} — awaiting TE tests before merge");
-                    else
-                        LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title}");
+
+                    // Add architect-approved label
+                    var updatedLabels = pr.Labels
+                        .Where(l => !string.Equals(l, PullRequestWorkflow.Labels.ReadyForReview, StringComparison.OrdinalIgnoreCase))
+                        .Append(PullRequestWorkflow.Labels.ArchitectApproved)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
+
+                    LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title} — TE testing next");
                     await RememberAsync(MemoryType.Decision,
                         $"Architecture review approved PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reasoning), ct);
+
+                    // Notify TE via bus that PR is ready for testing
+                    await _messageBus.PublishAsync(new StatusUpdateMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "StatusUpdate",
+                        NewStatus = AgentStatus.Working,
+                        CurrentTask = $"PR #{pr.Number} architect-approved — ready for TE testing",
+                        Details = $"PR #{pr.Number}: {pr.Title} has passed architecture review"
+                    }, ct);
                 }
                 else if (verdict == "REWORK")
                 {

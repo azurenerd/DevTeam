@@ -113,8 +113,23 @@ public class LimitsConfig
     /// <summary>
     /// Maximum number of rework cycles (review → change → re-review) per PR before
     /// the reviewer force-approves to prevent infinite loops.
+    /// This is the default fallback; prefer the phase-specific limits below.
     /// </summary>
     public int MaxReworkCycles { get; set; } = 3;
+
+    /// <summary>
+    /// Maximum Architect ↔ Engineer rework cycles per PR.
+    /// Architect reviews first (Phase 1); after this limit, force-approve and proceed to TE testing.
+    /// Falls back to MaxReworkCycles if not explicitly set.
+    /// </summary>
+    public int MaxArchitectReworkCycles { get; set; } = 3;
+
+    /// <summary>
+    /// Maximum PM ↔ Engineer rework cycles per PR.
+    /// PM reviews last (Phase 3, after TE adds tests); after this limit, force-approve and merge.
+    /// Falls back to MaxReworkCycles if not explicitly set.
+    /// </summary>
+    public int MaxPmReworkCycles { get; set; } = 3;
 
     /// <summary>
     /// Maximum rework cycles for Test Engineer source-bug feedback, tracked independently

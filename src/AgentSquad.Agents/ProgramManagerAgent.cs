@@ -843,6 +843,22 @@ public class ProgramManagerAgent : AgentBase
             while (_reviewQueue.TryDequeue(out var prNumber))
                 prNumbersToReview.Add(prNumber);
 
+            // Phase 3 polling: also scan for PRs with tests-added that PM hasn't reviewed yet
+            if (_config.Workspace.IsInlineTestWorkflow)
+            {
+                var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+                foreach (var openPr in openPRs)
+                {
+                    if (_reviewedPrNumbers.Contains(openPr.Number)) continue;
+                    // PM reviews after TE has added tests (Phase 3 gate)
+                    if (openPr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase) &&
+                        !openPr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
+                    {
+                        prNumbersToReview.Add(openPr.Number);
+                    }
+                }
+            }
+
             if (prNumbersToReview.Count == 0)
                 return;
 
@@ -865,6 +881,22 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
+                // Phase 3 gate: PM only reviews AFTER TE has added tests (inline workflow)
+                if (_config.Workspace.IsInlineTestWorkflow &&
+                    !_forceApprovalPrs.Contains(prNumber) &&
+                    !pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
+                {
+                    Logger.LogDebug("PM skipping PR #{Number} — waiting for TE to add tests (Phase 2)", prNumber);
+                    continue; // Don't mark as reviewed — we'll check again next cycle
+                }
+
+                // Skip PRs already PM-approved
+                if (pr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
+                {
+                    _reviewedPrNumbers.Add(prNumber);
+                    continue;
+                }
+
                 // Skip if we've already posted a review comment (GitHub check)
                 // BUT always process force-approval PRs regardless
                 if (!_forceApprovalPrs.Contains(prNumber) &&
@@ -874,25 +906,17 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
-                Logger.LogInformation("PM reviewing PR #{Number}: {Title}", pr.Number, pr.Title);
+                Logger.LogInformation("PM reviewing PR #{Number}: {Title} (Phase 3 — final review after TE tests)",
+                    pr.Number, pr.Title);
                 UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
 
-                // BUG FIX: After max rework cycles, force-approve instead of continuing
-                // to request changes. Only if PM is a required reviewer for this PR.
                 bool approved;
                 string? reviewBody;
                 if (_forceApprovalPrs.Contains(prNumber))
                 {
                     _forceApprovalPrs.Remove(prNumber);
-                    var requiredReviewers = PullRequestWorkflow.GetRequiredReviewers(authorRole);
-                    if (!requiredReviewers.Any(r => r.Contains("ProgramManager", StringComparison.OrdinalIgnoreCase)))
-                    {
-                        Logger.LogInformation("PM is not a required reviewer for PR #{Number} — skipping force-approval", prNumber);
-                        _reviewedPrNumbers.Add(prNumber);
-                        continue;
-                    }
                     approved = true;
-                    reviewBody = $"Force-approving after maximum rework cycles reached. " +
+                    reviewBody = $"Force-approving after maximum PM rework cycles reached. " +
                         $"The PR has been through multiple review iterations and the engineer " +
                         $"has made best-effort improvements.";
                 }
@@ -918,32 +942,35 @@ public class ProgramManagerAgent : AgentBase
 
                 if (approved)
                 {
-                    var requireTests = _config.Workspace.IsInlineTestWorkflow;
-                    var result = await _prWorkflow.ApproveAndMaybeMergeAsync(
-                        pr.Number, "ProgramManager", reviewBody, requireTests, ct);
-                    if (result == MergeAttemptResult.Merged)
+                    // Phase 3 complete: PM approved → add pm-approved label → triggers merge by PE
+                    var approvalComment = string.IsNullOrWhiteSpace(reviewBody)
+                        ? "**[ProgramManager] APPROVED**"
+                        : $"**[ProgramManager] APPROVED**\n\n{reviewBody}";
+                    await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
+                    Logger.LogInformation("PM approved PR #{Number} (Phase 3 final approval)", pr.Number);
+
+                    // Add pm-approved label — this is the final gate before merge
+                    var updatedLabels = pr.Labels
+                        .Append(PullRequestWorkflow.Labels.PmApproved)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
+
+                    LogActivity("task", $"✅ PM final approval on PR #{pr.Number}: {pr.Title} — ready to merge");
+                    await RememberAsync(MemoryType.Decision,
+                        $"PM final approval on PR #{pr.Number}: {pr.Title}",
+                        TruncateForMemory(reviewBody), ct);
+
+                    // Notify PE to merge
+                    await _messageBus.PublishAsync(new StatusUpdateMessage
                     {
-                        Logger.LogInformation("PM approved and merged PR #{Number}", pr.Number);
-                        LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title}");
-                        await RememberAsync(MemoryType.Decision,
-                            $"Approved and merged PR #{pr.Number}: {pr.Title}",
-                            TruncateForMemory(reviewBody), ct);
-                    }
-                    else if (result == MergeAttemptResult.AwaitingTests)
-                    {
-                        Logger.LogInformation("PM approved PR #{Number}, waiting for Test Engineer to add tests before merge", pr.Number);
-                        LogActivity("task", $"✅ Approved PR #{pr.Number}, awaiting TE tests before merge");
-                    }
-                    else if (result == MergeAttemptResult.ConflictBlocked)
-                    {
-                        Logger.LogWarning("PM approved PR #{Number} but merge blocked by conflicts", pr.Number);
-                        LogActivity("task", $"⚠️ Approved PR #{pr.Number} but merge blocked by conflicts — PE will handle");
-                    }
-                    else
-                    {
-                        Logger.LogInformation("PM approved PR #{Number}, waiting for PE approval", pr.Number);
-                        LogActivity("task", $"✅ Approved PR #{pr.Number}, waiting for PE approval");
-                    }
+                        FromAgentId = Identity.Id,
+                        ToAgentId = "*",
+                        MessageType = "StatusUpdate",
+                        NewStatus = AgentStatus.Working,
+                        CurrentTask = $"PR #{pr.Number} pm-approved — ready for merge",
+                        Details = $"PR #{pr.Number}: {pr.Title} has passed final PM review"
+                    }, ct);
                 }
                 else
                 {
@@ -1787,22 +1814,66 @@ public class ProgramManagerAgent : AgentBase
             // Read actual code files from the PR branch
             var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
+            // Gather TE visual evidence (screenshots/videos) from PR comments for Phase 3 validation
+            var visualContext = "";
+            try
+            {
+                var comments = await _github.GetPullRequestCommentsAsync(pr.Number, ct);
+                var teVisualComments = comments
+                    .Where(c => c.Body.Contains("[Test Engineer]", StringComparison.OrdinalIgnoreCase) ||
+                                c.Body.Contains("[TestEngineer]", StringComparison.OrdinalIgnoreCase))
+                    .Where(c => c.Body.Contains("screenshot", StringComparison.OrdinalIgnoreCase) ||
+                                c.Body.Contains("![", StringComparison.Ordinal) ||
+                                c.Body.Contains("video", StringComparison.OrdinalIgnoreCase) ||
+                                c.Body.Contains(".png", StringComparison.OrdinalIgnoreCase) ||
+                                c.Body.Contains(".mp4", StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                if (teVisualComments.Count > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.AppendLine("## Test Engineer Visual Evidence");
+                    sb.AppendLine("The Test Engineer has posted the following screenshots/videos of the feature:");
+                    foreach (var comment in teVisualComments)
+                    {
+                        sb.AppendLine();
+                        sb.AppendLine(comment.Body);
+                    }
+                    visualContext = sb.ToString();
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Could not fetch TE visual comments for PR #{Number}", pr.Number);
+            }
+
             var history = new ChatHistory();
-            history.AddSystemMessage(
-                "You are a PM reviewing a PR for requirements alignment ONLY.\n\n" +
+            var systemPrompt =
+                "You are a PM performing the FINAL review of a PR (Phase 3: after Architect approval and Test Engineer testing).\n\n" +
                 "SCOPE: This PR is ONE task. Check it against its linked user story/issue and " +
                 "the PM Spec context for that feature.\n\n" +
-                "CHECK: Are the acceptance criteria from the user story met? Does the feature " +
-                "align with the PM Spec vision for this area of the product?\n\n" +
-                "IGNORE: code quality, null checks, error handling, naming, tests, architecture, " +
+                "CHECK:\n" +
+                "1. Are the acceptance criteria from the user story met?\n" +
+                "2. Does the feature align with the PM Spec vision for this area of the product?\n";
+
+            if (!string.IsNullOrEmpty(visualContext))
+            {
+                systemPrompt +=
+                    "3. VISUAL VALIDATION: The Test Engineer has posted screenshots/videos. " +
+                    "Review them to verify the UI matches the design expectations from the PM Spec. " +
+                    "Check layout, styling, content accuracy, and user experience quality.\n";
+            }
+
+            systemPrompt +=
+                "\nIGNORE: code quality, null checks, error handling, naming, tests, architecture, " +
                 "specific method/class implementations, file completeness, PR metadata/checkboxes. " +
                 "Do NOT reference specific code files, methods, or classes — you review REQUIREMENTS, " +
-                "not code. The Principal Engineer reviews code quality.\n\n" +
+                "not code. The Architect and Principal Engineer review code quality.\n\n" +
                 "IMPORTANT: Code may appear truncated in your review context due to length limits — " +
                 "this is a tooling limitation, NOT a code defect. Do NOT request changes for " +
                 "truncated code or incomplete-looking files.\n\n" +
-                "Only request changes when a user story acceptance criterion is clearly unmet or " +
-                "the feature contradicts the PM Spec.\n\n" +
+                "Only request changes when a user story acceptance criterion is clearly unmet, " +
+                "the feature contradicts the PM Spec, or visual evidence shows the UI doesn't match expectations.\n\n" +
                 "RESPONSE FORMAT — your ENTIRE response must be ONLY:\n" +
                 "- If requesting changes: a **numbered list** (1. 2. 3.) starting on the FIRST line. " +
                 "Each item references an acceptance criterion by name. Nothing before the list. " +
@@ -1810,14 +1881,20 @@ public class ProgramManagerAgent : AgentBase
                 "- If approving: one sentence only.\n" +
                 "- Last line: VERDICT: APPROVE or VERDICT: REQUEST_CHANGES\n\n" +
                 "WRONG: 'Let me review... Based on the PMSpec... 1. Missing feature'\n" +
-                "RIGHT: '1. Acceptance criterion \"PDF export\" is not implemented'");
+                "RIGHT: '1. Acceptance criterion \"PDF export\" is not implemented'";
 
-            history.AddUserMessage(
-                $"## PM Specification\n{pmSpec}\n\n" +
+            history.AddSystemMessage(systemPrompt);
+
+            var userMessage = $"## PM Specification\n{pmSpec}\n\n" +
                 $"## Engineering Plan\n{engineeringPlan}\n\n" +
                 issueContext +
                 $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}\n\n" +
-                codeContext);
+                codeContext;
+
+            if (!string.IsNullOrEmpty(visualContext))
+                userMessage += $"\n\n{visualContext}";
+
+            history.AddUserMessage(userMessage);
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 

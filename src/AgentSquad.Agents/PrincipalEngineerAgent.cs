@@ -1461,13 +1461,14 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             {
                 if (ct.IsCancellationRequested) break;
 
-                // Must have BOTH approved (code reviewed) and tests-added (TE finished)
-                bool hasApproved = pr.Labels.Contains(
-                    PullRequestWorkflow.Labels.Approved, StringComparer.OrdinalIgnoreCase);
+                // Must have pm-approved (PM final review done) AND tests-added (TE finished)
+                // This is the Phase 3 sequential flow: Architect → TE → PM → merge
+                bool hasPmApproved = pr.Labels.Contains(
+                    PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase);
                 bool hasTests = pr.Labels.Contains(
                     PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase);
 
-                if (!hasApproved || !hasTests)
+                if (!hasPmApproved || !hasTests)
                     continue;
 
                 // Skip our own PRs
@@ -1480,7 +1481,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     continue;
 
                 Logger.LogInformation(
-                    "Found approved+tested PR #{Number}: {Title} — reviewing tests and merging",
+                    "Found pm-approved+tested PR #{Number}: {Title} — reviewing tests and merging",
                     pr.Number, pr.Title);
                 UpdateStatus(AgentStatus.Working, $"Reviewing tests on PR #{pr.Number}");
 

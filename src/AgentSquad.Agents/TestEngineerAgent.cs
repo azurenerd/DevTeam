@@ -341,8 +341,8 @@ public class TestEngineerAgent : AgentBase
 
                 // Check if the PR no longer has CHANGES_REQUESTED (engineer addressed feedback)
                 // The engineer's HandleReworkAsync re-requests review after fixing, which clears CHANGES_REQUESTED.
-                // We detect this by checking if the approved label is back.
-                if (pendingPr.Labels.Contains(PullRequestWorkflow.Labels.Approved, StringComparer.OrdinalIgnoreCase))
+                // We detect this by checking if the architect-approved label is still present.
+                if (pendingPr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
                 {
                     Logger.LogInformation(
                         "TestEngineer: PR #{Number} was re-approved after source bug fix — re-testing",
@@ -378,8 +378,8 @@ public class TestEngineerAgent : AgentBase
         {
             if (ct.IsCancellationRequested) break;
 
-            // Gate: must have 'approved' label (PE has reviewed the code)
-            if (!pr.Labels.Contains(PullRequestWorkflow.Labels.Approved, StringComparer.OrdinalIgnoreCase))
+            // Gate: must have 'architect-approved' label (Phase 1 complete — Architect reviewed)
+            if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
                 continue;
 
             // Skip PRs that already have tests
@@ -1279,8 +1279,8 @@ public class TestEngineerAgent : AgentBase
             {
                 if (_testedPRs.Contains(pr.Number)) continue;
 
-                // Only count approved PRs (the ones we're responsible for)
-                if (!pr.Labels.Contains(PullRequestWorkflow.Labels.Approved, StringComparer.OrdinalIgnoreCase))
+                // Only count architect-approved PRs (Phase 1 complete, our responsibility)
+                if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
                     continue;
                 if (pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
                     continue;
