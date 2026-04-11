@@ -211,7 +211,7 @@ else {
                 Write-Host "      Closed $issueClosed issue(s) — verified 0 open remain" -ForegroundColor Green
                 break
             }
-            Write-Host "      Attempt $attempt/$maxRetries: closed $issueClosed but $($remainingIssues.Count) still open, retrying..." -ForegroundColor DarkYellow
+            Write-Host "      Attempt ${attempt}/${maxRetries}: closed $issueClosed but $($remainingIssues.Count) still open, retrying..." -ForegroundColor DarkYellow
         }
         if ($remainingIssues.Count -gt 0) {
             Write-Host "      WARNING: $($remainingIssues.Count) issue(s) still open after $maxRetries attempts!" -ForegroundColor Red
@@ -245,7 +245,7 @@ else {
                 Write-Host "      Closed $prClosed PR(s) — verified 0 open remain" -ForegroundColor Green
                 break
             }
-            Write-Host "      Attempt $attempt/$maxRetries: closed $prClosed but $($remainingPrs.Count) still open, retrying..." -ForegroundColor DarkYellow
+            Write-Host "      Attempt ${attempt}/${maxRetries}: closed $prClosed but $($remainingPrs.Count) still open, retrying..." -ForegroundColor DarkYellow
         }
         if ($remainingPrs.Count -gt 0) {
             Write-Host "      WARNING: $($remainingPrs.Count) PR(s) still open after $maxRetries attempts!" -ForegroundColor Red
