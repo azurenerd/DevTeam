@@ -56,9 +56,10 @@ public class AgentSquadWorker : BackgroundService
             _logger.LogInformation("Resumed from checkpoint — workflow phase: {Phase}", _workflow.CurrentPhase);
         }
 
-        // Clean up stale .agentsquad task lock files from the repo so they don't
-        // confuse fresh runs with phantom "in-progress" tasks from previous sessions
-        await _prWorkflow.CleanupStaleTaskFilesAsync(ct);
+        // NOTE: We intentionally do NOT clean .agentsquad task lock files on startup.
+        // If the runner crashed or the machine restarted, those locks reflect real in-progress
+        // work that the recovered workflow state machine will resume. Task locks are only
+        // cleaned during an explicit "full reset" via the Dashboard cleanup UI.
 
         // Spawn all core agents
         var roles = new[]

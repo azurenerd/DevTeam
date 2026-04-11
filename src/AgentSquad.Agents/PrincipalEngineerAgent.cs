@@ -1505,10 +1505,6 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 if (!hasPmApproved || !hasTests)
                     continue;
 
-                // Skip our own PRs
-                if (pr.Title.StartsWith($"{Identity.DisplayName}:", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
                 // Skip if we already processed this PR in this cycle
                 if (_reviewedPrNumbers.Contains(pr.Number) &&
                     !_mergedTestedPrNumbers.Add(pr.Number))
