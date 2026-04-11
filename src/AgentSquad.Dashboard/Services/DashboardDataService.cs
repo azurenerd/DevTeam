@@ -857,7 +857,8 @@ public sealed class DashboardDataService : BackgroundService
 
         try
         {
-            _cachedPullRequests = await _github.GetAllPullRequestsAsync();
+            var allPrs = await _github.GetAllPullRequestsAsync();
+            _cachedPullRequests = allPrs.Where(pr => pr.CreatedAt >= _stateStore.RunStartedUtc).ToList();
             _lastPrFetchUtc = DateTime.UtcNow;
         }
         catch (Exception ex)
@@ -877,7 +878,8 @@ public sealed class DashboardDataService : BackgroundService
 
         try
         {
-            _cachedIssues = await _github.GetAllIssuesAsync();
+            var allIssues = await _github.GetAllIssuesAsync();
+            _cachedIssues = allIssues.Where(i => i.CreatedAt >= _stateStore.RunStartedUtc).ToList();
             _lastIssueFetchUtc = DateTime.UtcNow;
         }
         catch (Exception ex)

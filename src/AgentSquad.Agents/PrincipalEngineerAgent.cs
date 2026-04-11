@@ -1915,8 +1915,20 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     + _registry.GetAgentsByRole(AgentRole.SeniorEngineer).Count()
                     + _registry.GetAgentsByRole(AgentRole.JuniorEngineer).Count();
                 if (currentWorkers > _agentAssignments.Count + 1) // +1 for leader
+                {
                     _resourceRequestPending = false;
-                return;
+                }
+                else if (DateTime.UtcNow - _lastResourceRequestTime > SpawnCooldown)
+                {
+                    // Cooldown expired — clear the flag and fall through to re-evaluate.
+                    // This handles the case where the spawned worker immediately picks up
+                    // a task, making the worker-count check never pass.
+                    _resourceRequestPending = false;
+                }
+                else
+                {
+                    return;
+                }
             }
 
             var parallelizable = _taskManager.Tasks.Count(t =>

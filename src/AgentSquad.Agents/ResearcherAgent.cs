@@ -386,11 +386,28 @@ public class ResearcherAgent : AgentBase
 
         var currentSection = "";
         var lines = synthesis.Split('\n');
+        var inCodeBlock = false;
 
         foreach (var rawLine in lines)
         {
+            // Track fenced code blocks — don't parse lines inside them as structure
+            if (rawLine.TrimStart().StartsWith("```"))
+            {
+                inCodeBlock = !inCodeBlock;
+                // Append the fence line to the last item in the current list so code blocks stay intact
+                AppendToLastItem(currentSection, rawLine, keyFindings, recommendedTools, considerations, ref summary);
+                continue;
+            }
+
+            if (inCodeBlock)
+            {
+                // Inside a code block — append raw line (preserve indentation) to current item
+                AppendToLastItem(currentSection, rawLine, keyFindings, recommendedTools, considerations, ref summary);
+                continue;
+            }
+
             var line = rawLine.Trim();
-            var isHeader = line.StartsWith('#') || line.StartsWith('*') || line.StartsWith("**");
+            var isHeader = line.StartsWith('#') || (line.StartsWith("**") && line.EndsWith("**") && !line.StartsWith("**-"));
 
             if (isHeader)
             {
@@ -436,6 +453,10 @@ public class ResearcherAgent : AgentBase
             if (string.IsNullOrWhiteSpace(line))
                 continue;
 
+            // Lines starting with bullet markers are new items; continuation lines append
+            var isBulletStart = line.StartsWith("- ") || line.StartsWith("* ")
+                || (line.Length > 2 && char.IsDigit(line[0]) && line[1] == '.')
+                || (line.Length > 3 && char.IsDigit(line[0]) && char.IsDigit(line[1]) && line[2] == '.');
             var bulletContent = StripBulletPrefix(line);
 
             switch (currentSection)
@@ -446,13 +467,22 @@ public class ResearcherAgent : AgentBase
                         : $"{summary} {bulletContent}";
                     break;
                 case "findings":
-                    keyFindings.Add(bulletContent);
+                    if (isBulletStart || keyFindings.Count == 0)
+                        keyFindings.Add(bulletContent);
+                    else
+                        keyFindings[^1] += " " + bulletContent;
                     break;
                 case "tools":
-                    recommendedTools.Add(bulletContent);
+                    if (isBulletStart || recommendedTools.Count == 0)
+                        recommendedTools.Add(bulletContent);
+                    else
+                        recommendedTools[^1] += " " + bulletContent;
                     break;
                 case "considerations":
-                    considerations.Add(bulletContent);
+                    if (isBulletStart || considerations.Count == 0)
+                        considerations.Add(bulletContent);
+                    else
+                        considerations[^1] += " " + bulletContent;
                     break;
             }
         }
@@ -465,6 +495,32 @@ public class ResearcherAgent : AgentBase
             Considerations = considerations,
             DetailedAnalysis = detailedAnalysis
         };
+    }
+
+    /// <summary>
+    /// Appends a raw line to the last item in the current section's list.
+    /// Used for code block lines that should stay attached to the preceding bullet.
+    /// </summary>
+    private static void AppendToLastItem(
+        string section, string rawLine,
+        List<string> findings, List<string> tools, List<string> considerations,
+        ref string summary)
+    {
+        switch (section)
+        {
+            case "summary":
+                summary += "\n" + rawLine;
+                break;
+            case "findings":
+                if (findings.Count > 0) findings[^1] += "\n" + rawLine;
+                break;
+            case "tools":
+                if (tools.Count > 0) tools[^1] += "\n" + rawLine;
+                break;
+            case "considerations":
+                if (considerations.Count > 0) considerations[^1] += "\n" + rawLine;
+                break;
+        }
     }
 
     private static string StripBulletPrefix(string line)

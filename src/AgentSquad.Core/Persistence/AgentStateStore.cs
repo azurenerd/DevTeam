@@ -118,9 +118,29 @@ public class AgentStateStore : IDisposable
                 created_at     DATETIME NOT NULL DEFAULT (datetime('now')),
                 PRIMARY KEY (agent_role, item_type, item_id)
             );
+
+            CREATE TABLE IF NOT EXISTS run_metadata (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
+
+            INSERT OR IGNORE INTO run_metadata (key, value)
+            VALUES ('run_started_utc', datetime('now'));
             """;
         cmd.ExecuteNonQuery();
+
+        // Read run start time (set once on first DB creation, survives restarts)
+        using var readCmd = _connection.CreateCommand();
+        readCmd.CommandText = "SELECT value FROM run_metadata WHERE key = 'run_started_utc'";
+        var result = readCmd.ExecuteScalar();
+        RunStartedUtc = result is string s ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AssumeUniversal).ToUniversalTime() : DateTime.UtcNow;
     }
+
+    /// <summary>
+    /// The UTC timestamp when this run's database was first created.
+    /// Use this to filter GitHub API results to only the current run's data.
+    /// </summary>
+    public DateTime RunStartedUtc { get; private set; }
 
     /// <summary>Save or update an agent's checkpoint state.</summary>
     public async Task SaveCheckpointAsync(

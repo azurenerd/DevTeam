@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Dashboard.Services;
@@ -13,15 +14,17 @@ namespace AgentSquad.Dashboard.Services;
 public sealed partial class EngineeringPlanDataService
 {
     private readonly IGitHubService _github;
+    private readonly AgentStateStore _stateStore;
     private readonly ILogger<EngineeringPlanDataService> _logger;
 
     private EngineeringPlanViewModel? _cache;
     private DateTime _lastFetchUtc = DateTime.MinValue;
     private static readonly TimeSpan CacheExpiry = TimeSpan.FromSeconds(30);
 
-    public EngineeringPlanDataService(IGitHubService github, ILogger<EngineeringPlanDataService> logger)
+    public EngineeringPlanDataService(IGitHubService github, AgentStateStore stateStore, ILogger<EngineeringPlanDataService> logger)
     {
         _github = github;
+        _stateStore = stateStore;
         _logger = logger;
     }
 
@@ -34,12 +37,16 @@ public sealed partial class EngineeringPlanDataService
         {
             var openTasks = await _github.GetIssuesByLabelAsync("engineering-task", "open", ct);
             var closedTasks = await _github.GetIssuesByLabelAsync("engineering-task", "closed", ct);
-            var allTasks = openTasks.Concat(closedTasks).ToList();
+            var allTasks = openTasks.Concat(closedTasks)
+                .Where(i => i.CreatedAt >= _stateStore.RunStartedUtc)
+                .ToList();
 
             // Also fetch enhancement issues for parent grouping
             var openEnhancements = await _github.GetIssuesByLabelAsync("enhancement", "open", ct);
             var closedEnhancements = await _github.GetIssuesByLabelAsync("enhancement", "closed", ct);
-            var allEnhancements = openEnhancements.Concat(closedEnhancements).ToList();
+            var allEnhancements = openEnhancements.Concat(closedEnhancements)
+                .Where(i => i.CreatedAt >= _stateStore.RunStartedUtc)
+                .ToList();
 
             var nodes = new List<TaskNode>();
             var edges = new List<TaskEdge>();
