@@ -67,7 +67,14 @@ public class GitHubService : IGitHubService
 
                 if (labels.Length > 0)
                 {
-                    await _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, labels);
+                    try
+                    {
+                        await _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, labels);
+                    }
+                    catch (Exception labelEx)
+                    {
+                        _logger.LogWarning(labelEx, "Failed to add labels to PR #{Number} — PR was created successfully", pr.Number);
+                    }
                 }
 
                 return MapPullRequest(pr, labels.ToList());

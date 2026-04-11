@@ -292,6 +292,7 @@ public class TestEngineerAgent : AgentBase
             {
                 Logger.LogWarning(ex, "Failed to generate tests for merged PR #{Number}", pr.Number);
                 _testedPRs.Add(pr.Number); // Don't retry failed PRs indefinitely
+                _sessionTestedPRs.Add(pr.Number); // Count toward coverage even if PR creation failed
             }
         }
     }
