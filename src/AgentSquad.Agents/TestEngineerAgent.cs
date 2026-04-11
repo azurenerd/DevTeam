@@ -773,18 +773,30 @@ public class TestEngineerAgent : AgentBase
                 ? string.Join("\n", buildResult.ParsedErrors.Take(20))
                 : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
 
+            // Include project structure so AI knows real namespaces when fixing
+            var projectCtx = "";
+            try
+            {
+                projectCtx = DiscoverProjectStructure() ?? "";
+                if (projectCtx.Length > 0)
+                    projectCtx = "\n## Project Structure (Use ONLY These Real Namespaces)\n" + projectCtx;
+            }
+            catch { /* non-critical */ }
+
             var fixHistory = new ChatHistory();
             fixHistory.AddSystemMessage(
                 "You are a test engineer fixing build errors in test files. " +
                 "The test files were added to an existing PR branch and won't compile. " +
                 "Fix ONLY the test code — do NOT modify the source code under test.\n" +
-                "COMMON FIX: If errors are 'type or namespace not found', ensure the .csproj includes the missing " +
-                "NuGet PackageReference (e.g., FluentAssertions, Shouldly). Output the corrected .csproj too.\n\n" +
+                "COMMON FIX: If errors are 'type or namespace not found', check the project structure below for REAL namespaces. " +
+                "Do NOT invent namespaces — use ONLY those that actually exist in the project.\n" +
+                "Also ensure the .csproj includes the missing NuGet PackageReference. Output the corrected .csproj too.\n\n" +
                 "Output ONLY corrected files using:\nFILE: path/to/file.ext\n```language\n<content>\n```");
             fixHistory.AddUserMessage(
                 $"Build attempt {attempt + 1}/{wsConfig.MaxBuildRetries} failed.\n\n" +
                 $"## Build Errors\n\n{errorSummary}\n\n" +
-                $"## Test Files\n\n" +
+                projectCtx +
+                $"\n## Test Files\n\n" +
                 string.Join("\n", testFiles.Select(f =>
                     $"### {f.Path}\n```\n{(f.Content.Length > 1500 ? f.Content[..1500] + "\n// ... truncated" : f.Content)}\n```")) +
                 "\n\nFix ALL build errors. Only modify test files.");
@@ -1942,7 +1954,139 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             Logger.LogDebug(ex, "Could not read Architecture.md for test context");
         }
 
+        // 4. Scan actual project structure so AI knows real namespaces, files, and organization
+        try
+        {
+            var projectStructure = DiscoverProjectStructure();
+            if (!string.IsNullOrWhiteSpace(projectStructure))
+            {
+                context.AppendLine("## Project Structure (IMPORTANT — Use These Real Namespaces)");
+                context.AppendLine("The target project has the following actual files and namespaces.");
+                context.AppendLine("You MUST use only namespaces and types that exist below.");
+                context.AppendLine("Do NOT invent namespaces like 'ProjectName.Models' or 'ProjectName.Components' unless they appear here.\n");
+                context.AppendLine(projectStructure);
+                context.AppendLine();
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not scan project structure for test context");
+        }
+
         return context.ToString();
+    }
+
+    /// <summary>
+    /// Scans the workspace to discover real project structure: file tree, namespaces, and .csproj contents.
+    /// This prevents the AI from inventing non-existent namespaces and types.
+    /// </summary>
+    private string? DiscoverProjectStructure()
+    {
+        if (_workspace?.RepoPath is null) return null;
+        var repoPath = _workspace.RepoPath;
+        var sb = new System.Text.StringBuilder();
+
+        // 1. Read main .csproj to get project name, target framework, and existing dependencies
+        var csprojFiles = Directory.EnumerateFiles(repoPath, "*.csproj", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("bin") && !f.Contains("obj") && !f.Contains("node_modules"))
+            .ToList();
+
+        foreach (var csproj in csprojFiles.Take(5))
+        {
+            var relPath = Path.GetRelativePath(repoPath, csproj);
+            try
+            {
+                var content = File.ReadAllText(csproj);
+                sb.AppendLine($"### {relPath}");
+                // Truncate very large csproj files
+                var truncated = content.Length > 3000 ? content[..3000] + "\n<!-- truncated -->" : content;
+                sb.AppendLine($"```xml\n{truncated}\n```\n");
+            }
+            catch { /* skip unreadable files */ }
+        }
+
+        // 2. List all source files with directory structure (compact tree)
+        var sourceExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ".cs", ".razor", ".cshtml", ".tsx", ".ts", ".jsx", ".js", ".vue", ".svelte",
+            ".py", ".rb", ".rs", ".go", ".java", ".kt", ".swift", ".json", ".css", ".html"
+        };
+        var allFiles = Directory.EnumerateFiles(repoPath, "*.*", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("bin") && !f.Contains("obj") && !f.Contains("node_modules")
+                     && !f.Contains(".git") && !f.Contains(".playwright"))
+            .Where(f => sourceExtensions.Contains(Path.GetExtension(f)))
+            .Select(f => Path.GetRelativePath(repoPath, f).Replace('\\', '/'))
+            .OrderBy(f => f)
+            .ToList();
+
+        if (allFiles.Count > 0)
+        {
+            sb.AppendLine("### File Tree");
+            sb.AppendLine("```");
+            foreach (var file in allFiles.Take(100)) // cap to prevent token explosion
+                sb.AppendLine(file);
+            if (allFiles.Count > 100)
+                sb.AppendLine($"... and {allFiles.Count - 100} more files");
+            sb.AppendLine("```\n");
+        }
+
+        // 3. Extract actual namespace declarations from .cs files
+        var namespaces = new SortedSet<string>(StringComparer.Ordinal);
+        var csFiles = Directory.EnumerateFiles(repoPath, "*.cs", SearchOption.AllDirectories)
+            .Where(f => !f.Contains("bin") && !f.Contains("obj") && !f.Contains("node_modules"))
+            .ToList();
+
+        foreach (var csFile in csFiles.Take(50))
+        {
+            try
+            {
+                // Read just first 30 lines to find namespace declaration
+                using var reader = new StreamReader(csFile);
+                for (var i = 0; i < 30 && !reader.EndOfStream; i++)
+                {
+                    var line = reader.ReadLine();
+                    if (line is null) break;
+                    var trimmed = line.Trim();
+                    // Match both "namespace X;" (file-scoped) and "namespace X {" (block)
+                    if (trimmed.StartsWith("namespace "))
+                    {
+                        var ns = trimmed.Replace("namespace ", "").TrimEnd(';', ' ', '{');
+                        if (!string.IsNullOrWhiteSpace(ns) && !ns.Contains("//"))
+                            namespaces.Add(ns);
+                        break;
+                    }
+                }
+            }
+            catch { /* skip unreadable files */ }
+        }
+
+        if (namespaces.Count > 0)
+        {
+            sb.AppendLine("### Actual Namespaces in Project");
+            sb.AppendLine("These are the REAL namespaces. Only use/reference these:");
+            sb.AppendLine("```");
+            foreach (var ns in namespaces)
+                sb.AppendLine(ns);
+            sb.AppendLine("```\n");
+        }
+
+        // 4. List Razor component names (important for Blazor test references)
+        var razorFiles = allFiles.Where(f => f.EndsWith(".razor", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (razorFiles.Count > 0)
+        {
+            sb.AppendLine("### Blazor Components");
+            sb.AppendLine("```");
+            foreach (var f in razorFiles)
+                sb.AppendLine(f);
+            sb.AppendLine("```\n");
+        }
+
+        var result = sb.ToString();
+        if (result.Length > 0)
+            Logger.LogInformation("Discovered project structure: {FileCount} files, {NsCount} namespaces, {RazorCount} Razor components",
+                allFiles.Count, namespaces.Count, razorFiles.Count);
+
+        return result.Length > 0 ? result : null;
     }
 
     /// <summary>
