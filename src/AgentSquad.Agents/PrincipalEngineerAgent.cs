@@ -429,6 +429,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "6. For each task, specify which files to create/modify and the namespace to use\n\n" +
             "## CRITICAL — Foundation Task (MUST be Task T1)\n" +
             "The FIRST task (T1) MUST ALWAYS be a 'Project Foundation & Scaffolding' task that:\n" +
+            "- Creates a proper .gitignore for the project's technology stack (e.g., bin/obj/node_modules/.env etc.) " +
+            "— this MUST be the very first file in T1 to prevent build artifacts from being committed\n" +
             "- Sets up the solution/project structure, build configuration, and shared infrastructure\n" +
             "- Creates the core data models, interfaces, and abstractions from the architecture document\n" +
             "- Establishes the directory layout, namespaces, and integration points that all other tasks build upon\n" +

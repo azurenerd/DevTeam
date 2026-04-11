@@ -937,6 +937,12 @@ public abstract class EngineerAgentBase : AgentBase
             "Produce clean, production-quality code for this step only. " +
             "If files from previous steps need updating, include the COMPLETE updated file. " +
             "Be thorough for this step but do not implement future steps.\n\n" +
+            (stepNumber == 1
+                ? "GITIGNORE RULE: If the project does not already have a .gitignore, create one as your FIRST file. " +
+                  "Include ALL standard ignores for the project's technology stack (e.g., bin/obj for .NET, " +
+                  "node_modules for Node.js, __pycache__ for Python, target for Rust/Java, etc.). " +
+                  "This prevents build artifacts from being committed.\n\n"
+                : "") +
             "DEPENDENCY RULE: Before using ANY external library, package, or framework, check the project's " +
             "dependency manifest (e.g., .csproj, package.json, requirements.txt, Cargo.toml, go.mod, pom.xml, etc.). " +
             "If a dependency is not already listed, add it to the manifest file and include that file in your output. " +
