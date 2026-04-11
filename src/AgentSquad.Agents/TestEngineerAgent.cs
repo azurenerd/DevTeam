@@ -1226,8 +1226,12 @@ public class TestEngineerAgent : AgentBase
         }
         else if (untestedCodePRs > 0)
         {
-            Logger.LogDebug("Coverage check: {Untested} untested code PRs remaining, {Tested} tested this session",
+            Logger.LogInformation("Coverage check: {Untested} untested code PRs remaining, {Tested} tested this session",
                 untestedCodePRs, _sessionTestedPRs.Count);
+        }
+        else if (_sessionTestedPRs.Count == 0)
+        {
+            Logger.LogInformation("Coverage check: no untested PRs but also no PRs tested this session yet");
         }
     }
 
