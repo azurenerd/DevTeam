@@ -117,6 +117,18 @@ public class LimitsConfig
     public int MaxReworkCycles { get; set; } = 3;
 
     /// <summary>
+    /// Maximum rework cycles for Test Engineer source-bug feedback, tracked independently
+    /// from peer review rework so TE feedback isn't blocked by exhausted peer review cycles.
+    /// </summary>
+    public int MaxTestReworkCycles { get; set; } = 2;
+
+    /// <summary>
+    /// Maximum times the Test Engineer will request source bug fixes from an engineer
+    /// for a single PR before giving up and removing the failing tests.
+    /// </summary>
+    public int MaxSourceBugRounds { get; set; } = 2;
+
+    /// <summary>
     /// If the Principal Engineer estimates all remaining tasks can be completed within
     /// this many minutes, it won't request additional engineers.
     /// </summary>

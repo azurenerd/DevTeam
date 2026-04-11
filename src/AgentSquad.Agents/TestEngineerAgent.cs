@@ -33,6 +33,17 @@ public class TestEngineerAgent : AgentBase
         ".razor", ".blazor", ".vue", ".svelte", ".rb", ".php", ".swift", ".kt"
     };
 
+    /// <summary>Classification of a test failure: is the bug in the test or the source?</summary>
+    internal enum FailureClassification { TestBug, SourceBug, Ambiguous }
+
+    /// <summary>Details of a source code bug found by a failing test.</summary>
+    internal sealed record SourceBugReport(
+        string TestName,
+        string SourceFile,
+        string SourceMethod,
+        string Issue,
+        string TestOutput);
+
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
     private readonly PullRequestWorkflow _prWorkflow;
@@ -55,6 +66,14 @@ public class TestEngineerAgent : AgentBase
     private readonly Dictionary<int, string> _prSessionIds = new();
     private readonly DateTime _sessionStartUtc = DateTime.UtcNow.AddHours(-4); // Look back 4h to catch PRs from recent runs without massive backlog
     private int? _currentTestPrNumber;
+
+    // Tracks PRs where TE found source bugs and is waiting for engineer to fix.
+    // Key = PR number, Value = number of source-bug rounds already requested.
+    private readonly Dictionary<int, int> _pendingSourceFixPRs = new();
+    // Stores the failing test details per PR so TE can re-run after engineer fixes.
+    private readonly Dictionary<int, List<SourceBugReport>> _pendingSourceBugDetails = new();
+    // Transient: holds source bugs from the last RunTestTierWithRetryAsync call for the caller to consume
+    private List<SourceBugReport> _lastClassifiedSourceBugs = new();
 
     public TestEngineerAgent(
         AgentIdentity identity,
@@ -312,6 +331,42 @@ public class TestEngineerAgent : AgentBase
             return;
 
         var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+
+        // Priority: re-test PRs where we previously found source bugs and the engineer may have pushed fixes
+        if (_pendingSourceFixPRs.Count > 0)
+        {
+            foreach (var pendingPr in openPRs.Where(p => _pendingSourceFixPRs.ContainsKey(p.Number)))
+            {
+                if (ct.IsCancellationRequested) break;
+
+                // Check if the PR no longer has CHANGES_REQUESTED (engineer addressed feedback)
+                // The engineer's HandleReworkAsync re-requests review after fixing, which clears CHANGES_REQUESTED.
+                // We detect this by checking if the approved label is back.
+                if (pendingPr.Labels.Contains(PullRequestWorkflow.Labels.Approved, StringComparer.OrdinalIgnoreCase))
+                {
+                    Logger.LogInformation(
+                        "TestEngineer: PR #{Number} was re-approved after source bug fix — re-testing",
+                        pendingPr.Number);
+                    _pendingSourceBugDetails.Remove(pendingPr.Number);
+                    // Don't remove from _pendingSourceFixPRs — the round count persists
+                    // Inline testing will re-run and either pass or escalate again
+                    // Re-fetch changed files and re-test
+                    try
+                    {
+                        var changedFiles = await _github.GetPullRequestChangedFilesAsync(pendingPr.Number, ct);
+                        var codeFiles = changedFiles
+                            .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
+                            .ToList();
+                        await AddInlineTestsToPRAsync(pendingPr, codeFiles, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogWarning(ex, "Re-test failed for source-fix PR #{Number}", pendingPr.Number);
+                    }
+                    return; // One PR at a time
+                }
+            }
+        }
 
         // Sort by creation date (oldest first = FIFO) so earlier PRs get tests first
         var candidates = openPRs
@@ -612,6 +667,50 @@ public class TestEngineerAgent : AgentBase
                         FailureDetails = [ex.Message]
                     });
                 }
+            }
+        }
+
+        // --- Phase 7.5: Escalate source bugs to PR author if found ---
+        var sourceBugs = _lastClassifiedSourceBugs;
+        _lastClassifiedSourceBugs = new(); // consume
+        if (sourceBugs.Count > 0)
+        {
+            var maxRounds = _config.Limits?.MaxSourceBugRounds ?? 2;
+            _pendingSourceFixPRs.TryGetValue(pr.Number, out var roundsSoFar);
+
+            if (roundsSoFar < maxRounds)
+            {
+                Logger.LogInformation(
+                    "TestEngineer: escalating {Count} source bug(s) on PR #{Number} (round {Round}/{Max})",
+                    sourceBugs.Count, pr.Number, roundsSoFar + 1, maxRounds);
+
+                _pendingSourceFixPRs[pr.Number] = roundsSoFar + 1;
+                _pendingSourceBugDetails[pr.Number] = sourceBugs;
+
+                // Commit & push the passing tests we DO have, then request changes
+                if (testFiles.Count > 0)
+                {
+                    await _workspace.CommitAsync($"test: add passing tests for PR #{pr.Number} (source bugs escalated)", ct);
+                    try { await _workspace.PushAsync(pr.HeadBranch, ct); }
+                    catch (Exception pushEx)
+                    {
+                        Logger.LogWarning(pushEx, "Push failed during source bug escalation for PR #{Number}", pr.Number);
+                    }
+                }
+
+                await RequestSourceBugFixesAsync(pr, sourceBugs, ct);
+                // Don't add tests-added label yet — waiting for engineer to fix source bugs
+                _testedPRs.Remove(pr.Number); // Allow re-test after engineer fixes
+                return;
+            }
+            else
+            {
+                Logger.LogWarning(
+                    "TestEngineer: source bug escalation exhausted ({Max} rounds) for PR #{Number} — removing failing tests",
+                    maxRounds, pr.Number);
+                _pendingSourceFixPRs.Remove(pr.Number);
+                _pendingSourceBugDetails.Remove(pr.Number);
+                // Fall through — commit whatever passing tests we have
             }
         }
 
@@ -2513,18 +2612,165 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 testResult = testResult with { Tier = tier };
             }
 
-            // Last resort: if tests still fail after all retries, remove failing tests
+            // Last resort: if tests still fail after all retries, classify and handle
             if (!testResult.Success)
             {
-                Logger.LogWarning("TestEngineer: {Tier} tests still failing after {Max} retries — removing unfixable tests",
+                Logger.LogWarning("TestEngineer: {Tier} tests still failing after {Max} retries — classifying failures",
                     tier, wsConfig.MaxTestRetries);
 
+                // Gather source files for classification context
+                var sourceFiles = new Dictionary<string, string>();
+                try
+                {
+                    var srcDir = Path.Combine(_workspace.RepoPath, "src");
+                    if (Directory.Exists(srcDir))
+                    {
+                        foreach (var f in Directory.EnumerateFiles(srcDir, "*.*", SearchOption.AllDirectories)
+                            .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
+                            .Take(10))
+                        {
+                            sourceFiles[Path.GetRelativePath(_workspace.RepoPath, f)] =
+                                await File.ReadAllTextAsync(f, ct);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "Could not read source files for failure classification");
+                }
+
+                var sourceBugs = await ClassifyTestFailuresAsync(testResult, sourceFiles, ct);
+                if (sourceBugs.Count > 0)
+                {
+                    Logger.LogInformation(
+                        "TestEngineer: classified {Count} source bug(s) in {Tier} tier",
+                        sourceBugs.Count, tier);
+                    // Store source bugs — the caller (inline pipeline) handles escalation
+                    _lastClassifiedSourceBugs = sourceBugs;
+                }
+
+                // Remove failing tests (both test bugs AND source bugs that can't be fixed here)
                 testResult = await RemoveFailingTestsForTierAsync(
                     tier, testResult, testCommand, timeoutSeconds, wsConfig, ct);
             }
         }
 
         return testResult;
+    }
+
+    /// <summary>
+    /// Uses AI to classify each test failure as a test bug (wrong test code) or a source bug
+    /// (real defect in the code under test). Returns a list of source bugs found.
+    /// </summary>
+    private async Task<List<SourceBugReport>> ClassifyTestFailuresAsync(
+        TestResult failingResult,
+        Dictionary<string, string> sourceFiles,
+        CancellationToken ct)
+    {
+        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+        var failureSummary = failingResult.FailureDetails.Count > 0
+            ? string.Join("\n\n", failingResult.FailureDetails.Take(15))
+            : failingResult.Output.Length > 3000 ? failingResult.Output[^3000..] : failingResult.Output;
+
+        var sourceContext = string.Join("\n\n", sourceFiles.Take(5).Select(kv =>
+            $"### {kv.Key}\n```\n{(kv.Value.Length > 2000 ? kv.Value[..2000] : kv.Value)}\n```"));
+
+        var history = new ChatHistory();
+        history.AddSystemMessage(
+            "You are an expert test engineer classifying test failures. " +
+            "For each failing test, determine if the failure is caused by:\n" +
+            "- TEST_BUG: The test itself is wrong (bad assertion, missing mock, wrong setup)\n" +
+            "- SOURCE_BUG: The source code has a real defect (logic error, null reference, wrong return value)\n" +
+            "- AMBIGUOUS: Cannot determine from available information\n\n" +
+            "Output ONLY a JSON array with one object per failure:\n" +
+            "[{\"test\": \"TestMethodName\", \"classification\": \"SOURCE_BUG\", " +
+            "\"sourceFile\": \"path/to/file.cs\", \"sourceMethod\": \"MethodName\", " +
+            "\"issue\": \"Brief description of the bug\", \"output\": \"Key error line\"}]\n\n" +
+            "Be conservative — only classify as SOURCE_BUG when the test logic is clearly correct " +
+            "and the source code clearly has a defect.");
+        history.AddUserMessage(
+            $"## Failing Tests\n{failureSummary}\n\n## Source Code Under Test\n{sourceContext}");
+
+        try
+        {
+            var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+            var content = response.Content ?? "";
+
+            // Extract JSON array from response
+            var jsonStart = content.IndexOf('[');
+            var jsonEnd = content.LastIndexOf(']');
+            if (jsonStart < 0 || jsonEnd < 0 || jsonEnd <= jsonStart)
+                return [];
+
+            var json = content[jsonStart..(jsonEnd + 1)];
+            var items = System.Text.Json.JsonSerializer.Deserialize<List<FailureClassificationItem>>(json,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+            if (items is null) return [];
+
+            return items
+                .Where(i => string.Equals(i.Classification, "SOURCE_BUG", StringComparison.OrdinalIgnoreCase))
+                .Select(i => new SourceBugReport(
+                    i.Test ?? "Unknown",
+                    i.SourceFile ?? "Unknown",
+                    i.SourceMethod ?? "Unknown",
+                    i.Issue ?? "Unspecified",
+                    i.Output ?? ""))
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to classify test failures — treating all as test bugs");
+            return [];
+        }
+    }
+
+    /// <summary>DTO for JSON deserialization of failure classification.</summary>
+    private sealed class FailureClassificationItem
+    {
+        public string? Test { get; set; }
+        public string? Classification { get; set; }
+        public string? SourceFile { get; set; }
+        public string? SourceMethod { get; set; }
+        public string? Issue { get; set; }
+        public string? Output { get; set; }
+    }
+
+    /// <summary>
+    /// Posts a structured source-bug report as a PR comment and requests changes
+    /// from the PR author so they fix the underlying code defects.
+    /// </summary>
+    private async Task RequestSourceBugFixesAsync(
+        AgentPullRequest pr, List<SourceBugReport> bugs, CancellationToken ct)
+    {
+        var bugList = string.Join("\n\n", bugs.Select((b, i) =>
+            $"### {i + 1}. `{b.TestName}`\n" +
+            $"**File:** `{b.SourceFile}` → `{b.SourceMethod}`\n" +
+            $"**Issue:** {b.Issue}\n" +
+            (string.IsNullOrWhiteSpace(b.TestOutput) ? "" : $"**Test output:** `{b.TestOutput}`")));
+
+        var comment =
+            $"🐛 **Test Engineer: Source Code Issues Found**\n\n" +
+            $"{EngineerAgentBase.TeSourceBugMarker}\n\n" +
+            $"The following tests expose potential bugs in the source code:\n\n" +
+            $"{bugList}\n\n" +
+            $"---\n" +
+            $"Please fix these issues. The Test Engineer will re-run tests after your changes.\n" +
+            $"Passing tests have been committed to this PR.";
+
+        await _github.AddPullRequestCommentAsync(pr.Number, comment, ct);
+
+        // Request changes via the PR workflow — this triggers the engineer's rework pipeline
+        await _prWorkflow.RequestChangesAsync(
+            pr.Number, Identity.DisplayName,
+            $"{EngineerAgentBase.TeSourceBugMarker} {bugs.Count} source code bug(s) found by test failures. See PR comments for details.",
+            ct);
+
+        Logger.LogInformation(
+            "TestEngineer: requested source fixes for {Count} bugs on PR #{Number}",
+            bugs.Count, pr.Number);
     }
 
     /// <summary>

@@ -37,6 +37,9 @@ public abstract class EngineerAgentBase : AgentBase
     // Track rework attempts per PR to enforce MaxReworkCycles limit.
     // Counts per review ROUND (not per individual reviewer feedback).
     protected readonly Dictionary<int, int> ReworkAttemptCounts = new();
+    // Separate counter for TE source-bug rework — tracked independently so TE feedback
+    // isn't blocked by exhausted peer review cycles.
+    protected readonly Dictionary<int, int> TeReworkAttemptCounts = new();
     // Prevent duplicate "max limit" comments when multiple reviewers' feedback arrives
     private readonly HashSet<int> _forceApprovalSentPrs = new();
     // Per-PR CLI session IDs — resumes the session used to create the PR during rework
@@ -1089,6 +1092,13 @@ public abstract class EngineerAgentBase : AgentBase
     #region Rework Handling
 
     /// <summary>
+    /// Marker prefix in review feedback that identifies Test Engineer source-bug reports.
+    /// When present, rework uses a separate counter (TeReworkAttemptCounts) so TE feedback
+    /// isn't blocked by exhausted peer review cycles.
+    /// </summary>
+    internal const string TeSourceBugMarker = "[TE-SOURCE-BUG]";
+
+    /// <summary>
     /// Addresses reviewer feedback on a PR. Batches feedback from multiple reviewers
     /// into a single rework round so the cycle count is per-round, not per-reviewer.
     /// </summary>
@@ -1100,16 +1110,33 @@ public abstract class EngineerAgentBase : AgentBase
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
             return;
 
-        // Enforce max rework cycles per PR. Counts per ROUND (all reviewer feedback
-        // in one cycle = one attempt) to prevent premature exhaustion with dual reviewers.
-        var attempts = ReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
-        ReworkAttemptCounts[rework.PrNumber] = attempts;
+        // Determine if this is TE source-bug feedback (uses separate counter + limit)
+        var isTeSourceBug = reworkBatch.Any(r =>
+            r.Feedback.Contains(TeSourceBugMarker, StringComparison.OrdinalIgnoreCase));
 
-        if (attempts >= Config.Limits.MaxReworkCycles)
+        int attempts;
+        int maxCycles;
+        if (isTeSourceBug)
         {
+            attempts = TeReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
+            TeReworkAttemptCounts[rework.PrNumber] = attempts;
+            maxCycles = Config.Limits.MaxTestReworkCycles;
+        }
+        else
+        {
+            // Enforce max rework cycles per PR. Counts per ROUND (all reviewer feedback
+            // in one cycle = one attempt) to prevent premature exhaustion with dual reviewers.
+            attempts = ReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
+            ReworkAttemptCounts[rework.PrNumber] = attempts;
+            maxCycles = Config.Limits.MaxReworkCycles;
+        }
+
+        if (attempts >= maxCycles)
+        {
+            var cycleType = isTeSourceBug ? "test rework" : "rework";
             Logger.LogWarning(
-                "{Role} {Name} reached max rework cycles ({Max}) for PR #{PrNumber}, requesting force-approval",
-                Identity.Role, Identity.DisplayName, Config.Limits.MaxReworkCycles, rework.PrNumber);
+                "{Role} {Name} reached max {CycleType} cycles ({Max}) for PR #{PrNumber}, requesting force-approval",
+                Identity.Role, Identity.DisplayName, cycleType, maxCycles, rework.PrNumber);
 
             // Only post the comment once per PR — check both in-memory set AND existing PR comments
             if (_forceApprovalSentPrs.Add(rework.PrNumber))
@@ -1117,14 +1144,15 @@ public abstract class EngineerAgentBase : AgentBase
                 // Check if a force-approval comment already exists (from prior run)
                 var existingComments = await GitHub.GetPullRequestCommentsAsync(rework.PrNumber, ct);
                 var alreadyPosted = existingComments.Any(c =>
-                    c.Body.Contains("maximum rework cycle limit", StringComparison.OrdinalIgnoreCase));
+                    c.Body.Contains("maximum rework cycle limit", StringComparison.OrdinalIgnoreCase) ||
+                    c.Body.Contains("maximum test rework cycle limit", StringComparison.OrdinalIgnoreCase));
 
                 if (!alreadyPosted)
                 {
                     await GitHub.AddPullRequestCommentAsync(
                         rework.PrNumber,
-                        $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit " +
-                        $"({Config.Limits.MaxReworkCycles}). Requesting final approval to unblock progress.",
+                        $"⚠️ **{Identity.DisplayName}** has reached the maximum {cycleType} cycle limit " +
+                        $"({maxCycles}). Requesting final approval to unblock progress.",
                         ct);
                 }
 
@@ -1146,10 +1174,10 @@ public abstract class EngineerAgentBase : AgentBase
         var combinedFeedback = string.Join("\n\n---\n\n",
             reworkBatch.Select(r => $"### Feedback from {r.Reviewer}\n{r.Feedback}"));
 
-        UpdateStatus(AgentStatus.Working, $"Addressing feedback on PR #{rework.PrNumber} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
-        LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {allReviewers} (attempt {attempts}/{Config.Limits.MaxReworkCycles})");
+        UpdateStatus(AgentStatus.Working, $"Addressing feedback on PR #{rework.PrNumber} (attempt {attempts}/{maxCycles})");
+        LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {allReviewers} (attempt {attempts}/{maxCycles})");
         Logger.LogInformation("{Role} {Name} reworking PR #{PrNumber} based on feedback from {Reviewers} (attempt {Attempt}/{Max})",
-            Identity.Role, Identity.DisplayName, rework.PrNumber, allReviewers, attempts, Config.Limits.MaxReworkCycles);
+            Identity.Role, Identity.DisplayName, rework.PrNumber, allReviewers, attempts, maxCycles);
 
         // Resume the CLI session that was used to create this PR
         ActivatePrSession(rework.PrNumber);
@@ -1242,7 +1270,7 @@ public abstract class EngineerAgentBase : AgentBase
                         _ = Metrics?.RecordReworkCompletedAsync(Identity.Id, ct);
 
                         await RememberAsync(MemoryType.Action,
-                            $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{Config.Limits.MaxReworkCycles})",
+                            $"Submitted rework for PR #{pr.Number} (attempt {attempts}/{maxCycles})",
                             $"Feedback from {allReviewers}. Changes: {TruncateForMemory(updatedImpl)}", ct);
                     }
                     else
@@ -1254,7 +1282,7 @@ public abstract class EngineerAgentBase : AgentBase
                         _ = Metrics?.RecordReworkBuildBlockedAsync(Identity.Id, ct);
                         await GitHub.AddPullRequestCommentAsync(pr.Number,
                             $"**[{Identity.DisplayName}] Rework blocked** — Address review feedback produced code with build errors " +
-                            $"that could not be auto-resolved. This rework attempt counted toward the limit ({attempts}/{Config.Limits.MaxReworkCycles}).", ct);
+                            $"that could not be auto-resolved. This rework attempt counted toward the limit ({attempts}/{maxCycles}).", ct);
 
                         foreach (var item in reworkBatch)
                             ReworkQueue.Enqueue(item);
@@ -1269,7 +1297,7 @@ public abstract class EngineerAgentBase : AgentBase
                         Identity.Role, Identity.DisplayName, pr.Number);
                     await GitHub.AddPullRequestCommentAsync(pr.Number,
                         $"**[{Identity.DisplayName}] Rework attempted** — AI response did not produce committable file changes. " +
-                        $"This rework attempt counted toward the limit ({attempts}/{Config.Limits.MaxReworkCycles}).", ct);
+                        $"This rework attempt counted toward the limit ({attempts}/{maxCycles}).", ct);
 
                     foreach (var item in reworkBatch)
                         ReworkQueue.Enqueue(item);
