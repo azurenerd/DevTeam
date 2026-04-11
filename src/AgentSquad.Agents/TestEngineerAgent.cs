@@ -53,7 +53,7 @@ public class TestEngineerAgent : AgentBase
     private readonly ConcurrentQueue<(int PrNumber, string PrTitle, string Feedback, string Reviewer)> _reworkQueue = new();
     private readonly Dictionary<int, int> _reworkAttempts = new();
     private readonly Dictionary<int, string> _prSessionIds = new();
-    private readonly DateTime _sessionStartUtc = DateTime.UtcNow;
+    private readonly DateTime _sessionStartUtc = DateTime.UtcNow.AddHours(-24); // Look back 24h to catch PRs from restarts within same run
     private int? _currentTestPrNumber;
 
     public TestEngineerAgent(

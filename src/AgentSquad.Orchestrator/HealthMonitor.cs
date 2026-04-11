@@ -227,7 +227,7 @@ public class HealthMonitor : IHostedService, IDisposable
         if (!_workflow.HasSignal(WorkflowStateMachine.Signals.EngineeringPlanReady))
         {
             bool planReady =
-                HasReasonContaining(AgentRole.PrincipalEngineer, "orchestrating", "tasks complete", "assigned task", "task done") ||
+                HasReasonContaining(AgentRole.PrincipalEngineer, "orchestrating", "tasks complete", "assigned task", "task done", "plan complete", "development loop", "working on task") ||
                 agents.Any(a => a.Identity.Role is AgentRole.SeniorEngineer or AgentRole.JuniorEngineer);
 
             if (planReady)
