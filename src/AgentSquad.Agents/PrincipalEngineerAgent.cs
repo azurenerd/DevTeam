@@ -1599,7 +1599,16 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
                 if (required.All(r => approved.Contains(r, StringComparer.OrdinalIgnoreCase)))
                 {
-                    // All approved — try merge (with branch sync fallback)
+                    // If inline test workflow, also require tests-added label before merge
+                    if (Config.Workspace.IsInlineTestWorkflow &&
+                        !pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
+                    {
+                        Logger.LogInformation(
+                            "PE PR #{PrNumber} has all approvals but waiting for TE tests before merge", pr.Number);
+                        continue;
+                    }
+
+                    // All approved (and tested if required) — try merge
                     Logger.LogInformation("PE PR #{PrNumber} has all approvals, merging", pr.Number);
                     try
                     {

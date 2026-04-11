@@ -556,10 +556,15 @@ public class ArchitectAgent : AgentBase
 
                 if (verdict == "APPROVED")
                 {
-                    await _prWorkflow.ApproveAndMaybeMergeAsync(
-                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct: ct);
+                    var requireTests = _config.Workspace.IsInlineTestWorkflow;
+                    var result = await _prWorkflow.ApproveAndMaybeMergeAsync(
+                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}",
+                        requireTests, ct);
                     Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
-                    LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title}");
+                    if (result == MergeAttemptResult.AwaitingTests)
+                        LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title} — awaiting TE tests before merge");
+                    else
+                        LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title}");
                     await RememberAsync(MemoryType.Decision,
                         $"Architecture review approved PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reasoning), ct);
