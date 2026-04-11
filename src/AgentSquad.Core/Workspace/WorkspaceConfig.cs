@@ -94,7 +94,7 @@ public class WorkspaceConfig
     /// <summary>
     /// Seconds to wait for the app under test to become ready (HTTP 200) before timing out.
     /// </summary>
-    public int AppStartupTimeoutSeconds { get; set; } = 30;
+    public int AppStartupTimeoutSeconds { get; set; } = 90;
 
     /// <summary>
     /// Resolved path for Playwright browser cache. Uses explicit config or auto-derives from RootPath.
