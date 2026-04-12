@@ -496,6 +496,28 @@ public class LocalWorkspace
         return Task.CompletedTask;
     }
 
+    /// <summary>
+    /// Nuclear option: delete the entire local clone, re-clone from remote, and check out
+    /// the specified branch at the latest remote HEAD. Use when rebase/reset fails and
+    /// the local repo is in an unrecoverable state.
+    /// </summary>
+    public async Task NukeAndRecloneAsync(string branchName, CancellationToken ct = default)
+    {
+        _logger.LogWarning("[{Agent}] Nuking local clone at {Path} and re-cloning for branch {Branch}",
+            _agentId, RepoPath, branchName);
+
+        // 1. Delete everything
+        await CleanupAsync();
+
+        // 2. Re-clone from scratch (sets _initialized = true)
+        await InitializeAsync(ct);
+
+        // 3. Check out the target branch at remote HEAD
+        await CheckoutBranchAsync(branchName, ct);
+
+        _logger.LogInformation("[{Agent}] Fresh clone ready on branch {Branch}", _agentId, branchName);
+    }
+
     private void EnsureInitialized()
     {
         if (!_initialized)

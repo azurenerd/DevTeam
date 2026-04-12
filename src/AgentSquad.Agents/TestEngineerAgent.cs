@@ -822,6 +822,7 @@ public class TestEngineerAgent : AgentBase
         // --- Phase 9: Commit and push to the PR's branch ---
         UpdateStatus(AgentStatus.Working, $"Pushing tests to PR #{pr.Number}");
         await _workspace.CommitAsync($"test: add tests for PR #{pr.Number}", ct);
+        var pushed = true;
 
         try
         {
@@ -831,8 +832,6 @@ public class TestEngineerAgent : AgentBase
         {
             // Push failed — the branch moved since we checked it out (PE pushed new commits).
             // Strategy: rebase our changes on top of the latest remote, then push.
-            // This is safe because CheckoutBranchAsync already resets to remote HEAD before
-            // we start work, so conflicts here mean PE pushed DURING our test generation.
             Logger.LogWarning(pushEx,
                 "Push to {Branch} rejected for PR #{Number} — rebasing onto latest remote",
                 pr.HeadBranch, pr.Number);
@@ -847,28 +846,31 @@ public class TestEngineerAgent : AgentBase
                 }
                 else
                 {
-                    // Rebase conflict — PE changed files that TE also modified.
-                    // Don't force-push (would lose PE work). Instead, abandon this attempt
-                    // and let the TE retry on next loop with fresh code from remote.
-                    Logger.LogWarning("Rebase conflict on PR #{Number} — PE and TE modified same files. " +
-                        "Will retry with fresh checkout on next cycle.", pr.Number);
+                    // Rebase conflict — nuclear option: nuke clone, re-clone fresh,
+                    // re-apply our test files, and push cleanly.
+                    Logger.LogWarning("Rebase conflict on PR #{Number} — using fresh clone fallback", pr.Number);
                     await _workspace.RevertUncommittedChangesAsync(ct);
-                    await _github.AddPullRequestCommentAsync(pr.Number,
-                        "⚠️ **Test Engineer:** Push conflict — the branch was updated while tests were being generated. " +
-                        "Will retry with the latest code shortly.", ct);
-                    _testedPRs.Remove(pr.Number); // Allow retry on next cycle
-                    return false;
+                    pushed = await FreshCloneAndReapplyAsync(pr, testFiles, ct);
+                    if (!pushed) return false;
                 }
             }
             catch (Exception retryEx)
             {
-                Logger.LogWarning(retryEx, "Push retry also failed for PR #{Number}", pr.Number);
-                await _workspace.RevertUncommittedChangesAsync(ct);
-                // Still post test results even though push failed
-                await PostInlineTestResultsCommentAsync(pr, testFiles, tierResults, ct,
-                    pushFailed: true);
-                _testedPRs.Remove(pr.Number); // Allow retry
-                return false;
+                Logger.LogWarning(retryEx, "Rebase push also failed for PR #{Number} — trying fresh clone fallback", pr.Number);
+                try
+                {
+                    pushed = await FreshCloneAndReapplyAsync(pr, testFiles, ct);
+                    if (!pushed) return false;
+                }
+                catch (Exception nukeEx)
+                {
+                    Logger.LogError(nukeEx, "Fresh clone fallback also failed for PR #{Number}", pr.Number);
+                    // Post test results even though push failed
+                    await PostInlineTestResultsCommentAsync(pr, testFiles, tierResults, ct,
+                        pushFailed: true);
+                    _testedPRs.Remove(pr.Number);
+                    return false;
+                }
             }
         }
 
@@ -1131,6 +1133,46 @@ public class TestEngineerAgent : AgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Could not apply tests-added label to PR #{Number}", pr.Number);
+        }
+    }
+
+    /// <summary>
+    /// Nuclear fallback: delete local clone, re-clone fresh, re-apply test files, commit, push.
+    /// Used when rebase fails due to conflicts with PE's changes.
+    /// </summary>
+    private async Task<bool> FreshCloneAndReapplyAsync(
+        AgentPullRequest pr,
+        IReadOnlyList<CodeFileParser.CodeFile> testFiles,
+        CancellationToken ct)
+    {
+        Logger.LogWarning("PR #{Number}: Nuking clone and re-applying {Count} test files from scratch",
+            pr.Number, testFiles.Count);
+
+        await _workspace.NukeAndRecloneAsync(pr.HeadBranch, ct);
+
+        // Re-write all test files onto the fresh checkout
+        foreach (var file in testFiles)
+            await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+        EnsureTestProjectExists(testFiles);
+        await AddTestProjectsToSolutionAsync(testFiles, ct);
+
+        await _workspace.CommitAsync($"test: add tests for PR #{pr.Number}", ct);
+
+        try
+        {
+            await _workspace.PushAsync(pr.HeadBranch, ct);
+            Logger.LogInformation("PR #{Number}: Fresh clone push succeeded", pr.Number);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "PR #{Number}: Fresh clone push also failed — giving up", pr.Number);
+            await _github.AddPullRequestCommentAsync(pr.Number,
+                "⚠️ **Test Engineer:** Could not push tests after multiple retries (including fresh clone). " +
+                "Will retry on next cycle.", ct);
+            _testedPRs.Remove(pr.Number);
+            return false;
         }
     }
 
