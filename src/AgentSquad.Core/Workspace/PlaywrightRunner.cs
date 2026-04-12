@@ -303,17 +303,17 @@ public class PlaywrightRunner
             return command; // configured path works
 
         // Auto-detect: search for a .csproj with the same filename
+        // Filter using relative path to avoid matching "test" in workspace root (e.g., testengineer agent paths)
         var fileName = Path.GetFileName(configuredPath);
         var candidates = Directory.EnumerateFiles(workspacePath, fileName, SearchOption.AllDirectories)
-            .Where(f => !f.Contains("test", StringComparison.OrdinalIgnoreCase)
-                     && !f.Contains("Test", StringComparison.OrdinalIgnoreCase))
+            .Where(f => !Path.GetRelativePath(workspacePath, f).Contains("test", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
         if (candidates.Count == 0)
         {
             // Broader search for any web .csproj
             candidates = Directory.EnumerateFiles(workspacePath, "*.csproj", SearchOption.AllDirectories)
-                .Where(f => !f.Contains("test", StringComparison.OrdinalIgnoreCase))
+                .Where(f => !Path.GetRelativePath(workspacePath, f).Contains("test", StringComparison.OrdinalIgnoreCase))
                 .ToList();
         }
 

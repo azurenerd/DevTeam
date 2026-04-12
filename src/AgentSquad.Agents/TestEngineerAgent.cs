@@ -1151,9 +1151,50 @@ public class TestEngineerAgent : AgentBase
         }
 
         // Upload test artifacts (screenshots, videos, traces) to the PR branch
+        bool hasUploadedScreenshots = false;
         if (tierResults is { Count: > 0 })
         {
-            await UploadTestArtifactsToPrAsync(pr, tierResults, sb, ct);
+            hasUploadedScreenshots = await UploadTestArtifactsToPrAsync(pr, tierResults, sb, ct);
+        }
+
+        // Fallback: if no screenshots were captured from tests, try a standalone screenshot
+        if (!hasUploadedScreenshots && _playwrightRunner is not null && _workspace is not null
+            && _config.Workspace.CaptureScreenshots)
+        {
+            try
+            {
+                Logger.LogInformation("No test screenshots found — attempting standalone screenshot capture for PR #{PrNumber}", pr.Number);
+                var screenshotBytes = await _playwrightRunner.CaptureAppScreenshotAsync(
+                    _workspace.RepoPath, _config.Workspace, ct);
+
+                if (screenshotBytes is { Length: > 0 })
+                {
+                    var fileName = $"pr-{pr.Number}-app-preview.png";
+                    var repoPath = $"test-results/screenshots/{fileName}";
+                    var imageUrl = await _github.CommitBinaryFileAsync(
+                        repoPath, screenshotBytes,
+                        $"📸 App screenshot for PR #{pr.Number}", pr.HeadBranch, ct);
+
+                    if (imageUrl is not null)
+                    {
+                        sb.AppendLine("### 📸 App Preview");
+                        sb.AppendLine();
+                        sb.AppendLine($"![App Preview]({imageUrl})");
+                        sb.AppendLine();
+                        sb.AppendLine("_Standalone screenshot captured by Test Engineer_");
+                        sb.AppendLine();
+                        Logger.LogInformation("Posted standalone screenshot for PR #{PrNumber}", pr.Number);
+                    }
+                }
+                else
+                {
+                    Logger.LogDebug("Standalone screenshot capture returned no data for PR #{PrNumber}", pr.Number);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Standalone screenshot capture failed for PR #{PrNumber}", pr.Number);
+            }
         }
 
         // File list
@@ -1178,8 +1219,9 @@ public class TestEngineerAgent : AgentBase
     /// Upload test artifacts (screenshots, videos, traces) to the PR branch and embed
     /// them in the markdown comment. Screenshots are inline images, videos are download
     /// links, traces link to trace.playwright.dev for interactive viewing.
+    /// Returns true if at least one screenshot was uploaded.
     /// </summary>
-    private async Task UploadTestArtifactsToPrAsync(
+    private async Task<bool> UploadTestArtifactsToPrAsync(
         AgentPullRequest pr,
         IReadOnlyList<TestResult> tierResults,
         System.Text.StringBuilder sb,
@@ -1204,7 +1246,7 @@ public class TestEngineerAgent : AgentBase
             .ToList();
 
         if (screenshots.Count == 0 && videos.Count == 0 && traces.Count == 0)
-            return;
+            return false;
 
         sb.AppendLine("### Uploaded Artifacts");
         sb.AppendLine();
@@ -1283,6 +1325,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         sb.AppendLine();
+        return screenshots.Count > 0;
     }
 
     /// <summary>
