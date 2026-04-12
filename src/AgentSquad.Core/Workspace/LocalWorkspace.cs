@@ -166,7 +166,9 @@ public class LocalWorkspace
         {
             await RunGitAsync("fetch", "origin", branchName, ct: ct, throwOnError: false);
             await RunGitAsync("checkout", branchName, ct: ct);
-            _logger.LogDebug("[{Agent}] Checked out branch {Branch}", _agentId, branchName);
+            // Reset to remote HEAD to pick up any new commits pushed by other agents
+            await RunGitAsync("reset", "--hard", $"origin/{branchName}", ct: ct, throwOnError: false);
+            _logger.LogDebug("[{Agent}] Checked out branch {Branch} (reset to remote HEAD)", _agentId, branchName);
         }
         finally
         {

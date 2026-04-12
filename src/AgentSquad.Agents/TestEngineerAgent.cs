@@ -804,36 +804,36 @@ public class TestEngineerAgent : AgentBase
         }
         catch (Exception pushEx)
         {
-            // Push failed — likely the branch moved (engineer pushed a fix, or force-push)
-            // Try once more: pull-rebase the latest remote changes, rebuild, and force push
+            // Push failed — the branch moved since we checked it out (PE pushed new commits).
+            // Strategy: rebase our changes on top of the latest remote, then push.
+            // This is safe because CheckoutBranchAsync already resets to remote HEAD before
+            // we start work, so conflicts here mean PE pushed DURING our test generation.
             Logger.LogWarning(pushEx,
-                "Push to {Branch} rejected for PR #{Number} — attempting pull-rebase and retry",
+                "Push to {Branch} rejected for PR #{Number} — rebasing onto latest remote",
                 pr.HeadBranch, pr.Number);
 
             try
             {
-                // Pull and rebase onto the latest remote branch
                 var rebased = await _workspace.PullRebaseAsync(pr.HeadBranch, ct);
-                if (!rebased)
+                if (rebased)
                 {
-                    Logger.LogWarning("Rebase conflict on PR #{Number} branch — aborting inline tests", pr.Number);
+                    // Rebase succeeded — our changes applied cleanly on top of PE's latest
+                    await _workspace.PushAsync(pr.HeadBranch, ct);
+                }
+                else
+                {
+                    // Rebase conflict — PE changed files that TE also modified.
+                    // Don't force-push (would lose PE work). Instead, abandon this attempt
+                    // and let the TE retry on next loop with fresh code from remote.
+                    Logger.LogWarning("Rebase conflict on PR #{Number} — PE and TE modified same files. " +
+                        "Will retry with fresh checkout on next cycle.", pr.Number);
                     await _workspace.RevertUncommittedChangesAsync(ct);
                     await _github.AddPullRequestCommentAsync(pr.Number,
-                        "⚠️ **Test Engineer:** Could not push tests — rebase conflict with recent changes on the branch.", ct);
-                    return true; // Rebase conflict — handled, don't retry endlessly
+                        "⚠️ **Test Engineer:** Push conflict — the branch was updated while tests were being generated. " +
+                        "Will retry with the latest code shortly.", ct);
+                    _testedPRs.Remove(pr.Number); // Allow retry on next cycle
+                    return false;
                 }
-
-                // Rebuild to verify the rebase didn't break anything
-                var rebuildResult = await _buildRunner.BuildAsync(
-                    _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
-                if (!rebuildResult.Success)
-                {
-                    Logger.LogWarning("Rebuild after rebase failed for PR #{Number}", pr.Number);
-                    await _workspace.RevertUncommittedChangesAsync(ct);
-                    return true; // Build failed after rebase — handled
-                }
-
-                await _workspace.ForcePushAsync(pr.HeadBranch, ct);
             }
             catch (Exception retryEx)
             {
