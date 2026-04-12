@@ -282,6 +282,54 @@ public class LocalWorkspace
     }
 
     /// <summary>
+    /// Force push the current branch to origin (bypasses force-with-lease safety).
+    /// Use only when retrying after a known branch divergence.
+    /// </summary>
+    public async Task ForcePushAsync(string branchName, CancellationToken ct = default)
+    {
+        EnsureInitialized();
+        await _gitLock.WaitAsync(ct);
+        try
+        {
+            await RunGitAsync("push", "origin", branchName, "--force", ct: ct);
+            _logger.LogInformation("[{Agent}] Force-pushed branch {Branch} to origin", _agentId, branchName);
+        }
+        finally
+        {
+            _gitLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Pull and rebase changes from the remote tracking branch.
+    /// Returns false if rebase conflicts occur.
+    /// </summary>
+    public async Task<bool> PullRebaseAsync(string branchName, CancellationToken ct = default)
+    {
+        EnsureInitialized();
+        await _gitLock.WaitAsync(ct);
+        try
+        {
+            await RunGitAsync("fetch", "origin", branchName, ct: ct);
+            var result = await RunGitAsync("rebase", $"origin/{branchName}",
+                ct: ct, throwOnError: false);
+
+            if (!result.Success)
+            {
+                _logger.LogWarning("[{Agent}] Rebase conflict on {Branch}, aborting", _agentId, branchName);
+                await RunGitAsync("rebase", "--abort", ct: ct, throwOnError: false);
+                return false;
+            }
+
+            return true;
+        }
+        finally
+        {
+            _gitLock.Release();
+        }
+    }
+
+    /// <summary>
     /// Ensures a .gitignore file exists at the repo root. If missing, creates a standard
     /// .NET gitignore that prevents bin/, obj/, and other build artifacts from being committed.
     /// </summary>

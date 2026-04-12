@@ -798,43 +798,43 @@ public class TestEngineerAgent : AgentBase
         catch (Exception pushEx)
         {
             // Push failed — likely the branch moved (engineer pushed a fix, or force-push)
-            // Try once more: pull the latest, rebuild, and push again
+            // Try once more: pull-rebase the latest remote changes, rebuild, and force push
             Logger.LogWarning(pushEx,
-                "Push to {Branch} rejected for PR #{Number} — attempting pull and retry",
+                "Push to {Branch} rejected for PR #{Number} — attempting pull-rebase and retry",
                 pr.HeadBranch, pr.Number);
 
             try
             {
-                // Fetch + merge the remote changes
-                var merged = await _workspace.MergeMainIntoBranchAsync(ct);
-                if (!merged)
+                // Pull and rebase onto the latest remote branch
+                var rebased = await _workspace.PullRebaseAsync(pr.HeadBranch, ct);
+                if (!rebased)
                 {
-                    Logger.LogWarning("Merge conflict on PR #{Number} branch — aborting inline tests", pr.Number);
+                    Logger.LogWarning("Rebase conflict on PR #{Number} branch — aborting inline tests", pr.Number);
                     await _workspace.RevertUncommittedChangesAsync(ct);
                     await _github.AddPullRequestCommentAsync(pr.Number,
-                        "⚠️ **Test Engineer:** Could not push tests — merge conflict with recent changes on the branch.", ct);
-                    return true; // Merge conflict — handled, don't retry endlessly
+                        "⚠️ **Test Engineer:** Could not push tests — rebase conflict with recent changes on the branch.", ct);
+                    return true; // Rebase conflict — handled, don't retry endlessly
                 }
 
-                // Rebuild to verify the merge didn't break anything
+                // Rebuild to verify the rebase didn't break anything
                 var rebuildResult = await _buildRunner.BuildAsync(
                     _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
                 if (!rebuildResult.Success)
                 {
-                    Logger.LogWarning("Rebuild after merge failed for PR #{Number}", pr.Number);
+                    Logger.LogWarning("Rebuild after rebase failed for PR #{Number}", pr.Number);
                     await _workspace.RevertUncommittedChangesAsync(ct);
-                    return true; // Build failed after merge — handled
+                    return true; // Build failed after rebase — handled
                 }
 
-                await _workspace.PushAsync(pr.HeadBranch, ct);
+                await _workspace.ForcePushAsync(pr.HeadBranch, ct);
             }
             catch (Exception retryEx)
             {
                 Logger.LogWarning(retryEx, "Push retry also failed for PR #{Number}", pr.Number);
                 await _workspace.RevertUncommittedChangesAsync(ct);
-                await _github.AddPullRequestCommentAsync(pr.Number,
-                    "⚠️ **Test Engineer:** Could not push tests to this branch. " +
-                    "The branch may have diverged. Tests will be retried on the next cycle.", ct);
+                // Still post test results even though push failed
+                await PostInlineTestResultsCommentAsync(pr, testFiles, tierResults, ct,
+                    pushFailed: true);
                 _testedPRs.Remove(pr.Number); // Allow retry
                 return false;
             }
@@ -1109,11 +1109,20 @@ public class TestEngineerAgent : AgentBase
         AgentPullRequest pr,
         IReadOnlyList<CodeFileParser.CodeFile> testFiles,
         IReadOnlyList<TestResult>? tierResults,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool pushFailed = false)
     {
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("## 🧪 Test Engineer — Inline Tests Added");
         sb.AppendLine();
+
+        if (pushFailed)
+        {
+            sb.AppendLine("⚠️ **Note:** Test files could not be pushed to this branch (branch diverged). " +
+                "Tests will be retried on the next cycle. Results below are from the test run.");
+            sb.AppendLine();
+        }
+
         sb.AppendLine($"Added **{testFiles.Count}** test file(s) to this PR.");
         sb.AppendLine();
 
