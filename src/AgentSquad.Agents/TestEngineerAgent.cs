@@ -1780,6 +1780,8 @@ public class TestEngineerAgent : AgentBase
                 combinedSystem.AppendLine("## Tier 3: UI/E2E TESTS (Playwright)");
                 combinedSystem.AppendLine("- Use Microsoft.Playwright for browser automation with Page Object Model.");
                 combinedSystem.AppendLine("- Base URL from env var BASE_URL (default: http://localhost:5000).");
+                combinedSystem.AppendLine("- IMPORTANT: Use xUnit ([Fact], [Collection], [Trait]) — do NOT use NUnit.");
+                combinedSystem.AppendLine("- PlaywrightFixture base class must use IAsyncLifetime, NOT [SetUpFixture].");
                 combinedSystem.AppendLine("- Add [Trait(\"Category\", \"UI\")] and [Collection(\"Playwright\")] attributes.");
                 combinedSystem.AppendLine("- Place in tests/{ProjectName}.UITests/. Include PlaywrightFixture class.\n");
             }
@@ -1997,16 +1999,30 @@ public class TestEngineerAgent : AgentBase
                 "- Test user workflows: navigation, form submission, button clicks, data display\n" +
                 "- Include assertions on page content, element visibility, and navigation outcomes\n" +
                 "- Capture screenshots on failure using PlaywrightFixture.CaptureScreenshotAsync\n" +
-                "- Include a shared PlaywrightFixture class if one doesn't exist\n" +
+                "- Include a shared PlaywrightFixture base class (use [TestFixture] NOT [SetUpFixture])\n" +
+                "- IMPORTANT: Use xUnit ([Fact], [Collection], [Trait]) — do NOT use NUnit ([Test], [SetUpFixture])\n" +
                 "- Example Playwright test structure:\n" +
                 "```csharp\n" +
+                "// PlaywrightFixture.cs — shared base class\n" +
+                "public class PlaywrightFixture : IAsyncLifetime\n{\n" +
+                "    public IPlaywright Playwright { get; private set; }\n" +
+                "    public IBrowser Browser { get; private set; }\n" +
+                "    public string BaseUrl => Environment.GetEnvironmentVariable(\"BASE_URL\") ?? \"http://localhost:5000\";\n" +
+                "    public async Task InitializeAsync() {\n" +
+                "        Playwright = await Microsoft.Playwright.Playwright.CreateAsync();\n" +
+                "        Browser = await Playwright.Chromium.LaunchAsync(new() { Headless = true });\n" +
+                "    }\n" +
+                "    public async Task DisposeAsync() { await Browser.CloseAsync(); Playwright.Dispose(); }\n" +
+                "    public async Task<IPage> NewPageAsync() => await Browser.NewPageAsync();\n" +
+                "}\n\n" +
+                "// Tests — use xUnit [Fact], inject via IClassFixture\n" +
                 "[Collection(\"Playwright\")]\n[Trait(\"Category\", \"UI\")]\n" +
-                "public class HomePageTests\n{\n" +
+                "public class HomePageTests : IClassFixture<PlaywrightFixture>\n{\n" +
                 "    private readonly PlaywrightFixture _fixture;\n" +
                 "    public HomePageTests(PlaywrightFixture fixture) => _fixture = fixture;\n\n" +
                 "    [Fact]\n    public async Task HomePage_LoadsSuccessfully()\n    {\n" +
                 "        var page = await _fixture.NewPageAsync();\n" +
-                "        await page.GotoAsync(\"/\");\n" +
+                "        await page.GotoAsync(_fixture.BaseUrl);\n" +
                 "        await Assertions.Expect(page).ToHaveTitleAsync(new Regex(\".*\"));\n" +
                 "    }\n}\n```\n",
 
@@ -2325,6 +2341,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             TestTier.UI =>
                 $"Generate exactly ONE Playwright UI test file with ONE test method for the above source code using {techStack}. " +
                 "Test that the main page loads and renders key content. Use headless mode. " +
+                "IMPORTANT: Use xUnit ([Fact], IClassFixture<PlaywrightFixture>), NOT NUnit. " +
+                "PlaywrightFixture must implement IAsyncLifetime, NOT use [SetUpFixture]. " +
                 "Include the PlaywrightFixture class. Keep it minimal — one test method only.",
 
             _ => $"Generate one test file with one test method for the above source code using {techStack}."
