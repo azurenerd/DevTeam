@@ -1232,6 +1232,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     "Output each file using this exact format:\n\n" +
                     "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
                     $"Use the {techStack} technology stack. " +
+                    "CRITICAL: You MUST include a .csproj project file at the project root AND a .sln solution file at the repository root. " +
+                    "Without these, `dotnet build` will fail. The .sln must reference the .csproj. " +
                     "Include all source code files, configuration, and tests. " +
                     "Every file MUST use the FILE: marker format so it can be parsed and committed.");
 

@@ -518,6 +518,23 @@ public class TestEngineerAgent : AgentBase
         var baseBuild = await _buildRunner!.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
+        // If root build failed (often MSB1003: no .sln/.csproj at root), try finding the actual project
+        if (!baseBuild.Success && baseBuild.Duration.TotalSeconds < 2)
+        {
+            var slnFiles = Directory.GetFiles(_workspace.RepoPath, "*.sln", SearchOption.AllDirectories);
+            var csprojFiles = Directory.GetFiles(_workspace.RepoPath, "*.csproj", SearchOption.AllDirectories);
+            string? buildTarget = slnFiles.Length > 0
+                ? slnFiles[0]
+                : (csprojFiles.Length > 0 ? csprojFiles[0] : null);
+
+            if (buildTarget is not null)
+            {
+                Logger.LogInformation("Root build failed quickly — retrying with discovered project: {Target}", buildTarget);
+                baseBuild = await _buildRunner.BuildAsync(
+                    _workspace.RepoPath, $"dotnet build \"{buildTarget}\"", wsConfig.BuildTimeoutSeconds, ct);
+            }
+        }
+
         if (!baseBuild.Success)
         {
             var truncatedErrors = baseBuild.Errors.Length > 500

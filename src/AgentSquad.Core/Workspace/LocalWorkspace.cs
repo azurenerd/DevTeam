@@ -68,8 +68,22 @@ public class LocalWorkspace
                 // Ensure all directories in the path exist (root + agent subdirectory)
                 Directory.CreateDirectory(Path.GetDirectoryName(RepoPath)!);
 
-                // Clone with token embedded in URL for auth
-                await RunGitAsync("clone", _repoUrl, RepoPath, ct: ct, workDir: Path.GetDirectoryName(RepoPath));
+                // Clone with token embedded in URL for auth (retry up to 3 times on timeout)
+                for (var attempt = 1; attempt <= 3; attempt++)
+                {
+                    try
+                    {
+                        await RunGitAsync("clone", _repoUrl, RepoPath, ct: ct, workDir: Path.GetDirectoryName(RepoPath));
+                        break;
+                    }
+                    catch (TimeoutException) when (attempt < 3)
+                    {
+                        _logger.LogWarning("[{Agent}] Clone attempt {Attempt}/3 timed out, retrying...", _agentId, attempt);
+                        if (Directory.Exists(RepoPath))
+                            Directory.Delete(RepoPath, true);
+                        await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                    }
+                }
 
                 // Configure git user for commits
                 await RunGitAsync("config", "user.name", _config.GitUserName, ct: ct);
@@ -465,7 +479,7 @@ public class LocalWorkspace
         var stderrTask = process.StandardError.ReadToEndAsync(ct);
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(120));
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(300));
 
         try
         {
