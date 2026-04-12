@@ -183,14 +183,18 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     var pending = _taskManager.PendingCount;
                     var done = _taskManager.DoneCount;
                     var total = _taskManager.TotalCount;
-                    var hasWork = pending > 0 || _reviewQueue.Count > 0 || !_allTasksComplete || !_integrationPrCreated;
+                    // Leader is "Working" only when it has actionable items right now
+                    // (tasks to assign or PRs to review), not just because workers are busy
+                    var hasActionableWork = isLeader
+                        ? (pending > 0 || _reviewQueue.Count > 0)
+                        : (pending > 0 || _reviewQueue.Count > 0 || !_allTasksComplete || !_integrationPrCreated);
                     var leaderTag = isLeader ? "Leader" : $"Worker#{Identity.Rank}";
                     var statusVerb = isLeader ? "Orchestrating" : "Working on";
 
                     // Preserve "Engineering complete" status once signaled so HealthMonitor can detect it
                     if (!_engineeringSignaled)
                     {
-                        UpdateStatus(hasWork ? AgentStatus.Working : AgentStatus.Idle,
+                        UpdateStatus(hasActionableWork ? AgentStatus.Working : AgentStatus.Idle,
                             $"[{leaderTag}] {statusVerb} tasks ({done}/{total} done, {pending} pending, {_reviewQueue.Count} PRs queued)");
                     }
 
