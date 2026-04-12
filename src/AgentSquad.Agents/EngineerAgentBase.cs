@@ -2109,6 +2109,13 @@ public abstract class EngineerAgentBase : AgentBase
 
             // Include the current content of failing files so the AI can see what to fix
             var failingFilePaths = ExtractFilePathsFromBuildErrors(buildResult.ParsedErrors, Workspace!.RepoPath);
+            
+            // Also find files for types referenced in errors (e.g., CS0311 mentions a class that needs fixing
+            // but the error is reported in a different file that uses it)
+            var referencedTypePaths = await FindReferencedTypeFilesAsync(buildResult.ParsedErrors, failingFilePaths, ct);
+            foreach (var p in referencedTypePaths)
+                failingFilePaths.Add(p);
+
             if (failingFilePaths.Count > 0)
             {
                 var fileContext = new System.Text.StringBuilder();
@@ -2171,6 +2178,71 @@ public abstract class EngineerAgentBase : AgentBase
         }
 
         return paths;
+    }
+
+    /// <summary>
+    /// Find source files for types referenced in build errors that aren't already in the failing set.
+    /// For example, CS0311 "no implicit conversion from 'TypeA' to 'TypeB'" means TypeA's file
+    /// likely needs editing, even though the error is reported in the file that uses TypeA.
+    /// </summary>
+    private Task<HashSet<string>> FindReferencedTypeFilesAsync(
+        IReadOnlyList<string> parsedErrors, HashSet<string> alreadyIncluded, CancellationToken ct)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (Workspace is null) return Task.FromResult(result);
+
+        // Extract type names mentioned in errors (e.g., 'Namespace.TypeName')
+        var typeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var error in parsedErrors)
+        {
+            // Match quoted type references like 'AgentSquad.Runner.Services.DashboardDataService'
+            foreach (System.Text.RegularExpressions.Match m in
+                System.Text.RegularExpressions.Regex.Matches(error, @"'([A-Z][A-Za-z0-9_.]+)'"))
+            {
+                var typeName = m.Groups[1].Value;
+                var simpleName = typeName.Contains('.') ? typeName[(typeName.LastIndexOf('.') + 1)..] : typeName;
+                if (simpleName.Length > 2 && !simpleName.Contains("Extensions"))
+                    typeNames.Add(simpleName);
+            }
+        }
+
+        if (typeNames.Count == 0) return Task.FromResult(result);
+
+        var repoPath = Workspace.RepoPath;
+        var normalizedRepo = repoPath.Replace('\\', '/').TrimEnd('/') + "/";
+
+        // Search workspace for .cs files matching these type names
+        try
+        {
+            var allCsFiles = Directory.GetFiles(repoPath, "*.cs", SearchOption.AllDirectories);
+            foreach (var fullPath in allCsFiles)
+            {
+                if (fullPath.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")) continue;
+                if (fullPath.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")) continue;
+
+                var fileName = Path.GetFileNameWithoutExtension(fullPath);
+                if (typeNames.Contains(fileName) || typeNames.Contains(fileName.TrimStart('I')))
+                {
+                    var normalized = fullPath.Replace('\\', '/');
+                    if (normalized.StartsWith(normalizedRepo, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var relativePath = normalized[normalizedRepo.Length..];
+                        if (!alreadyIncluded.Contains(relativePath))
+                            result.Add(relativePath);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Could not search for referenced type files");
+        }
+
+        if (result.Count > 0)
+            Logger.LogInformation("Found {Count} additional files for types referenced in build errors: {Files}",
+                result.Count, string.Join(", ", result));
+
+        return Task.FromResult(result);
     }
 
     /// <summary>
