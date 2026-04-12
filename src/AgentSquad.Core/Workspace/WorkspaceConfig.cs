@@ -147,7 +147,7 @@ public class WorkspaceConfig
     /// After this many failures, failing tests are removed with a documented note,
     /// and the buildable/passing code is committed.
     /// </summary>
-    public int MaxTestRetries { get; set; } = 20;
+    public int MaxTestRetries { get; set; } = 3;
 
     /// <summary>
     /// Whether to delete agent workspaces when the project is complete (all issues closed).

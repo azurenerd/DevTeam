@@ -1816,7 +1816,15 @@ public class TestEngineerAgent : AgentBase
                 }
             }
 
-            userPrompt.AppendLine($"Generate comprehensive {string.Join(", ", tiers)} tests for the above code using {techStack}.");
+            // Scale test count to PR complexity — start minimal to validate pipeline
+            var totalSourceLines = sourceFiles.Values.Sum(c => c.Split('\n').Length);
+            var fileCount = sourceFiles.Count;
+
+            userPrompt.AppendLine($"## Test Scope Guidance");
+            userPrompt.AppendLine($"This PR has {fileCount} source file(s) with ~{totalSourceLines} lines.");
+            userPrompt.AppendLine($"Generate exactly **1 test method** per tier. Just one focused, high-value smoke test that proves the feature works.");
+            userPrompt.AppendLine($"Keep it simple — one test file per tier with one test method. We can expand coverage later.\n");
+            userPrompt.AppendLine($"Generate {string.Join(", ", tiers)} tests for the above code using {techStack}.");
             userPrompt.AppendLine("Include ALL test tiers requested above in your response.");
 
             history.AddUserMessage(userPrompt.ToString());
@@ -2307,22 +2315,19 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         return tier switch
         {
             TestTier.Unit =>
-                $"Generate comprehensive UNIT test files for the above source code using {techStack}. " +
-                "Test individual methods and classes in isolation with mocked dependencies. " +
-                "Include edge cases, error handling, and boundary conditions.",
+                $"Generate exactly ONE unit test file with ONE test method for the above source code using {techStack}. " +
+                "Pick the single most important behavior to verify. Keep it simple and focused.",
 
             TestTier.Integration =>
-                $"Generate INTEGRATION test files for the above source code using {techStack}. " +
-                "Test component interactions, API endpoints, and data access with real or in-memory dependencies. " +
-                "Use WebApplicationFactory for API tests where applicable.",
+                $"Generate exactly ONE integration test file with ONE test method for the above source code using {techStack}. " +
+                "Test the single most critical integration point. Keep it simple.",
 
             TestTier.UI =>
-                $"Generate Playwright UI/E2E test files for the above source code using {techStack}. " +
-                "Test user workflows, page navigation, form submissions, and visual elements. " +
-                "Use the Page Object Model pattern. All tests must run headless. " +
-                "Include the PlaywrightFixture class and page object classes.",
+                $"Generate exactly ONE Playwright UI test file with ONE test method for the above source code using {techStack}. " +
+                "Test that the main page loads and renders key content. Use headless mode. " +
+                "Include the PlaywrightFixture class. Keep it minimal — one test method only.",
 
-            _ => $"Generate test files for the above source code using {techStack}."
+            _ => $"Generate one test file with one test method for the above source code using {techStack}."
         };
     }
 
