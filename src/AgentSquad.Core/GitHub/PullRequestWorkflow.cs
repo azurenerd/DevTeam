@@ -311,11 +311,18 @@ public partial class PullRequestWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
 
-        // Check if already marked ready-for-review to avoid duplicate comments
+        // Check if already marked ready-for-review to avoid duplicate label changes
         var pr = await _github.GetPullRequestAsync(prNumber, ct);
         if (pr is not null && pr.Labels.Contains(Labels.ReadyForReview, StringComparer.OrdinalIgnoreCase))
         {
-            _logger.LogInformation("PR #{Number} already has ready-for-review label, skipping duplicate comment", prNumber);
+            // Label already exists, but ALWAYS post the "ready for review" comment.
+            // NeedsReviewFromAsync() uses this comment to detect rework after changes-requested,
+            // so skipping it would prevent reviewers from re-reviewing after rework.
+            _logger.LogInformation("PR #{Number} already has ready-for-review label, posting rework-ready comment", prNumber);
+            await _github.AddPullRequestCommentAsync(
+                prNumber,
+                $"✅ **{agentName}** has marked this PR as ready for review.\n\nRework complete — ready for re-review.",
+                ct);
             return;
         }
 

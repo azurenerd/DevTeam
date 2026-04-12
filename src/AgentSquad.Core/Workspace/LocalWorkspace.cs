@@ -76,12 +76,23 @@ public class LocalWorkspace
                         await RunGitAsync("clone", _repoUrl, RepoPath, ct: ct, workDir: Path.GetDirectoryName(RepoPath));
                         break;
                     }
-                    catch (TimeoutException) when (attempt < 3)
+                    catch (Exception ex) when (attempt < 3 && (ex is TimeoutException || ex is OperationCanceledException == false))
                     {
-                        _logger.LogWarning("[{Agent}] Clone attempt {Attempt}/3 timed out, retrying...", _agentId, attempt);
-                        if (Directory.Exists(RepoPath))
-                            Directory.Delete(RepoPath, true);
-                        await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                        _logger.LogWarning("[{Agent}] Clone attempt {Attempt}/3 failed ({Error}), retrying...", _agentId, attempt, ex.GetType().Name);
+                        // Wait for OS to release file locks from killed git process
+                        await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                        try
+                        {
+                            if (Directory.Exists(RepoPath))
+                                Directory.Delete(RepoPath, true);
+                        }
+                        catch (Exception cleanupEx)
+                        {
+                            _logger.LogWarning("[{Agent}] Could not clean partial clone dir: {Error}", _agentId, cleanupEx.Message);
+                            // Force-kill any lingering git processes then retry cleanup
+                            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+                            try { if (Directory.Exists(RepoPath)) Directory.Delete(RepoPath, true); } catch { /* best effort */ }
+                        }
                     }
                 }
 
