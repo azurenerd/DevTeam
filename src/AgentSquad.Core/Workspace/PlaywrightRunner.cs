@@ -170,6 +170,94 @@ public class PlaywrightRunner
     }
 
     /// <summary>
+    /// Install browsers matching the test project's Playwright NuGet version.
+    /// Searches for playwright.ps1 in the test project's bin output and runs it.
+    /// This ensures `dotnet test` uses browsers matching its own Playwright assembly.
+    /// </summary>
+    private async Task InstallBrowsersFromTestProjectAsync(
+        string workspacePath, string browsersPath, CancellationToken ct)
+    {
+        try
+        {
+            // First, build the test projects so playwright.ps1 appears in bin/
+            // (dotnet test builds implicitly, but we need the script BEFORE running tests)
+            var testProjects = Directory.EnumerateFiles(workspacePath, "*.csproj", SearchOption.AllDirectories)
+                .Where(f =>
+                {
+                    try
+                    {
+                        var content = File.ReadAllText(f);
+                        return content.Contains("Microsoft.Playwright", StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { return false; }
+                })
+                .ToList();
+
+            foreach (var proj in testProjects)
+            {
+                _logger.LogInformation("Building Playwright test project to generate browser install script: {Project}", proj);
+                var buildInfo = new ProcessStartInfo
+                {
+                    FileName = "dotnet",
+                    Arguments = $"build \"{proj}\" -v q",
+                    WorkingDirectory = workspacePath,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                buildInfo.EnvironmentVariables["PLAYWRIGHT_BROWSERS_PATH"] = browsersPath;
+
+                using var buildProcess = new Process { StartInfo = buildInfo };
+                buildProcess.Start();
+                var buildOut = await buildProcess.StandardOutput.ReadToEndAsync(ct);
+                var buildErr = await buildProcess.StandardError.ReadToEndAsync(ct);
+
+                using var buildCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                buildCts.CancelAfter(TimeSpan.FromMinutes(3));
+                try { await buildProcess.WaitForExitAsync(buildCts.Token); }
+                catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+                {
+                    try { buildProcess.Kill(entireProcessTree: true); } catch { }
+                    _logger.LogWarning("Test project build timed out for {Project}", proj);
+                    continue;
+                }
+
+                if (buildProcess.ExitCode != 0)
+                {
+                    _logger.LogWarning("Test project build failed ({Code}): {Err}", buildProcess.ExitCode,
+                        buildErr.Length > 300 ? buildErr[..300] : buildErr);
+                }
+            }
+
+            // Now find playwright.ps1 from built test project output
+            var scripts = Directory.EnumerateFiles(workspacePath, "playwright.ps1", SearchOption.AllDirectories)
+                .Where(f => f.Contains("bin", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            foreach (var script in scripts)
+            {
+                // Verify Microsoft.Playwright.dll exists alongside it
+                var dir = Path.GetDirectoryName(script)!;
+                var dll = Path.Combine(dir, "Microsoft.Playwright.dll");
+                if (!File.Exists(dll)) continue;
+
+                _logger.LogInformation("Installing browsers from test project script: {Script}", script);
+                await RunInstallCommandAsync(
+                    "pwsh", $"-NoProfile -ExecutionPolicy Bypass -File \"{script}\" install chromium",
+                    browsersPath, ct);
+                return;
+            }
+
+            _logger.LogDebug("No playwright.ps1 found in test project bin directories");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to install browsers from test project");
+        }
+    }
+
+    /// <summary>
     /// Run UI tests with Playwright. Handles the full lifecycle:
     /// 1. Set environment variables for headless mode and browser path
     /// 2. Start the app under test in background (if configured)
@@ -245,6 +333,11 @@ public class PlaywrightRunner
 
                 _logger.LogInformation("App under test is ready at {Url}", baseUrl);
             }
+
+            // Install browsers matching the test project's Playwright NuGet version.
+            // The AI-generated test project may reference a different Playwright version
+            // than the Runner, so we must install browsers from the test project's own script.
+            await InstallBrowsersFromTestProjectAsync(workspacePath, browsersPath, ct);
 
             // Run the test command with Playwright environment
             var result = await RunTestCommandAsync(
