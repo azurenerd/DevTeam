@@ -11,6 +11,7 @@ public class AgentSquadConfig
     public DashboardConfig Dashboard { get; set; } = new();
     public CopilotCliConfig CopilotCli { get; set; } = new();
     public WorkspaceConfig Workspace { get; set; } = new();
+    public HumanInteractionConfig HumanInteraction { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -273,4 +274,163 @@ public class CopilotCliConfig
 
     /// <summary>Additional arguments to pass to the copilot CLI.</summary>
     public string? AdditionalArgs { get; set; }
+}
+
+/// <summary>
+/// Configuration for human-agent hybrid interaction touchpoints.
+/// Each workflow gate can be set to require human approval or run fully autonomously.
+/// When Enabled is false (default), all gates auto-proceed regardless of individual settings.
+/// </summary>
+public class HumanInteractionConfig
+{
+    /// <summary>
+    /// Master switch for human interaction gates. When false, all gates auto-proceed
+    /// and agents operate fully autonomously. Set to true to activate individual gate settings.
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Per-gate configuration. Keys are gate IDs (e.g., "ProjectKickoff", "PMSpecification").
+    /// Gates not explicitly configured default to RequiresHuman=false.
+    /// </summary>
+    public Dictionary<string, GateConfig> Gates { get; set; } = new()
+    {
+        [GateIds.ProjectKickoff] = new(),
+        [GateIds.AgentTeamComposition] = new(),
+        [GateIds.ResearchFindings] = new(),
+        [GateIds.ResearchCompleteness] = new(),
+        [GateIds.PMSpecification] = new(),
+        [GateIds.ArchitectureDesign] = new(),
+        [GateIds.EngineeringPlan] = new(),
+        [GateIds.TaskAssignment] = new(),
+        [GateIds.PRCodeComplete] = new(),
+        [GateIds.PRReviewApproval] = new(),
+        [GateIds.ReworkExhaustion] = new(),
+        [GateIds.SourceBugEscalation] = new(),
+        [GateIds.TestResults] = new(),
+        [GateIds.TestScreenshots] = new(),
+        [GateIds.FinalPRApproval] = new(),
+        [GateIds.FinalReview] = new(),
+        [GateIds.DeploymentDecision] = new(),
+    };
+
+    /// <summary>Check if a specific gate requires human approval (respects Enabled master switch).</summary>
+    public bool RequiresHuman(string gateId)
+    {
+        if (!Enabled) return false;
+        return Gates.TryGetValue(gateId, out var gate) && gate.RequiresHuman;
+    }
+
+    /// <summary>Apply a preset: sets all gates to the specified RequiresHuman value.</summary>
+    public void ApplyPreset(HumanInteractionPreset preset)
+    {
+        switch (preset)
+        {
+            case HumanInteractionPreset.FullAuto:
+                Enabled = false;
+                foreach (var gate in Gates.Values) gate.RequiresHuman = false;
+                break;
+            case HumanInteractionPreset.Supervised:
+                Enabled = true;
+                foreach (var kvp in Gates)
+                {
+                    kvp.Value.RequiresHuman = kvp.Key is GateIds.PMSpecification
+                        or GateIds.ArchitectureDesign or GateIds.EngineeringPlan
+                        or GateIds.ReworkExhaustion or GateIds.FinalPRApproval
+                        or GateIds.FinalReview or GateIds.DeploymentDecision;
+                }
+                break;
+            case HumanInteractionPreset.FullControl:
+                Enabled = true;
+                foreach (var gate in Gates.Values) gate.RequiresHuman = true;
+                break;
+        }
+    }
+}
+
+/// <summary>Configuration for an individual workflow gate.</summary>
+public class GateConfig
+{
+    /// <summary>When true, the workflow pauses at this gate until a human approves.</summary>
+    public bool RequiresHuman { get; set; } = false;
+
+    /// <summary>
+    /// Minutes to wait for human response before applying FallbackAction.
+    /// 0 means wait indefinitely (no timeout).
+    /// </summary>
+    public int TimeoutMinutes { get; set; } = 0;
+
+    /// <summary>Action when timeout expires: "auto-approve", "block", or "escalate".</summary>
+    public string FallbackAction { get; set; } = "auto-approve";
+}
+
+/// <summary>Preset autonomy profiles for quick configuration.</summary>
+public enum HumanInteractionPreset
+{
+    /// <summary>All gates auto-proceed. No human involvement.</summary>
+    FullAuto,
+    /// <summary>Critical gates require human approval; routine gates auto-proceed.</summary>
+    Supervised,
+    /// <summary>All gates require human approval.</summary>
+    FullControl,
+}
+
+/// <summary>
+/// Well-known gate IDs corresponding to the 17 workflow integration points
+/// defined in the VisionDoc. Use these constants instead of magic strings.
+/// </summary>
+public static class GateIds
+{
+    // Phase: Initialization
+    public const string ProjectKickoff = "ProjectKickoff";
+    public const string AgentTeamComposition = "AgentTeamComposition";
+
+    // Phase: Research
+    public const string ResearchFindings = "ResearchFindings";
+    public const string ResearchCompleteness = "ResearchCompleteness";
+
+    // Phase: Architecture
+    public const string PMSpecification = "PMSpecification";
+    public const string ArchitectureDesign = "ArchitectureDesign";
+
+    // Phase: Engineering Planning
+    public const string EngineeringPlan = "EngineeringPlan";
+    public const string TaskAssignment = "TaskAssignment";
+
+    // Phase: Parallel Development
+    public const string PRCodeComplete = "PRCodeComplete";
+    public const string PRReviewApproval = "PRReviewApproval";
+    public const string ReworkExhaustion = "ReworkExhaustion";
+    public const string SourceBugEscalation = "SourceBugEscalation";
+
+    // Phase: Testing
+    public const string TestResults = "TestResults";
+    public const string TestScreenshots = "TestScreenshots";
+    public const string FinalPRApproval = "FinalPRApproval";
+
+    // Phase: Review & Completion
+    public const string FinalReview = "FinalReview";
+    public const string DeploymentDecision = "DeploymentDecision";
+
+    /// <summary>All gate IDs with display names, grouped by workflow phase.</summary>
+    public static readonly IReadOnlyList<(string Phase, string Id, string Name, string Description)> AllGates = new[]
+    {
+        ("Initialization", ProjectKickoff, "Project Kickoff", "Review project description, goals, and constraints before agents begin"),
+        ("Initialization", AgentTeamComposition, "Agent Team", "Review which agents to spawn and model tier assignments"),
+        ("Research", ResearchFindings, "Research Findings", "Review Research.md — competitive analysis, technology landscape"),
+        ("Research", ResearchCompleteness, "Research Complete", "Confirm all research threads are complete before moving on"),
+        ("Architecture", PMSpecification, "PM Specification", "Review PMSpec.md — business requirements, user stories, acceptance criteria"),
+        ("Architecture", ArchitectureDesign, "Architecture Design", "Review Architecture.md — system design, component diagrams, tech choices"),
+        ("Engineering", EngineeringPlan, "Engineering Plan", "Review EngineeringPlan.md — task breakdown, assignments, dependencies"),
+        ("Engineering", TaskAssignment, "Task Assignment", "Review PR creation and engineer assignment for each task"),
+        ("Development", PRCodeComplete, "PR Code Complete", "Review individual PR when ready — code, tests, documentation"),
+        ("Development", PRReviewApproval, "PR Review Result", "Review peer review result (approve/request changes)"),
+        ("Development", ReworkExhaustion, "Rework Exhaustion", "Agent exhausted max rework cycles — human decides next step"),
+        ("Development", SourceBugEscalation, "Source Bug Escalation", "TE found source bugs, escalating to engineer"),
+        ("Testing", TestResults, "Test Results", "Review all test tier results — unit, integration, UI"),
+        ("Testing", TestScreenshots, "Test Screenshots", "Review visual test artifacts for UI verification"),
+        ("Testing", FinalPRApproval, "Final PR Approval", "Human is last reviewer before merge — after ALL agent reviews + tests"),
+        ("Completion", FinalReview, "Final Review", "All PRs merged, all tests passing — confirm ready for completion"),
+        ("Completion", DeploymentDecision, "Deployment", "Ship/no-ship decision"),
+    };
 }

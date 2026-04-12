@@ -491,6 +491,81 @@ else if (_config is not null)
             }
         </div>
 
+        @* ── Human Interaction Settings ── *@
+        <div class="config-card">
+            <div class="config-card-header" @onclick="() => _humanInteractionExpanded = !_humanInteractionExpanded">
+                <span class="config-card-icon">🧑‍💼</span>
+                <span class="config-card-title">Human Interaction</span>
+                <span class="config-card-chevron @(_humanInteractionExpanded ? "expanded" : "")">▶</span>
+            </div>
+            @if (_humanInteractionExpanded)
+            {
+                <div class="config-card-body">
+                    <div class="config-field" title="Master switch for human interaction gates. When off, all gates auto-proceed and agents run fully autonomously.">
+                        <label>Enable Human Checkpoints</label>
+                        <label class="config-toggle">
+                            <input type="checkbox" @bind="_config.HumanInteraction.Enabled" />
+                            <span class="config-toggle-slider"></span>
+                        </label>
+                        <span class="config-hint">When enabled, individual gates below can pause for human approval</span>
+                    </div>
+
+                    <div class="config-preset-bar">
+                        <span class="config-preset-label">Presets:</span>
+                        <button class="config-preset-btn @(!_config.HumanInteraction.Enabled ? "config-preset-active" : "")"
+                            @onclick="() => ApplyHumanPreset(HumanInteractionPreset.FullAuto)"
+                            title="All gates auto-proceed. Agents operate fully autonomously with no human involvement.">
+                            🤖 Full Auto
+                        </button>
+                        <button class="config-preset-btn @(IsPresetActive(HumanInteractionPreset.Supervised) ? "config-preset-active" : "")"
+                            @onclick="() => ApplyHumanPreset(HumanInteractionPreset.Supervised)"
+                            title="Critical gates (Spec, Architecture, Plan, Final PR, Deploy) require human approval. Routine gates auto-proceed.">
+                            👁️ Supervised
+                        </button>
+                        <button class="config-preset-btn @(IsPresetActive(HumanInteractionPreset.FullControl) ? "config-preset-active" : "")"
+                            @onclick="() => ApplyHumanPreset(HumanInteractionPreset.FullControl)"
+                            title="All gates require human approval. Maximum oversight — every decision pauses for human review.">
+                            🛡️ Full Control
+                        </button>
+                    </div>
+
+                    @if (_config.HumanInteraction.Enabled)
+                    {
+                        @foreach (var phaseGroup in GateIds.AllGates.GroupBy(g => g.Phase))
+                        {
+                            <div class="config-gate-phase">
+                                <h4 class="config-gate-phase-title">@phaseGroup.Key</h4>
+                                <div class="config-gate-grid">
+                                    @foreach (var gate in phaseGroup)
+                                    {
+                                        var gateConfig = GetOrCreateGate(gate.Id);
+                                        <div class="config-gate-item" title="@gate.Description">
+                                            <div class="config-gate-header">
+                                                <label class="config-toggle config-toggle-sm">
+                                                    <input type="checkbox" @bind="gateConfig.RequiresHuman" />
+                                                    <span class="config-toggle-slider"></span>
+                                                </label>
+                                                <span class="config-gate-name">@gate.Name</span>
+                                            </div>
+                                            <span class="config-gate-badge @(gateConfig.RequiresHuman ? "config-gate-human" : "config-gate-auto")">
+                                                @(gateConfig.RequiresHuman ? "👤 Human" : "🤖 Auto")
+                                            </span>
+                                        </div>
+                                    }
+                                </div>
+                            </div>
+                        }
+                    }
+                    else
+                    {
+                        <div class="config-gate-disabled-notice">
+                            <span>🤖 All gates are set to <strong>Full Auto</strong> — agents operate autonomously without human checkpoints.</span>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+
         @* ── Save Button ── *@
         <div class="config-save-bar">
             @if (_saveError is not null)
@@ -703,6 +778,7 @@ else if (_config is not null)
     private bool _limitsExpanded;
     private bool _dashboardExpanded;
     private bool _workspaceExpanded;
+    private bool _humanInteractionExpanded;
 
     // Secret visibility
     private bool _showToken;
@@ -911,6 +987,39 @@ else if (_config is not null)
         "Junior Engineer (Template)" => "Template for dynamically spawned Junior Engineers. JEs handle simple, well-defined tasks like boilerplate and scaffolding. Uses cheaper model tiers.",
         _ => agentName
     };
+
+    // Human Interaction helpers
+    private void ApplyHumanPreset(HumanInteractionPreset preset)
+    {
+        _config?.HumanInteraction.ApplyPreset(preset);
+        StateHasChanged();
+    }
+
+    private bool IsPresetActive(HumanInteractionPreset preset)
+    {
+        if (_config is null) return false;
+        var hi = _config.HumanInteraction;
+        if (!hi.Enabled) return preset == HumanInteractionPreset.FullAuto;
+        return preset switch
+        {
+            HumanInteractionPreset.Supervised =>
+                hi.Enabled && hi.Gates.Values.Any(g => g.RequiresHuman) && hi.Gates.Values.Any(g => !g.RequiresHuman),
+            HumanInteractionPreset.FullControl =>
+                hi.Enabled && hi.Gates.Values.All(g => g.RequiresHuman),
+            _ => false
+        };
+    }
+
+    private GateConfig GetOrCreateGate(string gateId)
+    {
+        if (_config is null) return new GateConfig();
+        if (!_config.HumanInteraction.Gates.TryGetValue(gateId, out var gate))
+        {
+            gate = new GateConfig();
+            _config.HumanInteraction.Gates[gateId] = gate;
+        }
+        return gate;
+    }
 
     /// <summary>Deep-copy via JSON round-trip so edits don't touch live config.</summary>
     private static AgentSquadConfig DeepCopy(AgentSquadConfig src)

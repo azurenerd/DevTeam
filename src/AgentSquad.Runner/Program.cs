@@ -71,6 +71,9 @@ builder.Services.AddSingleton<PlaywrightRunner>();
 builder.Services.AddSingleton<TestStrategyAnalyzer>();
 builder.Services.AddSingleton<AgentSquad.Core.Metrics.BuildTestMetrics>();
 
+// Human interaction gate service
+builder.Services.AddSingleton<IGateCheckService, GateCheckService>();
+
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();
 

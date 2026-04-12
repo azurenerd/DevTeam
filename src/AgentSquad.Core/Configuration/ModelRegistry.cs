@@ -108,10 +108,14 @@ public class ModelRegistry
     {
         lock (_overrideLock)
         {
-            return _agentModelOverrides.TryGetValue(agentId, out var overrideModel)
-                ? overrideModel
-                : _cliConfig.ModelName;
+            if (_agentModelOverrides.TryGetValue(agentId, out var overrideModel))
+                return overrideModel;
         }
+
+        // Respect FastMode: when enabled, the actual model used is FastModeModel
+        return _cliConfig.FastMode && !string.IsNullOrEmpty(_cliConfig.FastModeModel)
+            ? _cliConfig.FastModeModel
+            : _cliConfig.ModelName;
     }
 
     /// <summary>Set a per-agent model override. Takes effect on the agent's next AI call.</summary>

@@ -4812,3 +4812,122 @@ div[title] .config-agent-name {
     padding-top: 0.5rem;
     border-top: 1px solid rgba(255, 255, 255, 0.06);
 }
+
+/* ── Human Interaction Config ── */
+.config-preset-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 0;
+    margin-bottom: 0.75rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.config-preset-label {
+    color: #8b949e;
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.config-preset-btn {
+    padding: 0.4rem 0.8rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.03);
+    color: #c9d1d9;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.config-preset-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.config-preset-btn.config-preset-active {
+    background: rgba(56, 139, 253, 0.15);
+    border-color: #388bfd;
+    color: #58a6ff;
+}
+
+.config-gate-phase {
+    margin-bottom: 1rem;
+}
+
+.config-gate-phase-title {
+    color: #8b949e;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    margin: 0 0 0.5rem 0;
+    padding-bottom: 0.25rem;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.config-gate-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 0.5rem;
+}
+
+.config-gate-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 6px;
+    transition: background 0.2s;
+}
+
+.config-gate-item:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.config-gate-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.config-gate-name {
+    font-size: 0.82rem;
+    color: #c9d1d9;
+}
+
+.config-gate-badge {
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+    border-radius: 4px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.config-gate-auto {
+    background: rgba(63, 185, 80, 0.12);
+    color: #3fb950;
+}
+
+.config-gate-human {
+    background: rgba(210, 153, 34, 0.12);
+    color: #d29922;
+}
+
+.config-toggle-sm {
+    transform: scale(0.8);
+}
+
+.config-gate-disabled-notice {
+    padding: 1rem;
+    background: rgba(56, 139, 253, 0.06);
+    border: 1px solid rgba(56, 139, 253, 0.15);
+    border-radius: 8px;
+    color: #8b949e;
+    text-align: center;
+    font-size: 0.85rem;
+}

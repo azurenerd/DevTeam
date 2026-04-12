@@ -1783,7 +1783,11 @@ public class TestEngineerAgent : AgentBase
                 combinedSystem.AppendLine("- IMPORTANT: Use xUnit ([Fact], [Collection], [Trait]) — do NOT use NUnit.");
                 combinedSystem.AppendLine("- PlaywrightFixture base class must use IAsyncLifetime, NOT [SetUpFixture].");
                 combinedSystem.AppendLine("- Add [Trait(\"Category\", \"UI\")] and [Collection(\"Playwright\")] attributes.");
-                combinedSystem.AppendLine("- Place in tests/{ProjectName}.UITests/. Include PlaywrightFixture class.\n");
+                combinedSystem.AppendLine("- Place in tests/{ProjectName}.UITests/. Include PlaywrightFixture class.");
+                combinedSystem.AppendLine("- CRITICAL: Do NOT use made-up CSS selectors like '.dashboard-root', '.app-root', '#dashboard'.");
+                combinedSystem.AppendLine("- Blazor apps render into '#app' or 'body'. Use semantic HTML selectors (h1, nav, main).");
+                combinedSystem.AppendLine("- Use page.GetByText(), page.GetByRole() for content-based selection.");
+                combinedSystem.AppendLine("- Set timeouts to 30000ms — Blazor needs time for SignalR circuit init.\n");
             }
             combinedSystem.AppendLine("YOU MUST output .csproj files with all required package references.");
 
@@ -2009,6 +2013,14 @@ public class TestEngineerAgent : AgentBase
                 "- Capture screenshots on failure using PlaywrightFixture.CaptureScreenshotAsync\n" +
                 "- Include a shared PlaywrightFixture base class (use [TestFixture] NOT [SetUpFixture])\n" +
                 "- IMPORTANT: Use xUnit ([Fact], [Collection], [Trait]) — do NOT use NUnit ([Test], [SetUpFixture])\n" +
+                "- CRITICAL SELECTOR RULES:\n" +
+                "  * Do NOT use selectors like '.dashboard-root', '.app-root', '#dashboard', or any made-up CSS class\n" +
+                "  * Blazor Server apps render into a <div id=\"app\"> element — use '#app' or 'body' as the root container\n" +
+                "  * Only use selectors that are GUARANTEED to exist: 'body', 'h1', 'h2', 'nav', 'main', 'header', 'footer', semantic HTML\n" +
+                "  * For page-specific elements, use text content selectors: page.GetByText(), page.GetByRole()\n" +
+                "  * NEVER assume a CSS class exists unless you can see it in the source code provided\n" +
+                "  * Use page.WaitForLoadStateAsync(LoadState.NetworkIdle) instead of waiting for specific selectors\n" +
+                "  * Set generous timeouts (30000ms) for Blazor apps which need time for SignalR circuit initialization\n" +
                 "- Example Playwright test structure:\n" +
                 "```csharp\n" +
                 "// PlaywrightFixture.cs — shared base class\n" +
@@ -2352,7 +2364,10 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 "Test that the main page loads and renders key content. Use headless mode. " +
                 "IMPORTANT: Use xUnit ([Fact], IClassFixture<PlaywrightFixture>), NOT NUnit. " +
                 "PlaywrightFixture must implement IAsyncLifetime, NOT use [SetUpFixture]. " +
-                "Include the PlaywrightFixture class.",
+                "Include the PlaywrightFixture class. " +
+                "CRITICAL: Do NOT use made-up CSS selectors like '.dashboard-root' or '.app-root'. " +
+                "Blazor apps use '#app' or 'body' as the root. Use page.GetByText(), page.GetByRole(), " +
+                "or semantic HTML selectors (h1, nav, main). Set timeouts to 30000ms for Blazor SignalR hydration.",
 
             _ => $"Generate {count} test method(s) in a single test file for the above source code using {techStack}."
         };
