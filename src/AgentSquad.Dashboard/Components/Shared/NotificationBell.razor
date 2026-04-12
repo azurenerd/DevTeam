@@ -69,12 +69,17 @@
                 {
                     @foreach (var notification in _notifications)
                     {
-                        <div class="notification-item @(notification.IsRead ? "read" : "unread") @(notification.IsResolved ? "resolved" : "")">
+                        var isProjectComplete = notification.GateId == "project-complete";
+                        <div class="notification-item @(notification.IsRead ? "read" : "unread") @(notification.IsResolved ? "resolved" : "") @(isProjectComplete ? "project-complete" : "")">
                             <div class="notification-item-header">
-                                <span class="notification-gate-badge @(notification.IsResolved ? "gate-resolved" : "")">
-                                    @notification.GateName
+                                <span class="notification-gate-badge @(isProjectComplete ? "gate-complete" : notification.IsResolved ? "gate-resolved" : "")">
+                                    @(isProjectComplete ? "🎉 " : "")@notification.GateName
                                 </span>
-                                @if (notification.IsResolved)
+                                @if (isProjectComplete)
+                                {
+                                    <span class="notification-status-complete">✅ Complete</span>
+                                }
+                                else if (notification.IsResolved)
                                 {
                                     <span class="notification-status-resolved">✅ Approved</span>
                                 }
@@ -88,7 +93,7 @@
                                 <span class="notification-time">
                                     @if (notification.IsResolved && notification.ResolvedAt.HasValue)
                                     {
-                                        @:Approved @FormatTime(notification.ResolvedAt.Value)
+                                        @(isProjectComplete ? "Completed" : "Approved") @FormatTime(notification.ResolvedAt.Value)
                                     }
                                     else
                                     {
@@ -103,8 +108,15 @@
                                            rel="noopener noreferrer"
                                            class="notification-link"
                                            @onclick="() => OnLinkClicked(notification)">
-                                            @(notification.ResourceType == "PR" ? "🔀" : "📋")
-                                            #@notification.ResourceNumber ↗
+                                            @if (isProjectComplete)
+                                            {
+                                                @:📁 View Repo ↗
+                                            }
+                                            else
+                                            {
+                                                @(notification.ResourceType == "PR" ? "🔀" : "📋")
+                                                @:#@(notification.ResourceNumber) ↗
+                                            }
                                         </a>
                                     }
                                 </div>

@@ -6225,3 +6225,20 @@ div[title] .config-agent-name {
     justify-content: space-between;
     margin-top: 0.25rem;
 }
+/* Project complete notification */
+.notification-item.project-complete {
+    background: linear-gradient(135deg, rgba(63, 185, 80, 0.08), rgba(0, 212, 255, 0.05));
+    border-left: 3px solid var(--green, #3fb950);
+}
+
+.notification-gate-badge.gate-complete {
+    background: rgba(63, 185, 80, 0.15);
+    color: var(--green, #3fb950);
+    font-weight: 700;
+}
+
+.notification-status-complete {
+    font-size: 0.65rem;
+    color: var(--green, #3fb950);
+    font-weight: 700;
+}

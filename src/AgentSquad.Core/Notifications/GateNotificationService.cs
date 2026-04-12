@@ -1,4 +1,5 @@
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.GitHub;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -19,6 +20,12 @@ public class GateNotificationService : BackgroundService
     private readonly AgentSquadConfig _config;
     private readonly ILogger<GateNotificationService> _logger;
     private readonly object _lock = new();
+
+    /// <summary>
+    /// Guard flag so the "project complete" notification fires exactly once per app lifetime.
+    /// Reset only on process restart.
+    /// </summary>
+    private bool _projectCompleteNotified;
 
     /// <summary>
     /// Poll interval for checking pending gate approvals on GitHub.
@@ -223,6 +230,7 @@ public class GateNotificationService : BackgroundService
             try
             {
                 await PollPendingGatesAsync(stoppingToken);
+                await CheckProjectCompleteAsync(stoppingToken);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
@@ -280,6 +288,88 @@ public class GateNotificationService : BackgroundService
 
             // Small delay between checks to spread out API calls
             await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+        }
+    }
+
+    // -- Project completion detection --
+
+    /// <summary>
+    /// Checks whether the project is fully complete (zero open PRs and zero open issues).
+    /// Fires a single "Project Complete" notification when detected, then never checks again.
+    /// Only starts checking after at least one notification has been created (meaning agents
+    /// have been active), to avoid false positives during startup.
+    /// </summary>
+    private async Task CheckProjectCompleteAsync(CancellationToken ct)
+    {
+        // Already notified — nothing to do for the rest of this process lifetime
+        if (_projectCompleteNotified)
+            return;
+
+        // Don't check until agents have actually been active (at least one notification exists)
+        bool hasAnyNotifications;
+        lock (_lock)
+        {
+            hasAnyNotifications = _notifications.Count > 0;
+        }
+        if (!hasAnyNotifications)
+            return;
+
+        // Don't check if there are still unresolved gate notifications
+        if (OpenCount > 0)
+            return;
+
+        try
+        {
+            var github = _serviceProvider.GetRequiredService<IGitHubService>();
+
+            var openPRs = await github.GetOpenPullRequestsAsync(ct);
+            if (openPRs.Count > 0)
+                return; // Still have open PRs
+
+            // Small delay to spread API calls
+            await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
+
+            var openIssues = await github.GetOpenIssuesAsync(ct);
+            if (openIssues.Count > 0)
+                return; // Still have open issues
+
+            // All clear — project is done. Set flag BEFORE creating the notification
+            // to guarantee we never fire twice even if AddNotificationAsync throws.
+            _projectCompleteNotified = true;
+
+            _logger.LogInformation("🎉 Project complete — no open PRs or issues remain");
+
+            var notification = new GateNotification
+            {
+                Id = Guid.NewGuid().ToString("N")[..12],
+                GateId = "project-complete",
+                GateName = "Project Complete",
+                Context = "All PRs merged and all issues closed — the project is finished!",
+                ResourceType = "Project",
+                GitHubUrl = $"https://github.com/{_config.Project.GitHubRepo}",
+                IsResolved = true,
+                ResolvedAt = DateTime.UtcNow,
+            };
+
+            lock (_lock) { _notifications.Add(notification); }
+
+            // Dispatch to channels (email/teams/slack)
+            foreach (var channel in _channels.Where(c => c.IsEnabled))
+            {
+                try { await channel.SendAsync(notification, ct); }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to send completion notification via {Channel}",
+                        channel.ChannelName);
+                }
+            }
+
+            OnChange?.Invoke();
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error checking project completion status");
         }
     }
 
