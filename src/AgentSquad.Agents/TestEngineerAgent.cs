@@ -426,9 +426,13 @@ public class TestEngineerAgent : AgentBase
 
             try
             {
-                await AddInlineTestsToPRAsync(pr, codeFiles, ct);
-                _testedPRs.Add(pr.Number);
-                _sessionTestedPRs.Add(pr.Number);
+                var testingCompleted = await AddInlineTestsToPRAsync(pr, codeFiles, ct);
+                if (testingCompleted)
+                {
+                    _testedPRs.Add(pr.Number);
+                    _sessionTestedPRs.Add(pr.Number);
+                }
+                // else: blocked (e.g., base build failed) — don't add to _testedPRs so TE re-checks after rework
             }
             catch (OperationCanceledException)
             {
@@ -468,7 +472,8 @@ public class TestEngineerAgent : AgentBase
     /// - Test build fails after max retries → reverts, posts comment
     /// - No workspace available → falls back to API-only commit
     /// </summary>
-    private async Task AddInlineTestsToPRAsync(
+    /// <returns>true if testing completed (pass or fail); false if blocked (e.g., base build failed, awaiting rework)</returns>
+    private async Task<bool> AddInlineTestsToPRAsync(
         AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
     {
         _currentTestPrNumber = pr.Number;
@@ -479,9 +484,12 @@ public class TestEngineerAgent : AgentBase
             UpdateStatus(AgentStatus.Working, $"Adding tests to PR #{pr.Number}");
 
             if (_workspace is not null && _buildRunner is not null && _testRunner is not null)
-                await AddInlineTestsViaWorkspaceAsync(pr, codeFilePaths, ct);
+                return await AddInlineTestsViaWorkspaceAsync(pr, codeFilePaths, ct);
             else
+            {
                 await AddInlineTestsViaApiAsync(pr, codeFilePaths, ct);
+                return true; // API path always completes
+            }
         }
         finally
         {
@@ -493,7 +501,8 @@ public class TestEngineerAgent : AgentBase
     /// <summary>
     /// Workspace path: checkout PR branch, verify build, generate tests, build+test, push.
     /// </summary>
-    private async Task AddInlineTestsViaWorkspaceAsync(
+    /// <returns>true if testing completed; false if blocked by build failure (awaiting rework)</returns>
+    private async Task<bool> AddInlineTestsViaWorkspaceAsync(
         AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
     {
         var wsConfig = _config.Workspace;
@@ -539,9 +548,8 @@ public class TestEngineerAgent : AgentBase
                 Feedback = $"Build failed — cannot add tests until build errors are fixed:\n{buildErrorSummary}"
             }, ct);
 
-            // Don't mark as tested — allow retry after engineer fixes build
-            _testedPRs.Remove(pr.Number);
-            return;
+            // Return false — PR NOT tested, caller should NOT add to _testedPRs
+            return false;
         }
 
         // --- Phase 3: Read source files locally (faster than API, no rate limit) ---
@@ -576,7 +584,7 @@ public class TestEngineerAgent : AgentBase
         if (sourceFiles.Count == 0)
         {
             Logger.LogWarning("No source files readable for PR #{Number}", pr.Number);
-            return;
+            return true; // Nothing to test — consider handled
         }
 
         // --- Phase 4: Generate test code via AI ---
@@ -587,14 +595,14 @@ public class TestEngineerAgent : AgentBase
         if (string.IsNullOrWhiteSpace(testOutput))
         {
             Logger.LogWarning("AI returned empty test output for PR #{Number}", pr.Number);
-            return;
+            return true; // AI couldn't generate tests — consider handled
         }
 
         var testFiles = FilterToTestFilesOnly(CodeFileParser.ParseFiles(testOutput));
         if (testFiles.Count == 0)
         {
             Logger.LogWarning("No parseable test files from AI output for PR #{Number}", pr.Number);
-            return;
+            return true; // No test files parsed — consider handled
         }
 
         Logger.LogInformation(
@@ -631,7 +639,7 @@ public class TestEngineerAgent : AgentBase
                 $"❌ **Test Engineer:** Could not make test code compile after " +
                 $"{wsConfig.MaxBuildRetries} attempts. Build errors prevented test addition.\n\n" +
                 $"The PR can still be merged without automated tests.", ct);
-            return;
+            return true; // Build failed but we reported it — consider handled
         }
 
         // --- Phase 7: Run tests by tier ---
@@ -723,7 +731,7 @@ public class TestEngineerAgent : AgentBase
                 await RequestSourceBugFixesAsync(pr, sourceBugs, ct);
                 // Don't add tests-added label yet — waiting for engineer to fix source bugs
                 _testedPRs.Remove(pr.Number); // Allow re-test after engineer fixes
-                return;
+                return false;
             }
             else
             {
@@ -743,7 +751,7 @@ public class TestEngineerAgent : AgentBase
             Logger.LogWarning("PR #{Number} is no longer open (state: {State}), discarding test work",
                 pr.Number, currentPr?.State ?? "null");
             await _workspace.RevertUncommittedChangesAsync(ct);
-            return;
+            return true; // PR closed — consider it handled
         }
 
         // --- Phase 9: Commit and push to the PR's branch ---
@@ -772,7 +780,7 @@ public class TestEngineerAgent : AgentBase
                     await _workspace.RevertUncommittedChangesAsync(ct);
                     await _github.AddPullRequestCommentAsync(pr.Number,
                         "⚠️ **Test Engineer:** Could not push tests — merge conflict with recent changes on the branch.", ct);
-                    return;
+                    return true; // Merge conflict — handled, don't retry endlessly
                 }
 
                 // Rebuild to verify the merge didn't break anything
@@ -782,7 +790,7 @@ public class TestEngineerAgent : AgentBase
                 {
                     Logger.LogWarning("Rebuild after merge failed for PR #{Number}", pr.Number);
                     await _workspace.RevertUncommittedChangesAsync(ct);
-                    return;
+                    return true; // Build failed after merge — handled
                 }
 
                 await _workspace.PushAsync(pr.HeadBranch, ct);
@@ -795,7 +803,7 @@ public class TestEngineerAgent : AgentBase
                     "⚠️ **Test Engineer:** Could not push tests to this branch. " +
                     "The branch may have diverged. Tests will be retried on the next cycle.", ct);
                 _testedPRs.Remove(pr.Number); // Allow retry
-                return;
+                return false;
             }
         }
 
@@ -810,6 +818,7 @@ public class TestEngineerAgent : AgentBase
             $"✅ Added {testFiles.Count} test files inline to PR #{pr.Number}: {pr.Title}");
         UpdateStatus(AgentStatus.Idle,
             $"Tests added to PR #{pr.Number} — awaiting PE merge");
+        return true;
     }
 
     /// <summary>
