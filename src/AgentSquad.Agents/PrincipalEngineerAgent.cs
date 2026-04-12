@@ -1999,6 +1999,15 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             if (pr.UpdatedAt is null || pr.UpdatedAt <= pr.CreatedAt.AddMinutes(1))
                 return;
 
+            // Don't recover if the last comment is a build-blocked message — no code was committed
+            var comments = await GitHub.GetPullRequestCommentsAsync(CurrentPrNumber.Value, ct);
+            var lastComment = comments.LastOrDefault();
+            if (lastComment?.Body?.Contains("Build Blocked", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                Logger.LogDebug("PR #{PrNumber} last comment is Build Blocked — not recovering", CurrentPrNumber.Value);
+                return;
+            }
+
             Logger.LogInformation(
                 "PE recovering stuck in-progress PR #{PrNumber} — marking ready for review",
                 pr.Number);

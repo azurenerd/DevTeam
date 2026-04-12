@@ -89,6 +89,7 @@ The AgentSquad workflow has **17 natural integration points** where human review
 |---|---|---|---|
 | `G-13` | Test Results | L1 (Inform) | All test tiers complete — unit, integration, UI |
 | `G-14` | Test Screenshots/Videos | L2 (Advise) | Visual test artifacts for UI verification |
+| `G-14b` | Human Final PR Approval | L3 (Approve) | Human is last reviewer before merge — after ALL agent reviews + TE tests complete |
 
 #### Phase: Review
 | Gate ID | Gate Name | Default Level | What's Reviewed |
@@ -432,6 +433,84 @@ Chat and gates are complementary:
 - **Chat** is unstructured, creative interaction — "I don't like the microservice approach, let's think about a modular monolith instead"
 
 The human can use chat to provide guidance that influences agent behavior *between* gates, not just at gates.
+
+### 7.5 Human Final PR Approval & Review Board (Gate G-14b)
+
+#### The Vision: "Director's Screening Room"
+
+When `HumanFinalApproval` is enabled in configuration, no PR is merged until a human reviews and approves it. This is the **final gate** in the PR lifecycle — after the PE Worker implements, the Architect reviews architecture, the PE Leader reviews code quality, and the Test Engineer runs all tests (unit, integration, UI) and posts results with screenshots and video recordings.
+
+The human "Director" sees the PR only after all agent reviewers have done their best to catch issues, saving the human from having to find problems that automated review would have caught. The human's role shifts from "find bugs" to "validate intent" — does this PR actually deliver what was requested?
+
+#### PR Review Flow with Human Gate
+
+```
+PE Worker creates PR
+  → Architect reviews (architecture alignment, screenshot analysis)
+  → PE Leader reviews (code quality, completeness)
+  → PE Worker addresses rework (if changes requested)
+  → Architect + PE Leader re-approve
+  → TE runs tests (unit, integration, UI), posts results + screenshots + video
+  → [NEW] Human Final Approval — PR is held in "awaiting-human-review" state
+  → Human approves → PR is merged
+  → Human requests changes → Comment posted, PE Worker picks up rework cycle
+```
+
+#### The Review Board UI
+
+The Review Board is a dedicated dashboard view designed like a **director reviewing storyboards** at a film studio. Each PR awaiting human approval is presented as a "scene" card with all the context needed for a fast, informed decision:
+
+**Card Layout (per PR):**
+
+| Section | Content |
+|---|---|
+| **Header** | PR title, linked issue/story, author agent, creation timestamp |
+| **Requirements** | Linked issue acceptance criteria + relevant PMSpec section (auto-extracted) |
+| **Agent Review Trail** | Chronological feed of all agent reviews — Architect's architecture assessment, PE Leader's code quality notes, each with their APPROVE/CHANGES REQUESTED verdict |
+| **Code Changes** | Embedded diff viewer (or link to GitHub diff) showing actual files changed |
+| **Screenshots** | Gallery of all screenshots posted by PE (UI preview) and TE (test screenshots), rendered inline for visual comparison against requirements |
+| **Video Recordings** | Embedded video player for Playwright test recordings — the human can watch a real walkthrough of the feature being tested. If video analysis becomes available via multimodal models (e.g., Gemini), an AI-generated summary of the video can accompany the player. |
+| **Test Results** | Test summary table: passed/failed/skipped counts by tier (unit, integration, UI), with expandable failure details |
+| **Decision Controls** | `[Approve & Merge]` `[Request Changes]` `[Skip to Next]` buttons, with optional comment field for change requests |
+
+**Board-Level View:**
+- All PRs awaiting human review shown as cards in a kanban-style board
+- Sortable by: creation time, complexity, number of agent review cycles, test pass rate
+- Filter by: agent author, issue/story, review status
+- Badge indicators: 🟢 all tests pass, 🟡 some warnings, 🔴 test failures (should be rare after TE review)
+- Quick-approve mode: for high-confidence PRs (all agents approved, all tests pass, screenshots look good), a single-click approve
+
+**Notification Integration:**
+- When a PR reaches "awaiting-human-review" state, the notification system (Section 3) sends an alert via configured channels (Teams, email, SMS)
+- The notification includes a deep link directly to the PR's Review Board card
+- Configurable: batch notifications (e.g., "3 PRs ready for your review") vs. individual alerts
+
+#### Configuration
+
+```json
+{
+  "AgentSquad": {
+    "HumanReview": {
+      "Enabled": true,
+      "RequireHumanApprovalBeforeMerge": true,
+      "AutoMergeIfAllAgentsApprove": false,
+      "NotifyChannels": ["teams", "email"],
+      "ReviewTimeoutHours": 24,
+      "TimeoutAction": "notify-again"
+    }
+  }
+}
+```
+
+#### Future: AI-Assisted Video Review
+
+Currently, AI models (Claude, GPT) support image analysis but not direct video processing. When multimodal video understanding becomes available via standard APIs (e.g., Google Gemini already supports this), the system could:
+1. Extract the Playwright test recording for each PR
+2. Send the video to a multimodal model with the prompt: "Watch this walkthrough of the feature. Compare it to these requirements. Does the UI behave correctly? Are there visual errors, broken layouts, or missing functionality?"
+3. Post the AI video analysis as a comment on the PR before the human reviews it
+4. The human then sees both the raw video AND the AI's assessment, further accelerating their review
+
+As an intermediate step before native video support, the system could extract key frames from Playwright recordings (using ffmpeg at ~1fps or on scene changes) and send those as a multi-image sequence to Claude/GPT for analysis — achieving ~80% of the value without waiting for native video APIs.
 
 ---
 
