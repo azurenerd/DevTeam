@@ -1878,7 +1878,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 if (codeFiles.Count > 0 && Workspace is not null && BuildRunnerSvc is not null)
                 {
                     var committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles,
-                        $"Implement {pr.Title}", 1, 1, pr.Title, chat, ct);
+                        $"Implement {pr.Title}", 1, 1, pr.Title, chat, ct, isRework: true);
                     if (!committed)
                     {
                         Logger.LogWarning("PE single-pass continuation blocked by build errors on PR #{PrNumber}", pr.Number);
@@ -1984,7 +1984,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     {
                         var committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles,
                             $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}",
-                            stepNumber, steps.Count, step, chat, ct);
+                            stepNumber, steps.Count, step, chat, ct, isRework: true);
                         if (!committed)
                         {
                             Logger.LogWarning("PE rework step {Step}/{Total} blocked by build errors on PR #{PrNumber}",
@@ -2768,6 +2768,15 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "SCOPE: This PR is ONE task. Review the ACTUAL CODE against its stated scope.\n\n" +
                 "CHECK: architecture compliance, implementation completeness, code quality, " +
                 "bugs/logic errors, missing validation, test coverage.\n\n" +
+                "ACCEPTANCE CRITERIA FILE COMPLETENESS CHECK (critical):\n" +
+                "- Compare the ACTUAL files in this PR against the acceptance criteria and file plan " +
+                "in the linked issue and PR description.\n" +
+                "- If the acceptance criteria specify files/components that should be created " +
+                "(e.g., Models, Interfaces, Layouts, CSS, config files, data files) and those files " +
+                "are MISSING from the PR, this is a REQUEST_CHANGES issue.\n" +
+                "- A PR that delivers only a fraction of expected files is INCOMPLETE. " +
+                "For example, if acceptance criteria list 15 files but only 3 are present, that's a blocker.\n" +
+                "- List each missing file/component by name.\n\n" +
                 "DUPLICATE/CONFLICT CHECKS (critical for multi-agent projects):\n" +
                 "- Does this PR create types/classes that ALREADY EXIST in the main branch file listing?\n" +
                 "- Does this PR use the CORRECT namespace consistent with existing code structure?\n" +
@@ -2790,7 +2799,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "- Last line: VERDICT: APPROVE or VERDICT: REQUEST_CHANGES\n\n" +
                 "WRONG: 'Let me review the code... Based on my analysis... 1. Issue'\n" +
                 "WRONG: '2. **Dashboard.razor** — helper methods truncated, cannot verify'\n" +
-                "RIGHT: '1. **AuthController.cs** — missing null check on user parameter'");
+                "RIGHT: '1. **AuthController.cs** — missing null check on user parameter'\n" +
+                "RIGHT: '2. Missing **Models/ReportData.cs**, **Models/Milestone.cs** listed in acceptance criteria'");
 
             var reviewContextBuilder = new System.Text.StringBuilder();
             reviewContextBuilder.AppendLine($"## Architecture\n{architectureDoc}\n");

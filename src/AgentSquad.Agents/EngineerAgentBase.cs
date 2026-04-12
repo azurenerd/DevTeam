@@ -1234,7 +1234,7 @@ public abstract class EngineerAgentBase : AgentBase
                     if (Workspace is not null && BuildRunnerSvc is not null)
                     {
                         committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles, "Address review feedback",
-                            1, 1, "Address review feedback", chat, ct);
+                            1, 1, "Address review feedback", chat, ct, isRework: true);
                     }
                     else
                     {
@@ -1573,7 +1573,7 @@ public abstract class EngineerAgentBase : AgentBase
                     if (Workspace is not null && BuildRunnerSvc is not null)
                     {
                         var committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles, "Implement task",
-                            1, 1, syntheticIssue.Title, chat, ct);
+                            1, 1, syntheticIssue.Title, chat, ct, isRework: true);
                         if (!committed)
                         {
                             Logger.LogWarning("{Role} {Name} single-step implementation for PR #{PrNumber} blocked by build errors",
@@ -1649,7 +1649,7 @@ public abstract class EngineerAgentBase : AgentBase
                         if (Workspace is not null && BuildRunnerSvc is not null)
                         {
                             committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles, commitMsg,
-                                stepNumber, steps.Count, step, chat, ct);
+                                stepNumber, steps.Count, step, chat, ct, isRework: true);
                         }
                         else
                         {
@@ -1868,7 +1868,8 @@ public abstract class EngineerAgentBase : AgentBase
         int totalSteps,
         string stepDescription,
         IChatCompletionService chat,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool isRework = false)
     {
         var wsConfig = Config.Workspace;
         var branchName = pr.HeadBranch ?? $"agent/{Identity.Id.Replace(" ", "-").ToLowerInvariant()}/pr-{pr.Number}";
@@ -1876,8 +1877,20 @@ public abstract class EngineerAgentBase : AgentBase
         // Ensure workspace is on the right branch
         if (stepNumber == 1)
         {
-            await Workspace!.SyncWithMainAsync(ct);
-            await Workspace.CreateBranchAsync(branchName, ct);
+            if (isRework)
+            {
+                // Rework: checkout the EXISTING remote branch to preserve prior commits.
+                // Creating a fresh branch from main would destroy all original implementation files.
+                await Workspace!.CheckoutBranchAsync(branchName, ct);
+                Logger.LogInformation("{Role} {Name} checked out existing branch {Branch} for rework",
+                    Identity.Role, Identity.DisplayName, branchName);
+            }
+            else
+            {
+                // Initial implementation: create a fresh branch from main
+                await Workspace!.SyncWithMainAsync(ct);
+                await Workspace.CreateBranchAsync(branchName, ct);
+            }
         }
 
         // Write files to local filesystem

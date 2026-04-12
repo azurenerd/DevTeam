@@ -1846,14 +1846,21 @@ public class ProgramManagerAgent : AgentBase
 
             systemPrompt +=
                 "\nIGNORE: code quality, null checks, error handling, naming, tests, architecture, " +
-                "specific method/class implementations, file completeness, PR metadata/checkboxes. " +
+                "specific method/class implementations, PR metadata/checkboxes. " +
                 "Do NOT reference specific code files, methods, or classes — you review REQUIREMENTS, " +
                 "not code. The Architect and Principal Engineer review code quality.\n\n" +
+                "FILE COMPLETENESS CHECK (critical): While you don't review code quality, you MUST verify " +
+                "that the acceptance criteria's expected deliverables are actually present in the PR. " +
+                "If the acceptance criteria say 'Create Models/ReportData.cs, Interfaces/IReportService.cs, " +
+                "Layouts/MainLayout.razor' etc., check that those files EXIST in the PR's file list. " +
+                "A PR that delivers 3 files when 15 were specified in acceptance criteria is INCOMPLETE — " +
+                "this is a requirements gap, not a code quality issue.\n\n" +
                 "IMPORTANT: Code may appear truncated in your review context due to length limits — " +
                 "this is a tooling limitation, NOT a code defect. Do NOT request changes for " +
                 "truncated code or incomplete-looking files.\n\n" +
                 "Only request changes when a user story acceptance criterion is clearly unmet, " +
-                "the feature contradicts the PM Spec, or visual evidence shows the UI doesn't match expectations.\n\n" +
+                "the feature contradicts the PM Spec, expected files/components are missing, " +
+                "or visual evidence shows the UI doesn't match expectations.\n\n" +
                 "RESPONSE FORMAT — your ENTIRE response must be ONLY:\n" +
                 "- If requesting changes: a **numbered list** (1. 2. 3.) starting on the FIRST line. " +
                 "Each item references an acceptance criterion by name. Nothing before the list. " +

@@ -347,6 +347,14 @@ public class PlaywrightRunner
             var (passed, failed, skipped) = TestRunner.ParseTestCounts(combinedOutput);
             var failures = TestRunner.ParseTestFailures(combinedOutput);
 
+            // Reconcile: if parser found failure details but count says 0 failed, trust the details
+            if (failed == 0 && failures.Count > 0)
+            {
+                _logger.LogWarning("Playwright test count parser reported 0 failed but {FailureCount} failure details found — correcting",
+                    failures.Count);
+                failed = failures.Count;
+            }
+
             // Collect video, trace, and screenshot artifacts
             var artifacts = CollectTestArtifacts(testResultsPath, config);
 

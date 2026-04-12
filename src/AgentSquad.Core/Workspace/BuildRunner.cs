@@ -19,6 +19,7 @@ public class BuildRunner
 
     /// <summary>
     /// Run the configured build command in the workspace directory.
+    /// Auto-detects .sln file when using 'dotnet build' to avoid MSB1011 errors.
     /// </summary>
     public async Task<BuildResult> BuildAsync(
         string workspacePath,
@@ -26,9 +27,11 @@ public class BuildRunner
         int timeoutSeconds = 120,
         CancellationToken ct = default)
     {
-        _logger.LogInformation("Running build in {Path}: {Command}", workspacePath, buildCommand);
+        // Auto-resolve build target for bare 'dotnet build' to avoid MSB1011
+        var resolvedCommand = ResolveBuildCommand(workspacePath, buildCommand);
+        _logger.LogInformation("Running build in {Path}: {Command}", workspacePath, resolvedCommand);
 
-        var result = await RunCommandAsync(workspacePath, buildCommand, timeoutSeconds, ct);
+        var result = await RunCommandAsync(workspacePath, resolvedCommand, timeoutSeconds, ct);
 
         var parsedErrors = ParseBuildErrors(result.StandardOutput + "\n" + result.StandardError);
 
@@ -158,5 +161,45 @@ public class BuildRunner
         }
 
         return (exe, args);
+    }
+
+    /// <summary>
+    /// When the build command is bare 'dotnet build' (no project/sln target specified),
+    /// auto-detect the .sln or .csproj to avoid MSB1011 "multiple project files" errors.
+    /// Priority: single .sln > single .csproj > first .sln alphabetically.
+    /// </summary>
+    internal string ResolveBuildCommand(string workspacePath, string buildCommand)
+    {
+        // Only resolve for bare 'dotnet build' (no target already specified)
+        var trimmed = buildCommand.Trim();
+        if (!trimmed.Equals("dotnet build", StringComparison.OrdinalIgnoreCase))
+            return buildCommand;
+
+        var slnFiles = Directory.GetFiles(workspacePath, "*.sln");
+        var csprojFiles = Directory.GetFiles(workspacePath, "*.csproj");
+
+        // If exactly one target exists, dotnet build works fine as-is
+        if (slnFiles.Length + csprojFiles.Length <= 1)
+            return buildCommand;
+
+        // Prefer .sln file (it includes all projects)
+        if (slnFiles.Length >= 1)
+        {
+            var target = Path.GetFileName(slnFiles[0]);
+            _logger.LogInformation("Auto-resolved build target to {Target} (found {SlnCount} .sln, {CsprojCount} .csproj)",
+                target, slnFiles.Length, csprojFiles.Length);
+            return $"dotnet build {target}";
+        }
+
+        // Fallback: use first .csproj
+        if (csprojFiles.Length >= 1)
+        {
+            var target = Path.GetFileName(csprojFiles[0]);
+            _logger.LogInformation("Auto-resolved build target to {Target} (no .sln, {Count} .csproj files)",
+                target, csprojFiles.Length);
+            return $"dotnet build {target}";
+        }
+
+        return buildCommand;
     }
 }

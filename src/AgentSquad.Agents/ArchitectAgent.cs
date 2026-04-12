@@ -672,6 +672,11 @@ public class ArchitectAgent : AgentBase
                 "You are a software architect reviewing a PR for architecture alignment.\n\n" +
                 "SCOPE: This PR is ONE task. Review only the parts it touches against the architecture doc.\n\n" +
                 "CHECK: component boundaries, folder structure, tech stack compliance, architectural patterns.\n" +
+                "ALSO CHECK FILE COMPLETENESS: Compare the actual files in the PR against the acceptance criteria " +
+                "and file plan in the linked issue. If the acceptance criteria list specific files or components " +
+                "that should be created (e.g., Models, Interfaces, Layouts, CSS, config files) and those files " +
+                "are MISSING from the PR, this is a REWORK issue. A PR that delivers only 2 of 15 expected files " +
+                "is incomplete regardless of whether those 2 files are architecturally correct.\n" +
                 "ALSO CHECK: If screenshots are provided, verify the app renders correctly without errors.\n" +
                 "  - Error pages, unhandled exceptions, or blank screens visible in screenshots = REWORK.\n" +
                 "  - The visual output should match what the PR description says it implements.\n" +
@@ -679,16 +684,18 @@ public class ArchitectAgent : AgentBase
                 "IMPORTANT: Code may appear truncated in your review context due to length limits — " +
                 "this is a tooling limitation, NOT a code defect. Do NOT flag truncated code.\n\n" +
                 "Only request REWORK for real architectural violations (wrong boundaries, wrong tech stack, " +
-                "wrong patterns) OR runtime errors visible in screenshots. Minor issues → APPROVE.\n\n" +
+                "wrong patterns), MISSING files/components listed in acceptance criteria, " +
+                "OR runtime errors visible in screenshots. Minor issues → APPROVE.\n\n" +
                 "RESPONSE FORMAT — your ENTIRE response must be ONLY:\n" +
                 "- First line: APPROVED or REWORK\n" +
                 "- If REWORK: a **numbered list** (1. 2. 3.) starting on the SECOND line. " +
-                "Each item states the architectural violation or screenshot issue. Nothing else. " +
+                "Each item states the architectural violation, missing file/component, or screenshot issue. Nothing else. " +
                 "No preamble, no thinking, no analysis narration.\n" +
                 "- If APPROVED: one sentence or empty after the verdict. No recap.\n\n" +
                 "WRONG: 'Let me review the architecture... 1. Violation'\n" +
                 "RIGHT: 'REWORK\\n1. **Services/** folder violates layered boundary\\n" +
-                "2. Screenshot shows unhandled exception on app load'");
+                "2. Missing Models/ReportData.cs, Models/Milestone.cs listed in acceptance criteria\\n" +
+                "3. Screenshot shows unhandled exception on app load'");
 
             history.AddUserMessage(
                 $"## Architecture Document\n{architectureDoc}\n\n" +

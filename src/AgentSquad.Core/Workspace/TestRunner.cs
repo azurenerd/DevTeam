@@ -36,6 +36,15 @@ public class TestRunner
         var (passed, failed, skipped) = ParseTestCounts(combinedOutput);
         var failures = ParseTestFailures(combinedOutput);
 
+        // Reconcile: if parser found failure details but count says 0 failed, trust the details.
+        // This happens when dotnet test output format doesn't match count regex but failures are parseable.
+        if (failed == 0 && failures.Count > 0)
+        {
+            _logger.LogWarning("Test count parser reported 0 failed but {FailureCount} failure details found — correcting count",
+                failures.Count);
+            failed = failures.Count;
+        }
+
         // Trust parsed test counts over process exit code when available.
         // dotnet test can return non-zero exit code even when all tests pass
         // (e.g., one test project fails to build while others run fine).
