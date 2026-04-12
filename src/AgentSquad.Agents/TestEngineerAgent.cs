@@ -384,6 +384,31 @@ public class TestEngineerAgent : AgentBase
             if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
                 continue;
 
+            // Gate: PE must have finished all rework. Check that the last PE review comment
+            // is APPROVED (not CHANGES_REQUESTED). This prevents TE from starting work while
+            // the PE worker is still pushing rework commits.
+            try
+            {
+                var comments = await _github.GetPullRequestCommentsAsync(pr.Number, ct);
+                var lastPeReviewComment = comments
+                    .Where(c => c.Body.Contains("[PrincipalEngineer]", StringComparison.OrdinalIgnoreCase)
+                             && (c.Body.Contains("APPROVED", StringComparison.OrdinalIgnoreCase)
+                              || c.Body.Contains("CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)))
+                    .LastOrDefault();
+
+                if (lastPeReviewComment is not null &&
+                    lastPeReviewComment.Body.Contains("CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.LogDebug("Skipping PR #{Number} — PE still has outstanding changes requested", pr.Number);
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Could not check PE review status for PR #{Number}", pr.Number);
+                // If we can't check, proceed anyway — architect-approved is the primary gate
+            }
+
             // Skip PRs that already have tests
             if (pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase) ||
                 pr.Labels.Contains(TestedLabel, StringComparer.OrdinalIgnoreCase))
