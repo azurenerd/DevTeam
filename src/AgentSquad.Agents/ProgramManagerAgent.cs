@@ -1305,6 +1305,49 @@ public class ProgramManagerAgent : AgentBase
 
             // Create the PR upfront so it's visible immediately
             var projectName = _config.Project.Name;
+
+            // Quick mode: produce a minimal 1-paragraph PMSpec for fast testing
+            if (_config.Project.QuickDocumentCreation)
+            {
+                Logger.LogInformation("QuickDocumentCreation: producing minimal PMSpec.md");
+                UpdateStatus(AgentStatus.Working, "Creating minimal PMSpec (quick mode)");
+                var qPr = await _prWorkflow.OpenDocumentPRAsync(
+                    Identity.DisplayName, "PMSpec.md",
+                    $"PM Specification for {projectName}",
+                    $"Quick-mode PM specification for {projectName}.",
+                    closesIssueNumber: null, ct);
+
+                var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                var qChat = qKernel.GetRequiredService<IChatCompletionService>();
+                var qHistory = new ChatHistory();
+                qHistory.AddSystemMessage("You are a Program Manager. Write a brief product specification.");
+                qHistory.AddUserMessage(
+                    $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
+                    "Write a concise PMSpec with these sections (1-2 sentences each): " +
+                    "Executive Summary, Business Goals, User Stories (3-5 bullet points with acceptance criteria), " +
+                    "Scope, Non-Functional Requirements. Keep the entire document under 300 words.");
+                var qResp = await qChat.GetChatMessageContentAsync(qHistory, cancellationToken: ct);
+                var qContent = $"# PM Specification: {projectName}\n\n{qResp.Content?.Trim() ?? ""}";
+
+                await _prWorkflow.CommitAndMergeDocumentPRAsync(
+                    qPr, Identity.DisplayName, "PMSpec.md", qContent,
+                    $"Add PM Specification for {projectName}", ct);
+                Logger.LogInformation("Quick PMSpec.md created and merged");
+                LogActivity("task", $"📝 Quick PMSpec.md created for {projectName}");
+
+                await _messageBus.PublishAsync(new StatusUpdateMessage
+                {
+                    FromAgentId = Identity.Id, ToAgentId = "*",
+                    MessageType = "PMSpecReady",
+                    NewStatus = AgentStatus.Working,
+                    Details = "PM Specification is ready (quick mode). Architect can begin."
+                }, ct);
+
+                await CreateUserStoryIssuesAsync(ct);
+                UpdateStatus(AgentStatus.Idle, "Quick PMSpec complete, Architect triggered");
+                return;
+            }
+
             UpdateStatus(AgentStatus.Working, "Creating PR for PMSpec.md");
             var pr = await _prWorkflow.OpenDocumentPRAsync(
                 Identity.DisplayName,

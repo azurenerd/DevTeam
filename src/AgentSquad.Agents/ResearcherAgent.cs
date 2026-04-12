@@ -245,6 +245,29 @@ public class ResearcherAgent : AgentBase
     private async Task<ResearchResult> ConductResearchAsync(
         ResearchDirective directive, CancellationToken ct)
     {
+        // Quick mode: produce a minimal 1-paragraph research summary for fast testing
+        if (_config.Project.QuickDocumentCreation)
+        {
+            Logger.LogInformation("QuickDocumentCreation: producing minimal Research.md for '{Topic}'", directive.Topic);
+            var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var qChat = qKernel.GetRequiredService<IChatCompletionService>();
+            var qHistory = new ChatHistory();
+            qHistory.AddSystemMessage("You are a technical researcher. Produce a brief, 1-paragraph research summary.");
+            qHistory.AddUserMessage(
+                $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n" +
+                $"Topic: {directive.Topic}\n\n" +
+                "Write ONE concise paragraph summarizing the key technology recommendations for this project. " +
+                "Be specific about libraries and patterns. Keep it under 150 words.");
+            var qResponse = await qChat.GetChatMessageContentsAsync(qHistory, cancellationToken: ct);
+            var quickText = string.Join("", qResponse.Select(r => r.Content ?? ""));
+            return new ResearchResult
+            {
+                Summary = quickText,
+                DetailedAnalysis = quickText,
+                KeyFindings = new List<string> { quickText }
+            };
+        }
+
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 

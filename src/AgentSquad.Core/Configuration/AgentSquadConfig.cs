@@ -50,6 +50,13 @@ public class ProjectConfig
     /// Use this to steer research toward specific areas, technologies, or concerns.
     /// </summary>
     public string ResearchPrompt { get; set; } = "";
+
+    /// <summary>
+    /// When true, Researcher/PM/Architect produce minimal 1-paragraph documents
+    /// using only the project description and tech stack. Skips multi-turn AI
+    /// conversations and context gathering for rapid startup during testing.
+    /// </summary>
+    public bool QuickDocumentCreation { get; set; } = false;
 }
 
 public class ModelConfig

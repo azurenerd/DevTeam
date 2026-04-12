@@ -229,6 +229,52 @@ public class ArchitectAgent : AgentBase
             Logger.LogWarning(ex, "Could not find related issue for architecture");
         }
 
+        // Quick mode: produce a minimal 1-paragraph architecture for fast testing
+        if (_config.Project.QuickDocumentCreation)
+        {
+            Logger.LogInformation("QuickDocumentCreation: producing minimal Architecture.md");
+            UpdateStatus(AgentStatus.Working, "Creating minimal Architecture (quick mode)");
+            var qPr = await _prWorkflow.OpenDocumentPRAsync(
+                Identity.DisplayName, "Architecture.md",
+                $"System Architecture for {directive.Title}",
+                "Quick-mode architecture document.", relatedIssue, ct);
+
+            var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var qChat = qKernel.GetRequiredService<IChatCompletionService>();
+            var qHistory = new ChatHistory();
+            qHistory.AddSystemMessage("You are a software architect. Write a brief architecture document.");
+            qHistory.AddUserMessage(
+                $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
+                "Write a concise architecture document with these sections (1-2 sentences each): " +
+                "## System Components (list main components), ## Data Model (key entities), " +
+                "## Project Structure (folder layout), ## Technology Choices. " +
+                "Keep the entire document under 300 words. Be specific about file paths and component names.");
+            var qResp = await qChat.GetChatMessageContentAsync(qHistory, cancellationToken: ct);
+            var qContent = $"# System Architecture: {directive.Title}\n\n{qResp.Content?.Trim() ?? ""}";
+
+            await _prWorkflow.CommitAndMergeDocumentPRAsync(
+                qPr, Identity.DisplayName, "Architecture.md", qContent,
+                $"Add system architecture for {directive.Title}", ct);
+            Logger.LogInformation("Quick Architecture.md created and merged");
+            LogActivity("task", $"✅ Quick Architecture.md merged: {directive.Title}");
+
+            if (relatedIssue.HasValue)
+            {
+                try { await _github.CloseIssueAsync(relatedIssue.Value, ct); }
+                catch { /* best effort */ }
+            }
+
+            await _messageBus.PublishAsync(new StatusUpdateMessage
+            {
+                FromAgentId = Identity.Id, ToAgentId = "*",
+                MessageType = "ArchitectureComplete",
+                NewStatus = AgentStatus.Working,
+                Details = "Architecture design complete (quick mode). PE can begin engineering planning."
+            }, ct);
+            UpdateStatus(AgentStatus.Idle, "Quick architecture complete");
+            return;
+        }
+
         // Create the PR upfront so it's visible immediately
         UpdateStatus(AgentStatus.Working, "Creating PR for Architecture.md");
         var pr = await _prWorkflow.OpenDocumentPRAsync(

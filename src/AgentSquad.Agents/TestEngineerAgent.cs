@@ -24,14 +24,17 @@ public class TestEngineerAgent : AgentBase
     private const string TestedLabel = "tested";
 
     /// <summary>
-    /// File extensions that are testable code. Everything else (markdown, images,
-    /// config, etc.) is ignored when deciding whether a merged PR needs tests.
+    /// Result of AI-based testability assessment for a PR.
+    /// Replaces the old hardcoded TestableExtensions approach — the AI evaluates
+    /// the actual files, acceptance criteria, and issue context to decide what tests are needed.
     /// </summary>
-    private static readonly HashSet<string> TestableExtensions = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rs",
-        ".razor", ".blazor", ".vue", ".svelte", ".rb", ".php", ".swift", ".kt"
-    };
+    internal sealed record TestabilityAssessment(
+        bool NeedsTests,
+        bool NeedsUnitTests,
+        bool NeedsIntegrationTests,
+        bool NeedsUITests,
+        string Rationale,
+        IReadOnlyList<string> TestableFiles);
 
     /// <summary>Classification of a test failure: is the bug in the test or the source?</summary>
     internal enum FailureClassification { TestBug, SourceBug, Ambiguous }
@@ -68,6 +71,9 @@ public class TestEngineerAgent : AgentBase
     private readonly Dictionary<int, string> _prSessionIds = new();
     private readonly DateTime _sessionStartUtc = DateTime.UtcNow.AddHours(-4); // Look back 4h to catch PRs from recent runs without massive backlog
     private int? _currentTestPrNumber;
+
+    // Holds the AI testability assessment from the scan phase so GenerateTestCodeAsync can use it
+    private TestabilityAssessment? _lastTestabilityAssessment;
 
     // Tracks PRs where TE found source bugs and is waiting for engineer to fix.
     // Key = PR number, Value = number of source-bug rounds already requested.
@@ -284,24 +290,27 @@ public class TestEngineerAgent : AgentBase
                 continue;
             }
 
-            // Get the files changed in this PR to check if it has testable code
+            // AI-based testability assessment for legacy mode
             var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
-            var codeFiles = changedFiles
-                .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
-                .ToList();
+            
+            Logger.LogInformation("Assessing testability of merged PR #{Number} ({FileCount} files): {Title}",
+                pr.Number, changedFiles.Count, pr.Title);
+            var assessment = await AssessTestabilityAsync(pr, changedFiles, ct);
 
-            if (codeFiles.Count == 0)
+            if (!assessment.NeedsTests)
             {
-                // No code files — only docs/config/images. Skip.
-                Logger.LogDebug("Skipping PR #{Number} — no testable code files (only docs/config)", pr.Number);
+                Logger.LogInformation("AI assessment: merged PR #{Number} does not need tests — {Rationale}", pr.Number, assessment.Rationale);
                 _testedPRs.Add(pr.Number);
                 continue;
             }
 
+            _lastTestabilityAssessment = assessment;
+            var codeFiles = assessment.TestableFiles;
+
             Logger.LogInformation(
-                "Found merged PR #{Number} with {Count} testable code files: {Title}",
+                "AI assessment: merged PR #{Number} needs tests ({Count} testable files): {Title}",
                 pr.Number, codeFiles.Count, pr.Title);
-            LogActivity("task", $"🧪 Generating tests for PR #{pr.Number}: {pr.Title} ({codeFiles.Count} code files)");
+            LogActivity("task", $"🧪 Generating tests for PR #{pr.Number}: {pr.Title} ({codeFiles.Count} files)");
 
             try
             {
@@ -356,10 +365,8 @@ public class TestEngineerAgent : AgentBase
                     try
                     {
                         var changedFiles = await _github.GetPullRequestChangedFilesAsync(pendingPr.Number, ct);
-                        var codeFiles = changedFiles
-                            .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
-                            .ToList();
-                        await AddInlineTestsToPRAsync(pendingPr, codeFiles, ct);
+                        // For re-test after source fix, use all changed files — AI assessment already done
+                        await AddInlineTestsToPRAsync(pendingPr, changedFiles, ct);
                     }
                     catch (Exception ex)
                     {
@@ -432,29 +439,35 @@ public class TestEngineerAgent : AgentBase
                 continue;
             }
 
-            // Check for testable code files
+            // AI-based testability assessment — examines files, acceptance criteria, and context
             var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
-            var codeFiles = changedFiles
-                .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
-                .ToList();
 
-            if (codeFiles.Count == 0)
+            Logger.LogInformation("Assessing testability of PR #{Number} ({FileCount} changed files): {Title}",
+                pr.Number, changedFiles.Count, pr.Title);
+            var assessment = await AssessTestabilityAsync(pr, changedFiles, ct);
+
+            if (!assessment.NeedsTests)
             {
-                Logger.LogInformation("Skipping approved PR #{Number} — no testable code files, marking as tested", pr.Number);
+                Logger.LogInformation("AI assessment: PR #{Number} does not need tests — {Rationale}", pr.Number, assessment.Rationale);
                 _testedPRs.Add(pr.Number);
-                // Still apply tests-added label so PM can proceed with review
                 await ApplyTestsAddedLabelAsync(pr, ct);
                 await _github.AddPullRequestCommentAsync(pr.Number,
-                    "✅ **[TestEngineer] No Testable Code** — This PR contains only configuration/data files " +
-                    "with no testable code. Marking as tested to proceed with PM review.", ct);
+                    $"✅ **[TestEngineer] No Tests Needed** — {assessment.Rationale}\n\n" +
+                    "Marking as tested to proceed with PM review.", ct);
                 continue;
             }
 
+            // Feed the assessment into the test strategy so GenerateTestCodeAsync knows what tiers to write
+            _lastTestabilityAssessment = assessment;
+            var codeFiles = assessment.TestableFiles;
+
             Logger.LogInformation(
-                "Found approved PR #{Number} with {Count} testable files needing tests: {Title}",
-                pr.Number, codeFiles.Count, pr.Title);
+                "AI assessment: PR #{Number} needs tests (Unit={Unit}, Integration={Integration}, UI={UI}) — {Count} testable files: {Title}",
+                pr.Number, assessment.NeedsUnitTests, assessment.NeedsIntegrationTests, assessment.NeedsUITests,
+                codeFiles.Count, pr.Title);
             LogActivity("task",
-                $"🧪 Adding inline tests to approved PR #{pr.Number}: {pr.Title} ({codeFiles.Count} code files)");
+                $"🧪 Adding inline tests to approved PR #{pr.Number}: {pr.Title} ({codeFiles.Count} files, " +
+                $"Unit={assessment.NeedsUnitTests}, Integration={assessment.NeedsIntegrationTests}, UI={assessment.NeedsUITests})");
 
             try
             {
@@ -508,6 +521,136 @@ public class TestEngineerAgent : AgentBase
     }
 
     /// <summary>
+    /// Uses AI to assess whether a PR's changed files need tests, and what types.
+    /// Examines the actual file contents, PR description, linked issue acceptance criteria,
+    /// and tech stack context — not hardcoded file extensions.
+    /// </summary>
+    private async Task<TestabilityAssessment> AssessTestabilityAsync(
+        AgentPullRequest pr, IReadOnlyList<string> changedFiles, CancellationToken ct)
+    {
+        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+        // Gather acceptance criteria from linked issue
+        string? issueBody = null;
+        var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+        if (issueNumber.HasValue)
+        {
+            try
+            {
+                var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                issueBody = issue?.Body;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Could not fetch linked issue for testability assessment");
+            }
+        }
+
+        // Build file listing with extensions and brief content hints
+        var fileList = new System.Text.StringBuilder();
+        foreach (var f in changedFiles)
+        {
+            fileList.AppendLine($"- {f} (ext: {Path.GetExtension(f)})");
+        }
+
+        var prompt = $"""
+            You are a Test Engineer assessing whether a pull request needs automated tests.
+            
+            ## PR Information
+            **Title:** {pr.Title}
+            **Description:**
+            {pr.Body ?? "(no description)"}
+            
+            ## Changed Files
+            {fileList}
+            
+            ## Linked Issue / Acceptance Criteria
+            {issueBody ?? "(no linked issue)"}
+            
+            ## Tech Stack
+            {_config.Project.TechStack}
+            
+            ## Your Task
+            Analyze the changed files and acceptance criteria. Determine:
+            1. **Does this PR need any automated tests?** Consider: are there code files with logic that can be tested? Config-only, documentation-only, or purely static asset PRs typically don't need tests.
+            2. **What types of tests?** Unit tests (logic, models, services), Integration tests (API endpoints, data access, middleware), UI/E2E tests (pages, components, user interactions).
+            
+            Respond in EXACTLY this format (no other text):
+            NEEDS_TESTS: true/false
+            NEEDS_UNIT: true/false
+            NEEDS_INTEGRATION: true/false
+            NEEDS_UI: true/false
+            TESTABLE_FILES: comma-separated list of files that should have tests written (empty if none)
+            RATIONALE: one sentence explaining your assessment
+            """;
+
+        try
+        {
+            var history = new ChatHistory();
+            history.AddUserMessage(prompt);
+            var response = await chat.GetChatMessageContentsAsync(history, cancellationToken: ct);
+            var responseText = string.Join("", response.Select(r => r.Content ?? ""));
+
+            return ParseTestabilityResponse(responseText, changedFiles);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "AI testability assessment failed for PR #{Number}, falling back to all-files", pr.Number);
+            // Fallback: assume tests needed for any non-trivial PR
+            return new TestabilityAssessment(
+                NeedsTests: changedFiles.Count > 0,
+                NeedsUnitTests: true,
+                NeedsIntegrationTests: false,
+                NeedsUITests: false,
+                Rationale: "Fallback: AI assessment unavailable, defaulting to unit tests",
+                TestableFiles: changedFiles);
+        }
+    }
+
+    /// <summary>Parses the structured AI response into a TestabilityAssessment.</summary>
+    private static TestabilityAssessment ParseTestabilityResponse(string response, IReadOnlyList<string> allFiles)
+    {
+        bool needsTests = false, needsUnit = false, needsIntegration = false, needsUI = false;
+        string rationale = "AI assessment";
+        var testableFiles = new List<string>();
+
+        foreach (var line in response.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed.StartsWith("NEEDS_TESTS:", StringComparison.OrdinalIgnoreCase))
+                needsTests = trimmed.Contains("true", StringComparison.OrdinalIgnoreCase);
+            else if (trimmed.StartsWith("NEEDS_UNIT:", StringComparison.OrdinalIgnoreCase))
+                needsUnit = trimmed.Contains("true", StringComparison.OrdinalIgnoreCase);
+            else if (trimmed.StartsWith("NEEDS_INTEGRATION:", StringComparison.OrdinalIgnoreCase))
+                needsIntegration = trimmed.Contains("true", StringComparison.OrdinalIgnoreCase);
+            else if (trimmed.StartsWith("NEEDS_UI:", StringComparison.OrdinalIgnoreCase))
+                needsUI = trimmed.Contains("true", StringComparison.OrdinalIgnoreCase);
+            else if (trimmed.StartsWith("TESTABLE_FILES:", StringComparison.OrdinalIgnoreCase))
+            {
+                var filesPart = trimmed["TESTABLE_FILES:".Length..].Trim();
+                if (!string.IsNullOrWhiteSpace(filesPart))
+                {
+                    testableFiles = filesPart.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                        .Where(f => allFiles.Any(af => af.EndsWith(f.Trim(), StringComparison.OrdinalIgnoreCase)
+                            || f.Trim().Equals(af, StringComparison.OrdinalIgnoreCase)))
+                        .Select(f => allFiles.FirstOrDefault(af => af.EndsWith(f.Trim(), StringComparison.OrdinalIgnoreCase)
+                            || f.Trim().Equals(af, StringComparison.OrdinalIgnoreCase)) ?? f.Trim())
+                        .ToList();
+                }
+            }
+            else if (trimmed.StartsWith("RATIONALE:", StringComparison.OrdinalIgnoreCase))
+                rationale = trimmed["RATIONALE:".Length..].Trim();
+        }
+
+        // If AI says tests needed but didn't list specific files, use all changed files
+        if (needsTests && testableFiles.Count == 0)
+            testableFiles = allFiles.ToList();
+
+        return new TestabilityAssessment(needsTests, needsUnit, needsIntegration, needsUI, rationale, testableFiles);
+    }
+
+    /// <summary>
     /// Core inline test pipeline: checks out the PR's branch, reads source files locally,
     /// generates tests, builds + runs them with retry, commits and pushes.
     ///
@@ -520,7 +663,7 @@ public class TestEngineerAgent : AgentBase
     /// </summary>
     /// <returns>true if testing completed (pass or fail); false if blocked (e.g., base build failed, awaiting rework)</returns>
     private async Task<bool> AddInlineTestsToPRAsync(
-        AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
+        AgentPullRequest pr, IReadOnlyList<string> codeFilePaths, CancellationToken ct)
     {
         _currentTestPrNumber = pr.Number;
         ActivateTestPrSession(pr.Number);
@@ -549,7 +692,7 @@ public class TestEngineerAgent : AgentBase
     /// </summary>
     /// <returns>true if testing completed; false if blocked by build failure (awaiting rework)</returns>
     private async Task<bool> AddInlineTestsViaWorkspaceAsync(
-        AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
+        AgentPullRequest pr, IReadOnlyList<string> codeFilePaths, CancellationToken ct)
     {
         var wsConfig = _config.Workspace;
 
@@ -901,7 +1044,7 @@ public class TestEngineerAgent : AgentBase
     /// No local build/test execution — tests are committed untested.
     /// </summary>
     private async Task AddInlineTestsViaApiAsync(
-        AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
+        AgentPullRequest pr, IReadOnlyList<string> codeFilePaths, CancellationToken ct)
     {
         // Read source via API
         var sourceFiles = new Dictionary<string, string>();
@@ -1494,9 +1637,9 @@ public class TestEngineerAgent : AgentBase
                     agent.Equals(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
-                if (changedFiles.Any(f => TestableExtensions.Contains(Path.GetExtension(f))))
-                    untestedCodePRs++;
+                // Count any PR with changed files that hasn't been processed yet
+                // (AI assessment determines testability, not file extensions)
+                untestedCodePRs++;
             }
         }
         else
@@ -1512,9 +1655,7 @@ public class TestEngineerAgent : AgentBase
                     agent.Equals(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
-                if (changedFiles.Any(f => TestableExtensions.Contains(Path.GetExtension(f))))
-                    untestedCodePRs++;
+                untestedCodePRs++;
             }
         }
 
@@ -1542,7 +1683,7 @@ public class TestEngineerAgent : AgentBase
     /// generates real test code via AI, and creates a test PR with those files.
     /// </summary>
     private async Task GenerateTestsForMergedPRAsync(
-        AgentPullRequest pr, List<string> codeFilePaths, CancellationToken ct)
+        AgentPullRequest pr, IReadOnlyList<string> codeFilePaths, CancellationToken ct)
     {
         // Create a CLI session for this test PR (or resume existing)
         ActivateTestPrSession(pr.Number);
@@ -1729,9 +1870,24 @@ public class TestEngineerAgent : AgentBase
 
         var useSinglePass = _config.CopilotCli.SinglePassMode;
 
-        // When UITestsOnly, override strategy to skip unit/integration generation
-        if (_config.Workspace.UITestsOnly)
+        // Use AI testability assessment if available (from ScanApprovedPRsForInlineTestingAsync)
+        // This overrides both the heuristic TestStrategyAnalyzer and UITestsOnly config
+        if (_lastTestabilityAssessment is not null)
         {
+            strategy = strategy with
+            {
+                NeedsUnitTests = _lastTestabilityAssessment.NeedsUnitTests,
+                NeedsIntegrationTests = _lastTestabilityAssessment.NeedsIntegrationTests,
+                NeedsUITests = _lastTestabilityAssessment.NeedsUITests,
+                Rationale = $"AI assessment: {_lastTestabilityAssessment.Rationale}"
+            };
+            Logger.LogInformation("Using AI testability assessment for PR #{Number}: Unit={Unit}, Integration={Integration}, UI={UI}",
+                pr.Number, strategy.NeedsUnitTests, strategy.NeedsIntegrationTests, strategy.NeedsUITests);
+            _lastTestabilityAssessment = null; // Consume it
+        }
+        else if (_config.Workspace.UITestsOnly)
+        {
+            // Legacy fallback: When UITestsOnly, override strategy to skip unit/integration generation
             strategy = strategy with { NeedsUnitTests = false, NeedsIntegrationTests = false, NeedsUITests = true };
             Logger.LogInformation("UITestsOnly mode — overriding strategy to UI tests only for PR #{Number}", pr.Number);
         }
@@ -2626,12 +2782,19 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
             // Find test files in the repo tree that match source file names
+            // Common code file extensions for test discovery
+            var codeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rb", ".rs",
+                ".razor", ".vue", ".svelte", ".php", ".swift", ".kt", ".scala"
+            };
+
             var testFilePaths = repoTree
                 .Where(f =>
                     (f.Contains("/tests/", StringComparison.OrdinalIgnoreCase) ||
                      f.Contains("/test/", StringComparison.OrdinalIgnoreCase) ||
                      f.Contains("Tests/", StringComparison.OrdinalIgnoreCase)) &&
-                    TestableExtensions.Contains(Path.GetExtension(f)))
+                    codeExtensions.Contains(Path.GetExtension(f)))
                 .Where(f =>
                 {
                     var testName = Path.GetFileNameWithoutExtension(f);
@@ -2988,8 +3151,13 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     var srcDir = Path.Combine(_workspace.RepoPath, "src");
                     if (Directory.Exists(srcDir))
                     {
-                        foreach (var f in Directory.EnumerateFiles(srcDir, "*.*", SearchOption.AllDirectories)
-                            .Where(f => TestableExtensions.Contains(Path.GetExtension(f)))
+                        var localCodeExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ".cs", ".ts", ".tsx", ".js", ".jsx", ".py", ".java", ".go", ".rb", ".rs",
+                        ".razor", ".vue", ".svelte", ".php", ".swift", ".kt", ".scala"
+                    };
+                    foreach (var f in Directory.EnumerateFiles(srcDir, "*.*", SearchOption.AllDirectories)
+                            .Where(f => localCodeExtensions.Contains(Path.GetExtension(f)))
                             .Take(10))
                         {
                             sourceFiles[Path.GetRelativePath(_workspace.RepoPath, f)] =
