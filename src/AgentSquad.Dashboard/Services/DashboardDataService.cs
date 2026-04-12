@@ -277,6 +277,28 @@ public sealed class DashboardDataService : BackgroundService
     /// <summary>Get the list of available model names for the dropdown.</summary>
     public IReadOnlyList<string> GetAvailableModels() => ModelRegistry.AvailableCopilotModels;
 
+    /// <summary>
+    /// Refresh ActiveModel for all cached agents from ModelRegistry.
+    /// Call this after FastMode or model config changes so cards show the correct model.
+    /// </summary>
+    public void RefreshActiveModels()
+    {
+        lock (_cacheLock)
+        {
+            foreach (var (agentId, snapshot) in _agentCache.ToList())
+            {
+                var effectiveModel = _modelRegistry.GetEffectiveModel(agentId);
+                if (snapshot.ActiveModel != effectiveModel)
+                {
+                    _agentCache[agentId] = snapshot with { ActiveModel = effectiveModel };
+                }
+            }
+        }
+
+        _ = _hubContext.Clients.All.SendAsync("ModelsRefreshed");
+        NotifyStateChanged();
+    }
+
     /// <summary>Change the model for a specific agent at runtime.</summary>
     public void SetAgentModel(string agentId, string modelName)
     {
@@ -353,7 +375,8 @@ public sealed class DashboardDataService : BackgroundService
                     Status = e.NewStatus,
                     StatusReason = e.Reason,
                     LastStatusChange = statusChangeTime,
-                    AssignedPullRequest = e.Agent.AssignedPullRequest
+                    AssignedPullRequest = e.Agent.AssignedPullRequest,
+                    ActiveModel = _modelRegistry.GetEffectiveModel(e.Agent.Id)
                 };
             }
         }

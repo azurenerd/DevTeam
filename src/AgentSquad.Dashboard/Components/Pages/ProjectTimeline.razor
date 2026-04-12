@@ -1,0 +1,307 @@
+@page "/timeline"
+@rendermode InteractiveServer
+@using AgentSquad.Core.GitHub.Models
+@using AgentSquad.Core.GitHub
+@using AgentSquad.Dashboard.Services
+@implements IDisposable
+@inject DashboardDataService DataService
+@inject NavigationManager Navigation
+
+<PageTitle>AgentSquad — Project Timeline</PageTitle>
+
+<div class="page-header">
+    <h1 class="page-title">🗺️ Project Timeline</h1>
+    <div class="header-badges">
+        <span class="badge badge-success">@_issues.Count Issues</span>
+        <span class="badge badge-purple">@_pullRequests.Count PRs</span>
+        @if (_completedCount > 0)
+        {
+            <span class="badge badge-info">@_completedCount / @(_issues.Count + _pullRequests.Count) Complete</span>
+        }
+    </div>
+</div>
+
+@if (_loading)
+{
+    <div class="empty-state">
+        <div class="empty-icon">⏳</div>
+        <div class="empty-text">Loading timeline...</div>
+    </div>
+}
+else if (_timelineNodes.Count == 0)
+{
+    <div class="empty-state">
+        <div class="empty-icon">🗺️</div>
+        <div class="empty-text">No work items yet</div>
+        <div class="empty-sub">Issues and PRs will appear here as agents create them</div>
+    </div>
+}
+else
+{
+    <!-- Legend -->
+    <div class="tl-legend">
+        <div class="tl-legend-item">
+            <span class="tl-legend-dot tl-dot-issue-open"></span> Issue (Open)
+        </div>
+        <div class="tl-legend-item">
+            <span class="tl-legend-dot tl-dot-issue-closed"></span> Issue (Closed)
+        </div>
+        <div class="tl-legend-item">
+            <span class="tl-legend-dot tl-dot-pr-open"></span> PR (Open)
+        </div>
+        <div class="tl-legend-item">
+            <span class="tl-legend-dot tl-dot-pr-merged"></span> PR (Merged)
+        </div>
+        <div class="tl-legend-item">
+            <span class="tl-legend-line"></span> Linked (Closes Issue)
+        </div>
+    </div>
+
+    <!-- Timeline Container -->
+    <div class="tl-container">
+        <!-- Main horizontal spine -->
+        <div class="tl-spine"></div>
+
+        @foreach (var group in _timelineNodes)
+        {
+            var isAbove = group.Position % 2 == 0;
+            var issueNode = group.Issue;
+            var leftPct = GetTimelinePosition(group);
+
+            <div class="tl-group" style="left: @(leftPct)%;">
+                <!-- Vertical connector from spine -->
+                <div class="tl-connector @(isAbove ? "tl-connector-above" : "tl-connector-below")"></div>
+
+                <!-- Issue milestone node on spine -->
+                <div class="tl-milestone @GetIssueClass(issueNode)"
+                     title="Issue #@issueNode.Number: @issueNode.Title"
+                     @onclick="() => OpenGitHub(issueNode.Url)">
+                    <span class="tl-milestone-number">#@issueNode.Number</span>
+                </div>
+
+                <!-- Card branch (above or below spine) -->
+                <div class="tl-card-branch @(isAbove ? "tl-branch-above" : "tl-branch-below")">
+                    <!-- Issue card -->
+                    <div class="tl-card tl-card-issue @GetIssueCardClass(issueNode)"
+                         @onclick="() => OpenGitHub(issueNode.Url)">
+                        <div class="tl-card-header">
+                            <span class="tl-card-type">📋 Issue #@issueNode.Number</span>
+                            <span class="tl-card-state @GetStateClass(issueNode.State)">
+                                @(issueNode.State == "closed" ? "✔ Closed" : "● Open")
+                            </span>
+                        </div>
+                        <div class="tl-card-title">@TruncateTitle(issueNode.Title)</div>
+                        @if (!string.IsNullOrEmpty(issueNode.AssignedAgent))
+                        {
+                            <div class="tl-card-agent">👤 @issueNode.AssignedAgent</div>
+                        }
+                        <div class="tl-card-time">@FormatTime(issueNode.CreatedAt)</div>
+                    </div>
+
+                    <!-- PR branches off this issue -->
+                    @if (group.LinkedPRs.Count > 0)
+                    {
+                        <div class="tl-pr-branch">
+                            @foreach (var pr in group.LinkedPRs)
+                            {
+                                <div class="tl-branch-connector"></div>
+                                <div class="tl-card tl-card-pr @GetPrCardClass(pr)"
+                                     @onclick="() => OpenGitHub(pr.Url)">
+                                    <div class="tl-card-header">
+                                        <span class="tl-card-type">
+                                            @(pr.IsMerged ? "🟣" : "🟢") PR #@pr.Number
+                                        </span>
+                                        <span class="tl-card-state @GetPrStateClass(pr)">
+                                            @GetPrStateLabel(pr)
+                                        </span>
+                                    </div>
+                                    <div class="tl-card-title">@TruncateTitle(pr.Title)</div>
+                                    @if (!string.IsNullOrEmpty(pr.AssignedAgent))
+                                    {
+                                        <div class="tl-card-agent">👤 @pr.AssignedAgent</div>
+                                    }
+                                    @if (pr.ChangedFiles.Count > 0)
+                                    {
+                                        <div class="tl-card-files">📁 @pr.ChangedFiles.Count files</div>
+                                    }
+                                    <div class="tl-card-time">@FormatTime(pr.CreatedAt)</div>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        <!-- Unlinked PRs (no associated issue) -->
+        @if (_unlinkedPRs.Count > 0)
+        {
+            <div class="tl-unlinked-section">
+                <h3 class="tl-unlinked-header">Standalone PRs</h3>
+                <div class="tl-unlinked-grid">
+                    @foreach (var pr in _unlinkedPRs)
+                    {
+                        <div class="tl-card tl-card-pr @GetPrCardClass(pr)"
+                             @onclick="() => OpenGitHub(pr.Url)">
+                            <div class="tl-card-header">
+                                <span class="tl-card-type">
+                                    @(pr.IsMerged ? "🟣" : "🟢") PR #@pr.Number
+                                </span>
+                                <span class="tl-card-state @GetPrStateClass(pr)">
+                                    @GetPrStateLabel(pr)
+                                </span>
+                            </div>
+                            <div class="tl-card-title">@TruncateTitle(pr.Title)</div>
+                            @if (!string.IsNullOrEmpty(pr.AssignedAgent))
+                            {
+                                <div class="tl-card-agent">👤 @pr.AssignedAgent</div>
+                            }
+                            <div class="tl-card-time">@FormatTime(pr.CreatedAt)</div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        <!-- Progress terminus -->
+        <div class="tl-terminus">
+            <span class="tl-terminus-label">@GetProgressLabel()</span>
+        </div>
+    </div>
+}
+
+@code {
+    private List<AgentIssue> _issues = [];
+    private List<AgentPullRequest> _pullRequests = [];
+    private List<TimelineGroup> _timelineNodes = [];
+    private List<AgentPullRequest> _unlinkedPRs = [];
+    private bool _loading = true;
+    private int _completedCount;
+
+    protected override async Task OnInitializedAsync()
+    {
+        DataService.OnChange += OnDataChanged;
+        await LoadDataAsync();
+    }
+
+    private async Task LoadDataAsync()
+    {
+        _loading = true;
+        try
+        {
+            _issues = (await DataService.GetIssuesAsync()).ToList();
+            _pullRequests = (await DataService.GetPullRequestsAsync()).ToList();
+            BuildTimeline();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void BuildTimeline()
+    {
+        // Build issue→PR links via "Closes #N" in PR bodies
+        var prsByLinkedIssue = new Dictionary<int, List<AgentPullRequest>>();
+        var linkedPrNumbers = new HashSet<int>();
+
+        foreach (var pr in _pullRequests)
+        {
+            var linkedIssue = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            if (linkedIssue.HasValue)
+            {
+                if (!prsByLinkedIssue.ContainsKey(linkedIssue.Value))
+                    prsByLinkedIssue[linkedIssue.Value] = [];
+                prsByLinkedIssue[linkedIssue.Value].Add(pr);
+                linkedPrNumbers.Add(pr.Number);
+            }
+        }
+
+        // Build timeline groups: each issue is a node, with its linked PRs branching off
+        var groups = new List<TimelineGroup>();
+        var position = 0;
+        foreach (var issue in _issues.OrderBy(i => i.CreatedAt))
+        {
+            var linkedPRs = prsByLinkedIssue.GetValueOrDefault(issue.Number, []);
+            groups.Add(new TimelineGroup
+            {
+                Issue = issue,
+                LinkedPRs = linkedPRs.OrderBy(p => p.CreatedAt).ToList(),
+                Position = position++
+            });
+        }
+
+        _timelineNodes = groups;
+        _unlinkedPRs = _pullRequests
+            .Where(pr => !linkedPrNumbers.Contains(pr.Number))
+            .OrderBy(pr => pr.CreatedAt)
+            .ToList();
+
+        // Count completed items
+        _completedCount = _issues.Count(i => i.State == "closed")
+            + _pullRequests.Count(p => p.IsMerged || p.State == "closed");
+    }
+
+    private double GetTimelinePosition(TimelineGroup group)
+    {
+        if (_timelineNodes.Count <= 1) return 50;
+        // Spread from 5% to 90% of width
+        return 5.0 + (group.Position * 85.0 / Math.Max(1, _timelineNodes.Count - 1));
+    }
+
+    private string GetIssueClass(AgentIssue issue) =>
+        issue.State == "closed" ? "tl-milestone-closed" : "tl-milestone-open";
+
+    private string GetIssueCardClass(AgentIssue issue) =>
+        issue.State == "closed" ? "tl-card-closed" : "tl-card-open";
+
+    private string GetPrCardClass(AgentPullRequest pr) =>
+        pr.IsMerged ? "tl-card-merged" : pr.State == "closed" ? "tl-card-closed" : "tl-card-open";
+
+    private string GetStateClass(string state) =>
+        state == "closed" ? "tl-state-closed" : "tl-state-open";
+
+    private string GetPrStateClass(AgentPullRequest pr) =>
+        pr.IsMerged ? "tl-state-merged" : pr.State == "closed" ? "tl-state-closed" : "tl-state-open";
+
+    private string GetPrStateLabel(AgentPullRequest pr) =>
+        pr.IsMerged ? "✔ Merged" : pr.State == "closed" ? "✖ Closed" : "● Open";
+
+    private string TruncateTitle(string title) =>
+        title.Length > 45 ? title[..42] + "…" : title;
+
+    private string FormatTime(DateTime dt) =>
+        dt.ToLocalTime().ToString("MMM d, HH:mm");
+
+    private string GetProgressLabel()
+    {
+        var total = _issues.Count + _pullRequests.Count;
+        if (total == 0) return "No work items";
+        if (_completedCount == total) return "✅ Complete";
+        return $"{_completedCount}/{total} done";
+    }
+
+    private void OpenGitHub(string url)
+    {
+        if (!string.IsNullOrEmpty(url))
+            Navigation.NavigateTo(url, forceLoad: true);
+    }
+
+    private async void OnDataChanged()
+    {
+        await LoadDataAsync();
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        DataService.OnChange -= OnDataChanged;
+    }
+
+    private record TimelineGroup
+    {
+        public required AgentIssue Issue { get; init; }
+        public required List<AgentPullRequest> LinkedPRs { get; init; }
+        public required int Position { get; init; }
+    }
+}

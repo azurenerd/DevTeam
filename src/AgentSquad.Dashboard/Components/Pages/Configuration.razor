@@ -3,6 +3,7 @@
 @using AgentSquad.Core.Workspace
 @using AgentSquad.Dashboard.Services
 @inject ConfigurationService ConfigService
+@inject DashboardDataService DataService
 @inject ILogger<Configuration> Logger
 @rendermode InteractiveServer
 
@@ -935,6 +936,7 @@ else if (_config is not null)
         try
         {
             await ConfigService.SaveConfigAsync(_config);
+            DataService.RefreshActiveModels();
             _saveSuccess = true;
             _ = Task.Run(async () =>
             {
