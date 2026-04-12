@@ -1150,7 +1150,10 @@ public class TestEngineerAgent : AgentBase
                 "Do NOT invent namespaces — use ONLY those that actually exist in the project.\n" +
                 "CRITICAL: All output files MUST be under tests/ directories. Do NOT output files under src/. " +
                 "If model types exist in the source project, use 'using' directives — do NOT redefine them.\n" +
-                "Also ensure the .csproj includes the missing NuGet PackageReference. Output the corrected .csproj too.\n\n" +
+                "CRITICAL: If errors are 'already contains a definition' (CS0101) or 'multiple top-level statements' (CS8802), " +
+                "you are creating duplicate types or entry points. REMOVE the duplicate files entirely — " +
+                "use project references to access types from the source project instead of redefining them.\n" +
+                "Also ensure the dependency manifest includes all required packages. Output the corrected manifest too.\n\n" +
                 "Output ONLY corrected files using:\nFILE: path/to/file.ext\n```language\n<content>\n```");
             fixHistory.AddUserMessage(
                 $"Build attempt {attempt + 1}/{wsConfig.MaxBuildRetries} failed.\n\n" +
@@ -1938,6 +1941,15 @@ public class TestEngineerAgent : AgentBase
             combinedSystem.AppendLine("2. If a dependency is NOT already listed, add it to the manifest file");
             combinedSystem.AppendLine("3. ALWAYS output the complete dependency manifest with ALL needed dependencies");
             combinedSystem.AppendLine("Missing dependencies are the #1 cause of build failures. Prevent this by always including the manifest.\n");
+            combinedSystem.AppendLine("CRITICAL RULE — DO NOT CREATE DUPLICATE FILES:");
+            combinedSystem.AppendLine("- NEVER create model classes, entity classes, DTOs, or data types that already exist in the source project.");
+            combinedSystem.AppendLine("- NEVER create a Program.cs, Startup.cs, or application entry point in your test project.");
+            combinedSystem.AppendLine("- Use project references or import/using statements to reference types from the source project.");
+            combinedSystem.AppendLine("- If you need types from the source project, reference them — do NOT redefine them.\n");
+            combinedSystem.AppendLine("CRITICAL RULE — ASSERTIONS MUST MATCH ACTUAL CODE:");
+            combinedSystem.AppendLine("- Derive ALL expected values (text, counts, sizes, CSS classes) from the SOURCE CODE provided below.");
+            combinedSystem.AppendLine("- Do NOT derive expected values from spec documents, architecture docs, or design references.");
+            combinedSystem.AppendLine("- The spec describes intent; the source code is what actually runs. Test what the code DOES, not what the spec SAYS.\n");
             combinedSystem.AppendLine("Output each test file using this exact format:\n");
             combinedSystem.AppendLine("FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n");
             combinedSystem.AppendLine("Every file MUST use the FILE: marker format so it can be parsed and committed.\n");
@@ -1969,10 +1981,13 @@ public class TestEngineerAgent : AgentBase
                 combinedSystem.AppendLine("- PlaywrightFixture base class must use IAsyncLifetime, NOT [SetUpFixture].");
                 combinedSystem.AppendLine("- Add [Trait(\"Category\", \"UI\")] and [Collection(\"Playwright\")] attributes.");
                 combinedSystem.AppendLine("- Place in tests/{ProjectName}.UITests/. Include PlaywrightFixture class.");
-                combinedSystem.AppendLine("- CRITICAL: Do NOT use made-up CSS selectors like '.dashboard-root', '.app-root', '#dashboard'.");
-                combinedSystem.AppendLine("- Blazor apps render into '#app' or 'body'. Use semantic HTML selectors (h1, nav, main).");
-                combinedSystem.AppendLine("- Use page.GetByText(), page.GetByRole() for content-based selection.");
-                combinedSystem.AppendLine("- Set timeouts to 30000ms — Blazor needs time for SignalR circuit init.\n");
+                combinedSystem.AppendLine("- CRITICAL SELECTOR RULES:");
+                combinedSystem.AppendLine("  * ONLY use CSS selectors/classes that appear in the Source Files provided below.");
+                combinedSystem.AppendLine("  * If you cannot find a selector in the source code, DO NOT USE IT.");
+                combinedSystem.AppendLine("  * Prefer content-based selectors: page.GetByText(), page.GetByRole(), page.Locator(\"h1\").");
+                combinedSystem.AppendLine("  * Use page.WaitForLoadStateAsync(LoadState.NetworkIdle) before asserting on elements.");
+                combinedSystem.AppendLine("  * NEVER invent CSS class names from spec/architecture documents.");
+                combinedSystem.AppendLine("- Set DefaultTimeout to 60000ms in PlaywrightFixture — apps need time for initial load.\n");
             }
             combinedSystem.AppendLine("YOU MUST output .csproj files with all required package references.");
 
@@ -2108,10 +2123,10 @@ public class TestEngineerAgent : AgentBase
             var designCtx = await ReadDesignReferencesForTestsAsync(ct);
             if (!string.IsNullOrWhiteSpace(designCtx))
             {
-                userPrompt.AppendLine("## Visual Design Reference");
-                userPrompt.AppendLine("The following design files define the expected UI. " +
-                    "Generate assertions that verify: correct CSS classes, element visibility, " +
-                    "color schemes, layout structure, and component hierarchy match the design.\n");
+                userPrompt.AppendLine("## Visual Design Reference (informational only)");
+                userPrompt.AppendLine("The following design files show the intended UI design. " +
+                    "Use this for CONTEXT ONLY — do NOT derive expected values, class names, or element counts from this. " +
+                    "All assertions must be based on the actual Source Files above, not this design reference.\n");
                 userPrompt.AppendLine(designCtx);
                 userPrompt.AppendLine();
             }
@@ -2141,6 +2156,15 @@ public class TestEngineerAgent : AgentBase
             "4. This applies to test frameworks, assertion libraries, mocking libraries, browser automation tools,\n" +
             "   and ANY other third-party code. If you import/using/require it, it must be in the manifest.\n" +
             "Missing dependencies are the #1 cause of build failures. Prevent this by always including the manifest.\n\n" +
+            "CRITICAL RULE — DO NOT CREATE DUPLICATE FILES:\n" +
+            "- NEVER create model classes, entity classes, DTOs, or data types that already exist in the source project.\n" +
+            "- NEVER create a Program.cs, Startup.cs, main.py, index.ts, or any application entry point in your test project.\n" +
+            "- Use project references or import statements to reference types from the source project.\n" +
+            "- If you need types from the source project, reference them — do NOT redefine them.\n\n" +
+            "CRITICAL RULE — ASSERTIONS MUST MATCH ACTUAL CODE:\n" +
+            "- Derive ALL expected values (text content, counts, sizes, CSS classes, element names) from the SOURCE CODE provided.\n" +
+            "- Do NOT derive expected values from spec documents, architecture docs, or design references.\n" +
+            "- The spec describes intent; the source code is what actually runs. Test what the code DOES.\n\n" +
             "Output each test file using this exact format:\n\n" +
             "FILE: tests/path/to/TestFile.ext\n```language\n<complete file content>\n```\n\n" +
             "Every file MUST use the FILE: marker format so it can be parsed and committed.\n\n";
@@ -2196,16 +2220,15 @@ public class TestEngineerAgent : AgentBase
                 "- Test user workflows: navigation, form submission, button clicks, data display\n" +
                 "- Include assertions on page content, element visibility, and navigation outcomes\n" +
                 "- Capture screenshots on failure using PlaywrightFixture.CaptureScreenshotAsync\n" +
-                "- Include a shared PlaywrightFixture base class (use [TestFixture] NOT [SetUpFixture])\n" +
+                "- Include a shared PlaywrightFixture base class (use IAsyncLifetime)\n" +
                 "- IMPORTANT: Use xUnit ([Fact], [Collection], [Trait]) — do NOT use NUnit ([Test], [SetUpFixture])\n" +
                 "- CRITICAL SELECTOR RULES:\n" +
-                "  * Do NOT use selectors like '.dashboard-root', '.app-root', '#dashboard', or any made-up CSS class\n" +
-                "  * Blazor Server apps render into a <div id=\"app\"> element — use '#app' or 'body' as the root container\n" +
-                "  * Only use selectors that are GUARANTEED to exist: 'body', 'h1', 'h2', 'nav', 'main', 'header', 'footer', semantic HTML\n" +
-                "  * For page-specific elements, use text content selectors: page.GetByText(), page.GetByRole()\n" +
-                "  * NEVER assume a CSS class exists unless you can see it in the source code provided\n" +
-                "  * Use page.WaitForLoadStateAsync(LoadState.NetworkIdle) instead of waiting for specific selectors\n" +
-                "  * Set generous timeouts (30000ms) for Blazor apps which need time for SignalR circuit initialization\n" +
+                "  * ONLY use CSS selectors/classes that you can see in the Source Files provided to you.\n" +
+                "  * If a selector does not appear in the source code, DO NOT USE IT — it does not exist.\n" +
+                "  * Prefer content-based selectors: page.GetByText(), page.GetByRole(), page.Locator(\"h1\")\n" +
+                "  * Use page.WaitForLoadStateAsync(LoadState.NetworkIdle) before asserting on elements\n" +
+                "  * NEVER invent CSS class names from spec/architecture documents — only use what's in the code\n" +
+                "- Set BrowserNewContextOptions.DefaultTimeout to 60000ms — apps may need time for initial load\n" +
                 "- Example Playwright test structure:\n" +
                 "```csharp\n" +
                 "// PlaywrightFixture.cs — shared base class\n" +
@@ -2218,7 +2241,11 @@ public class TestEngineerAgent : AgentBase
                 "        Browser = await Playwright.Chromium.LaunchAsync(new() { Headless = true });\n" +
                 "    }\n" +
                 "    public async Task DisposeAsync() { await Browser.CloseAsync(); Playwright.Dispose(); }\n" +
-                "    public async Task<IPage> NewPageAsync() => await Browser.NewPageAsync();\n" +
+                "    public async Task<IPage> NewPageAsync() {\n" +
+                "        var page = await Browser.NewPageAsync();\n" +
+                "        page.SetDefaultTimeout(60000);\n" +
+                "        return page;\n" +
+                "    }\n" +
                 "}\n\n" +
                 "// Tests — use xUnit [Fact], inject via IClassFixture\n" +
                 "[Collection(\"Playwright\")]\n[Trait(\"Category\", \"UI\")]\n" +
@@ -2228,6 +2255,7 @@ public class TestEngineerAgent : AgentBase
                 "    [Fact]\n    public async Task HomePage_LoadsSuccessfully()\n    {\n" +
                 "        var page = await _fixture.NewPageAsync();\n" +
                 "        await page.GotoAsync(_fixture.BaseUrl);\n" +
+                "        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);\n" +
                 "        await Assertions.Expect(page).ToHaveTitleAsync(new Regex(\".*\"));\n" +
                 "    }\n}\n```\n",
 
@@ -2355,7 +2383,18 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 continue;
             }
 
-            // Allow root-level config files (.csproj, .sln, etc.)
+            // Allow root-level config files (.csproj, .sln, etc.) but block entry points
+            var fileName = System.IO.Path.GetFileName(normalized);
+            if (fileName.Equals("Program.cs", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Equals("Startup.cs", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Equals("index.js", StringComparison.OrdinalIgnoreCase) ||
+                fileName.Equals("main.py", StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.LogWarning(
+                    "Filtered out AI-generated entry-point file that would conflict with source: {Path}", file.Path);
+                continue;
+            }
+
             filtered.Add(file);
         }
 
@@ -2548,11 +2587,11 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 $"Generate {count} Playwright UI test method(s) in a single test file for the above source code using {techStack}. " +
                 "Test that the main page loads and renders key content. Use headless mode. " +
                 "IMPORTANT: Use xUnit ([Fact], IClassFixture<PlaywrightFixture>), NOT NUnit. " +
-                "PlaywrightFixture must implement IAsyncLifetime, NOT use [SetUpFixture]. " +
-                "Include the PlaywrightFixture class. " +
-                "CRITICAL: Do NOT use made-up CSS selectors like '.dashboard-root' or '.app-root'. " +
-                "Blazor apps use '#app' or 'body' as the root. Use page.GetByText(), page.GetByRole(), " +
-                "or semantic HTML selectors (h1, nav, main). Set timeouts to 30000ms for Blazor SignalR hydration.",
+                "PlaywrightFixture must implement IAsyncLifetime. Include the PlaywrightFixture class with page.SetDefaultTimeout(60000). " +
+                "CRITICAL: ONLY use CSS selectors that appear in the Source Files above. " +
+                "Prefer page.GetByText(), page.GetByRole(), or semantic HTML selectors (h1, nav, main). " +
+                "Use page.WaitForLoadStateAsync(LoadState.NetworkIdle) before assertions. " +
+                "NEVER invent CSS class names — if you cannot find it in the source code, do not use it.",
 
             _ => $"Generate {count} test method(s) in a single test file for the above source code using {techStack}."
         };
@@ -2971,18 +3010,21 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 fixHistory.AddSystemMessage(
                     "You are a test engineer fixing build errors in test files. " +
                     "You have full context about the project structure.\n" +
-                    "COMMON FIX: If errors are 'type or namespace not found', the .csproj is likely missing a " +
-                    "NuGet PackageReference. Output a corrected .csproj with the missing packages added.\n" +
+                    "COMMON FIX: If errors are 'type or namespace not found', the dependency manifest is likely missing a " +
+                    "package reference. Output a corrected manifest with the missing packages added.\n" +
+                    "CRITICAL: If errors are 'already contains a definition' or 'multiple top-level statements', " +
+                    "you created duplicate types or entry points that conflict with the source project. " +
+                    "DELETE those duplicate files — use project references and import statements instead of redefining types.\n" +
                     (IsBlazorProject() ? GetBlazorTestGuidance() : "") +
                     "Output ONLY corrected files using:\nFILE: path/to/file.ext\n```language\n<content>\n```\n" +
-                    "If a .csproj file is missing or has wrong references, include the corrected .csproj in your output.");
+                    "If a dependency manifest is missing or has wrong references, include the corrected one in your output.");
                 fixHistory.AddUserMessage(
                     $"Build attempt {attempt + 1}/{wsConfig.MaxBuildRetries} failed.\n\n" +
                     $"## Build Errors\n\n{errorSummary}\n\n" +
                     $"## Test files currently written\n\n" +
                     string.Join("\n", testFiles.Select(f => $"- {f.Path}")) + "\n\n" +
-                    "Fix ALL errors. If the .csproj is missing or has wrong package references, output a corrected one.\n" +
-                    "If namespace errors occur, check the actual project namespace and fix the using statements.");
+                    "Fix ALL errors. If duplicate type definitions exist, remove those files entirely and use project references. " +
+                    "If namespace errors occur, check the actual project namespace and fix the import statements.");
 
                 var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
                 var fixedFiles = FilterToTestFilesOnly(CodeFileParser.ParseFiles(fixResponse.Content ?? ""));
