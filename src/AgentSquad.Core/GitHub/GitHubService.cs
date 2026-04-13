@@ -45,6 +45,27 @@ public class GitHubService : IGitHubService
     private readonly Dictionary<string, (IReadOnlyList<AgentIssue> Data, DateTime CachedAt)> _labelIssuesCache = new();
     private readonly SemaphoreSlim _labelIssuesLock = new(1, 1);
 
+    // Generic cache entry for new caches
+    private record CacheEntry<T>(T Data, DateTime CachedAt);
+
+    // Repo tree cache: keyed by branch name (60s TTL — tree data changes less frequently)
+    private readonly Dictionary<string, CacheEntry<IReadOnlyList<string>>> _treeCache = new();
+    private readonly SemaphoreSlim _treeCacheLock = new(1, 1);
+    private static readonly TimeSpan TreeCacheTtl = TimeSpan.FromSeconds(60);
+
+    // File content cache: keyed by "path|branch"
+    private readonly Dictionary<string, CacheEntry<string?>> _fileContentCache = new();
+    private readonly SemaphoreSlim _fileContentCacheLock = new(1, 1);
+    private static readonly TimeSpan FileContentCacheTtl = TimeSpan.FromSeconds(30);
+
+    // Issue comments cache: keyed by issue number
+    private readonly Dictionary<int, CacheEntry<IReadOnlyList<Models.IssueComment>>> _issueCommentsCache = new();
+    private readonly SemaphoreSlim _issueCommentsCacheLock = new(1, 1);
+
+    // PR comments cache: keyed by PR number
+    private readonly Dictionary<int, CacheEntry<IReadOnlyList<Models.IssueComment>>> _prCommentsCache = new();
+    private readonly SemaphoreSlim _prCommentsCacheLock = new(1, 1);
+
     public string RepositoryFullName => $"{_owner}/{_repo}";
 
     public GitHubService(IOptions<AgentSquadConfig> config, RateLimitManager rateLimitManager, ILogger<GitHubService> logger)
@@ -78,6 +99,10 @@ public class GitHubService : IGitHubService
         _allPrsCache = null;
         _mergedPrsCache = null;
         lock (_labelIssuesCache) { _labelIssuesCache.Clear(); }
+        lock (_treeCache) { _treeCache.Clear(); }
+        lock (_fileContentCache) { _fileContentCache.Clear(); }
+        lock (_issueCommentsCache) { _issueCommentsCache.Clear(); }
+        lock (_prCommentsCache) { _prCommentsCache.Clear(); }
     }
 
     /// <summary>
@@ -337,19 +362,34 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<Models.IssueComment>> GetPullRequestCommentsAsync(int prNumber, CancellationToken ct = default)
     {
+        await _prCommentsCacheLock.WaitAsync(ct);
+        try
+        {
+            if (_prCommentsCache.TryGetValue(prNumber, out var cached) &&
+                DateTime.UtcNow - cached.CachedAt < ListCacheTtl)
+                return cached.Data;
+        }
+        finally { _prCommentsCacheLock.Release(); }
+
         return await _rl.ExecuteAsync(async _ =>
         {
             try
             {
                 var comments = await _client.Issue.Comment.GetAllForIssue(_owner, _repo, prNumber);
                 TrackRateLimit();
-                return comments.Select(c => new Models.IssueComment
+                var result = comments.Select(c => new Models.IssueComment
                 {
                     Id = c.Id,
                     Author = c.User.Login,
                     Body = c.Body,
                     CreatedAt = c.CreatedAt.UtcDateTime
                 }).ToList();
+
+                await _prCommentsCacheLock.WaitAsync(ct);
+                try { _prCommentsCache[prNumber] = new CacheEntry<IReadOnlyList<Models.IssueComment>>(result, DateTime.UtcNow); }
+                finally { _prCommentsCacheLock.Release(); }
+
+                return (IReadOnlyList<Models.IssueComment>)result;
             }
             catch (Exception ex)
             {
@@ -368,6 +408,11 @@ public class GitHubService : IGitHubService
                 await _client.Issue.Comment.Create(_owner, _repo, prNumber, comment);
                 TrackRateLimit();
                 _logger.LogDebug("Added comment to PR #{Number}", prNumber);
+
+                // Invalidate PR comments cache for this PR
+                await _prCommentsCacheLock.WaitAsync(ct);
+                try { _prCommentsCache.Remove(prNumber); }
+                finally { _prCommentsCacheLock.Release(); }
             }
             catch (Exception ex)
             {
@@ -620,6 +665,11 @@ public class GitHubService : IGitHubService
                 await _client.Issue.Comment.Create(_owner, _repo, issueNumber, comment);
                 TrackRateLimit();
                 _logger.LogDebug("Added comment to issue #{Number}", issueNumber);
+
+                // Invalidate issue comments cache for this issue
+                await _issueCommentsCacheLock.WaitAsync(ct);
+                try { _issueCommentsCache.Remove(issueNumber); }
+                finally { _issueCommentsCacheLock.Release(); }
             }
             catch (Exception ex)
             {
@@ -631,19 +681,34 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<Models.IssueComment>> GetIssueCommentsAsync(int issueNumber, CancellationToken ct = default)
     {
+        await _issueCommentsCacheLock.WaitAsync(ct);
+        try
+        {
+            if (_issueCommentsCache.TryGetValue(issueNumber, out var cached) &&
+                DateTime.UtcNow - cached.CachedAt < ListCacheTtl)
+                return cached.Data;
+        }
+        finally { _issueCommentsCacheLock.Release(); }
+
         return await _rl.ExecuteAsync(async _ =>
         {
             try
             {
                 var comments = await _client.Issue.Comment.GetAllForIssue(_owner, _repo, issueNumber);
                 TrackRateLimit();
-                return comments.Select(c => new Models.IssueComment
+                var result = comments.Select(c => new Models.IssueComment
                 {
                     Id = c.Id,
                     Author = c.User.Login,
                     Body = c.Body,
                     CreatedAt = c.CreatedAt.UtcDateTime
                 }).ToList();
+
+                await _issueCommentsCacheLock.WaitAsync(ct);
+                try { _issueCommentsCache[issueNumber] = new CacheEntry<IReadOnlyList<Models.IssueComment>>(result, DateTime.UtcNow); }
+                finally { _issueCommentsCacheLock.Release(); }
+
+                return (IReadOnlyList<Models.IssueComment>)result;
             }
             catch (Exception ex)
             {
@@ -853,6 +918,17 @@ public class GitHubService : IGitHubService
 
     public async Task<string?> GetFileContentAsync(string path, string? branch = null, CancellationToken ct = default)
     {
+        var cacheKey = $"{path}|{branch ?? "default"}";
+
+        await _fileContentCacheLock.WaitAsync(ct);
+        try
+        {
+            if (_fileContentCache.TryGetValue(cacheKey, out var cached) &&
+                DateTime.UtcNow - cached.CachedAt < FileContentCacheTtl)
+                return cached.Data;
+        }
+        finally { _fileContentCacheLock.Release(); }
+
         return await _rl.ExecuteAsync(async _ =>
         {
             try
@@ -863,9 +939,15 @@ public class GitHubService : IGitHubService
                 TrackRateLimit();
 
                 var file = contents.FirstOrDefault();
-                return file?.Content ?? (file?.EncodedContent is not null
+                var result = file?.Content ?? (file?.EncodedContent is not null
                     ? Encoding.UTF8.GetString(Convert.FromBase64String(file.EncodedContent))
                     : null);
+
+                await _fileContentCacheLock.WaitAsync(ct);
+                try { _fileContentCache[cacheKey] = new CacheEntry<string?>(result, DateTime.UtcNow); }
+                finally { _fileContentCacheLock.Release(); }
+
+                return result;
             }
             catch (NotFoundException)
             {
@@ -919,6 +1001,13 @@ public class GitHubService : IGitHubService
                         await _client.Repository.Content.CreateFile(_owner, _repo, path, create);
                         _logger.LogDebug("Created file: {Path}", path);
                     }
+
+                    // Invalidate file content cache for this path
+                    var fileCacheKey = $"{path}|{branch ?? "default"}";
+                    await _fileContentCacheLock.WaitAsync(ct);
+                    try { _fileContentCache.Remove(fileCacheKey); }
+                    finally { _fileContentCacheLock.Release(); }
+
                     return; // Success
                 }
                 catch (ApiException ex) when (attempt < maxRetries &&
@@ -1616,6 +1705,15 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<string>> GetRepositoryTreeAsync(string branch = "main", CancellationToken ct = default)
     {
+        await _treeCacheLock.WaitAsync(ct);
+        try
+        {
+            if (_treeCache.TryGetValue(branch, out var cached) &&
+                DateTime.UtcNow - cached.CachedAt < TreeCacheTtl)
+                return cached.Data;
+        }
+        finally { _treeCacheLock.Release(); }
+
         return await _rl.ExecuteAsync<IReadOnlyList<string>>(async _ =>
         {
             try
@@ -1626,11 +1724,17 @@ public class GitHubService : IGitHubService
                 var commit = await _client.Git.Commit.Get(_owner, _repo, commitSha);
                 var tree = await _client.Git.Tree.GetRecursive(_owner, _repo, commit.Tree.Sha);
 
-                return tree.Tree
+                var result = tree.Tree
                     .Where(item => item.Type.Value == TreeType.Blob)
                     .Select(item => item.Path)
                     .OrderBy(p => p)
                     .ToList();
+
+                await _treeCacheLock.WaitAsync(ct);
+                try { _treeCache[branch] = new CacheEntry<IReadOnlyList<string>>(result, DateTime.UtcNow); }
+                finally { _treeCacheLock.Release(); }
+
+                return (IReadOnlyList<string>)result;
             }
             catch (Exception ex)
             {

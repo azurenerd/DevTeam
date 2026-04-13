@@ -17,6 +17,10 @@ public class RateLimitManager
     private volatile int _remaining = int.MaxValue;
     private DateTime _resetAt = DateTime.MinValue;
     private DateTime _pauseUntil = DateTime.MinValue; // Shared pause: all callers wait
+    private long _totalApiCalls;
+
+    /// <summary>Total number of GitHub API calls made since startup.</summary>
+    public long TotalApiCalls => Interlocked.Read(ref _totalApiCalls);
 
     // Thresholds for proactive throttling
     private const int SlowdownThreshold = 200;   // Add delay between calls
@@ -58,6 +62,15 @@ public class RateLimitManager
                 await ThrottleIfNeededAsync(ct);
 
                 var result = await apiCall(ct);
+
+                var callCount = Interlocked.Increment(ref _totalApiCalls);
+                if (callCount % 100 == 0)
+                {
+                    _logger.LogInformation(
+                        "GitHub API call #{CallCount} — {Remaining} calls remaining (resets {ResetAt:HH:mm:ss} UTC)",
+                        callCount, _remaining, _resetAt);
+                }
+
                 return result;
             }
             catch (Octokit.RateLimitExceededException ex)
@@ -142,6 +155,17 @@ public class RateLimitManager
         {
             _remaining = remaining;
             _resetAt = resetAtUtc;
+        }
+    }
+
+    /// <summary>
+    /// Returns a snapshot of the current rate limit state for dashboard/logging.
+    /// </summary>
+    public (int Remaining, DateTime ResetAtUtc, long TotalCalls, bool IsPaused) GetRateLimitSummary()
+    {
+        lock (_stateLock)
+        {
+            return (_remaining, _resetAt, TotalApiCalls, _pauseUntil > DateTime.UtcNow);
         }
     }
 
