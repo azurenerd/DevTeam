@@ -267,7 +267,57 @@ else
 
     private void BuildTimeline()
     {
-        // Build issue→PR links (kept for detail panel)
+        // --- Step 1: Detect the latest run's start from the newest Research PR ---
+        // Each run creates Research → PM Spec → Architecture PRs. The newest Research PR
+        // marks the start of the latest run cycle.
+        var latestResearchPr = _pullRequests
+            .Where(p => p.Title.StartsWith("Researcher:", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(p => p.CreatedAt)
+            .FirstOrDefault();
+        var runCutoff = latestResearchPr?.CreatedAt.AddMinutes(-1) ?? DateTime.MinValue;
+
+        // Filter issues and PRs to only the latest run
+        _issues = _issues.Where(i => i.CreatedAt >= runCutoff).ToList();
+        _pullRequests = _pullRequests.Where(p => p.CreatedAt >= runCutoff).ToList();
+
+        // Deduplicate by title (safety net — keep newest)
+        _issues = _issues
+            .GroupBy(i => i.Title.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(i => i.Number).First())
+            .ToList();
+        _pullRequests = _pullRequests
+            .GroupBy(p => p.Title.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.OrderByDescending(p => p.Number).First())
+            .ToList();
+
+        // --- Step 2: Add doc PRs as synthetic timeline items ---
+        // Research, PM Spec, and Architecture phases are PRs, not issues.
+        // Create synthetic AgentIssue entries so they appear as timeline nodes.
+        var existingNumbers = _issues.Select(i => i.Number).ToHashSet();
+        foreach (var pr in _pullRequests)
+        {
+            var t = pr.Title;
+            bool isDocPr = t.StartsWith("Researcher:", StringComparison.OrdinalIgnoreCase)
+                || t.StartsWith("ProgramManager:", StringComparison.OrdinalIgnoreCase)
+                || t.StartsWith("Architect:", StringComparison.OrdinalIgnoreCase);
+            if (isDocPr && !existingNumbers.Contains(pr.Number))
+            {
+                _issues.Add(new AgentIssue
+                {
+                    Number = pr.Number,
+                    Title = pr.Title,
+                    Body = pr.Body,
+                    State = pr.IsMerged ? "closed" : pr.State,
+                    CreatedAt = pr.CreatedAt,
+                    UpdatedAt = pr.UpdatedAt,
+                    Labels = pr.Labels,
+                    Url = pr.Url,
+                    AssignedAgent = pr.AssignedAgent
+                });
+            }
+        }
+
+        // --- Step 3: Build issue→PR links (for detail panel) ---
         var prsByIssue = new Dictionary<int, List<AgentPullRequest>>();
         foreach (var pr in _pullRequests)
         {
@@ -279,21 +329,18 @@ else
             }
         }
 
-        // Build parent→child issue relationships
+        // --- Step 4: Build parent→child issue relationships ---
         var childIssueNumbers = new HashSet<int>();
         var childrenByParent = new Dictionary<int, List<AgentIssue>>();
         foreach (var issue in _issues)
         {
-            // Check for parent reference in labels (e.g., "parent:#123") or body
             foreach (var parentIssue in _issues)
             {
                 if (parentIssue.Number == issue.Number) continue;
-                // Child if title starts with parent's assignee pattern or has engineering-task under enhancement
                 var parentLabels = parentIssue.Labels.Select(l => l.ToLowerInvariant()).ToList();
                 var childLabels = issue.Labels.Select(l => l.ToLowerInvariant()).ToList();
                 if (parentLabels.Contains("enhancement") && childLabels.Contains("engineering-task"))
                 {
-                    // Match by body reference "Parent Issue: #N"
                     if (issue.Body?.Contains($"#{parentIssue.Number}") == true)
                     {
                         if (!childrenByParent.ContainsKey(parentIssue.Number))
@@ -305,21 +352,20 @@ else
             }
         }
 
+        // --- Step 5: Build groups sorted by issue number (ascending) ---
         _groupLookup.Clear();
         var groups = new List<IssueGroup>();
-        // Only show top-level issues (not children) as root nodes
-        foreach (var issue in _issues.Where(i => !childIssueNumbers.Contains(i.Number)).OrderBy(i => i.CreatedAt))
+        foreach (var issue in _issues.Where(i => !childIssueNumbers.Contains(i.Number)).OrderBy(i => i.Number))
         {
             var g = new IssueGroup
             {
                 Issue = issue,
                 LinkedPRs = prsByIssue.GetValueOrDefault(issue.Number, []).OrderBy(p => p.CreatedAt).ToList(),
-                ChildIssues = childrenByParent.GetValueOrDefault(issue.Number, []).OrderBy(c => c.CreatedAt).ToList()
+                ChildIssues = childrenByParent.GetValueOrDefault(issue.Number, []).OrderBy(c => c.Number).ToList()
             };
             groups.Add(g);
             _groupLookup[issue.Number] = g;
         }
-        // Also register child issues for selection
         foreach (var issue in _issues.Where(i => childIssueNumbers.Contains(i.Number)))
         {
             if (!_groupLookup.ContainsKey(issue.Number))
@@ -333,6 +379,7 @@ else
             }
         }
 
+        // --- Step 6: Group into phases ---
         var phaseOrder = new[]
         {
             ("Research",      "🔍", "research"),
@@ -364,27 +411,31 @@ else
     private string ClassifyPhase(AgentIssue issue)
     {
         var title = issue.Title.ToLowerInvariant();
-        var agent = (issue.AssignedAgent ?? "").ToLowerInvariant();
         var labels = issue.Labels.Select(l => l.ToLowerInvariant()).ToList();
 
-        if (issue.State == "closed")
-        {
-            if (agent.Contains("engineer") || labels.Contains("engineering-task") || agent.Contains("testengineer"))
-                return "Complete";
-        }
-
-        if (title.Contains("research") || agent.Contains("researcher"))
+        // Doc phases — always classify by title prefix regardless of state
+        if (title.StartsWith("researcher:"))
             return "Research";
-        if (title.Contains("pm spec") || title.Contains("specification") || agent.Contains("programmanager"))
+        if (title.StartsWith("programmanager:") || title.Contains("pm spec") || title.Contains("specification"))
             return "PM Spec";
-        if (title.Contains("architect") || agent.Contains("architect"))
+        if (title.StartsWith("architect:") || title.Contains("architecture"))
             return "Architecture";
-        if (title.Contains("planning") || title.Contains("engineering plan") || agent.Contains("principalengineer"))
+
+        // Closed engineering/test issues go to Complete
+        if (issue.State == "closed" && (labels.Contains("engineering-task") || title.Contains("engineer")))
+            return "Complete";
+
+        // Enhancement issues (PM user stories) → Dev Planning
+        if (labels.Contains("enhancement"))
             return "Dev Planning";
-        if (agent.Contains("testengineer") || title.Contains("test"))
+
+        // Engineering tasks → Development
+        if (labels.Contains("engineering-task"))
             return "Development";
-        if (agent.Contains("engineer") || labels.Contains("engineering-task"))
-            return "Development";
+
+        // Fallback by title keywords
+        if (title.Contains("planning") || title.Contains("engineering plan") || title.Contains("principalengineer"))
+            return "Dev Planning";
 
         return "Development";
     }

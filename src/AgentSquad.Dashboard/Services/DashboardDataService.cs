@@ -900,7 +900,7 @@ public sealed class DashboardDataService : BackgroundService
             // If the call times out, return whatever cache we have and schedule a background refresh.
             using var cts = new CancellationTokenSource(DashboardApiTimeout);
             var allPrs = await _github.GetAllPullRequestsAsync(cts.Token);
-            _cachedPullRequests = allPrs.Where(pr => pr.CreatedAt >= _stateStore.RunStartedUtc).ToList();
+            _cachedPullRequests = allPrs.ToList();
             _lastPrFetchUtc = DateTime.UtcNow;
         }
         catch (OperationCanceledException)
@@ -933,7 +933,8 @@ public sealed class DashboardDataService : BackgroundService
         {
             using var cts = new CancellationTokenSource(DashboardApiTimeout);
             var allIssues = await _github.GetAllIssuesAsync(cts.Token);
-            _cachedIssues = allIssues.Where(i => i.CreatedAt >= _stateStore.RunStartedUtc).ToList();
+            _logger.LogInformation("Issue fetch: total={Total} issues from GitHub", allIssues.Count);
+            _cachedIssues = allIssues.ToList();
             _lastIssueFetchUtc = DateTime.UtcNow;
         }
         catch (OperationCanceledException)
@@ -969,7 +970,7 @@ public sealed class DashboardDataService : BackgroundService
                 try
                 {
                     var allIssues = await _github.GetAllIssuesAsync();
-                    _cachedIssues = allIssues.Where(i => i.CreatedAt >= _stateStore.RunStartedUtc).ToList();
+                    _cachedIssues = allIssues.ToList();
                     _lastIssueFetchUtc = DateTime.UtcNow;
                     _logger.LogInformation("Background refresh: loaded {Count} issues", _cachedIssues.Count);
                 }
@@ -979,7 +980,7 @@ public sealed class DashboardDataService : BackgroundService
                 try
                 {
                     var allPrs = await _github.GetAllPullRequestsAsync();
-                    _cachedPullRequests = allPrs.Where(pr => pr.CreatedAt >= _stateStore.RunStartedUtc).ToList();
+                    _cachedPullRequests = allPrs.ToList();
                     _lastPrFetchUtc = DateTime.UtcNow;
                     _logger.LogInformation("Background refresh: loaded {Count} PRs", _cachedPullRequests.Count);
                 }
