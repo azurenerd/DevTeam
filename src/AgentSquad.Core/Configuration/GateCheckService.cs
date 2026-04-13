@@ -82,20 +82,33 @@ public class GateCheckService : IGateCheckService
                         await _github.UpdatePullRequestAsync(resourceNumber.Value, labels: labels.ToArray(), ct: ct);
                     }
 
-                    var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
-                        $"This PR is paused at gate `{gateId}` and requires human approval before proceeding.\n\n" +
-                        $"**What needs review:** {context}\n\n" +
-                        $"**To approve:** Add a comment with `approved` or add the `{HumanApprovedLabel}` label.\n" +
-                        $"**To request changes:** Add a comment describing the changes needed.";
-                    await _github.AddPullRequestCommentAsync(resourceNumber.Value, comment, ct);
+                    // Only post the gate comment once (avoid duplicates on restart)
+                    var existingComments = await _github.GetPullRequestCommentsAsync(resourceNumber.Value, ct);
+                    var hasGateComment = existingComments.Any(c => c.Body?.Contains(GateCommentPrefix) == true
+                        && c.Body.Contains(gateId));
+                    if (!hasGateComment)
+                    {
+                        var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
+                            $"This PR is paused at gate `{gateId}` and requires human approval before proceeding.\n\n" +
+                            $"**What needs review:** {context}\n\n" +
+                            $"**To approve:** Add a comment with `approved` or add the `{HumanApprovedLabel}` label.\n" +
+                            $"**To request changes:** Add a comment describing the changes needed.";
+                        await _github.AddPullRequestCommentAsync(resourceNumber.Value, comment, ct);
+                    }
                 }
                 else
                 {
-                    var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
-                        $"This issue is paused at gate `{gateId}` and requires human approval.\n\n" +
-                        $"**What needs review:** {context}\n\n" +
-                        $"**To approve:** Add a comment with `approved`.";
-                    await _github.AddIssueCommentAsync(resourceNumber.Value, comment, ct);
+                    var existingComments = await _github.GetIssueCommentsAsync(resourceNumber.Value, ct);
+                    var hasGateComment = existingComments.Any(c => c.Body?.Contains(GateCommentPrefix) == true
+                        && c.Body.Contains(gateId));
+                    if (!hasGateComment)
+                    {
+                        var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
+                            $"This issue is paused at gate `{gateId}` and requires human approval.\n\n" +
+                            $"**What needs review:** {context}\n\n" +
+                            $"**To approve:** Add a comment with `approved`.";
+                        await _github.AddIssueCommentAsync(resourceNumber.Value, comment, ct);
+                    }
                 }
             }
             catch (Exception ex)
