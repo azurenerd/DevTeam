@@ -5439,7 +5439,16 @@ div[title] .config-agent-name {
     font-size: 0.85rem;
     color: #58a6ff;
     font-weight: 600;
+    text-decoration: none;
+    cursor: pointer;
 }
+a.ntl-detail-num:hover { text-decoration: underline; color: #79c0ff; }
+a.ntl-detail-pr-num {
+    color: #58a6ff;
+    text-decoration: none;
+    cursor: pointer;
+}
+a.ntl-detail-pr-num:hover { text-decoration: underline; color: #79c0ff; }
 .ntl-detail-state {
     font-size: 0.7rem;
     font-weight: 600;

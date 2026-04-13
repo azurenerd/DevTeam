@@ -143,7 +143,9 @@ else
     {
         <div class="ntl-detail-panel">
             <div class="ntl-detail-header">
-                <span class="ntl-detail-num">#@_selectedGroup.Issue.Number</span>
+                <a class="ntl-detail-num" href="@_selectedGroup.Issue.Url" target="_blank" title="Open on GitHub">
+                    #@_selectedGroup.Issue.Number ↗
+                </a>
                 <span class="ntl-detail-state @(_selectedGroup.Issue.State == "closed" ? "state-closed" : "state-open")">
                     @(_selectedGroup.Issue.State == "closed" ? "✓ Closed" : "● Open")
                 </span>
@@ -175,7 +177,7 @@ else
                         <div class="ntl-detail-pr @(child.State == "closed" ? "merged" : "open")"
                              @onclick="() => SelectNode(child.Number)">
                             <span class="ntl-detail-pr-indicator @(child.State == "closed" ? "ind-closed" : "ind-open")"></span>
-                            <span class="ntl-detail-pr-num">#@child.Number</span>
+                            <a class="ntl-detail-pr-num" href="@child.Url" target="_blank" @onclick:stopPropagation="true">#@child.Number</a>
                             <span class="ntl-detail-pr-title">@TruncateTitle(child.Title, 60)</span>
                         </div>
                     }
@@ -188,10 +190,9 @@ else
                     <span class="ntl-detail-section-title">Linked Pull Requests</span>
                     @foreach (var pr in _selectedGroup.LinkedPRs)
                     {
-                        <div class="ntl-detail-pr @(pr.IsMerged ? "merged" : pr.State == "closed" ? "closed" : "open")"
-                             @onclick="() => OpenGitHub(pr.Url)">
+                        <div class="ntl-detail-pr @(pr.IsMerged ? "merged" : pr.State == "closed" ? "closed" : "open")">
                             <span class="ntl-detail-pr-indicator @(pr.IsMerged ? "ind-merged" : pr.State == "closed" ? "ind-closed-pr" : "ind-open-pr")"></span>
-                            <span class="ntl-detail-pr-num">#@pr.Number</span>
+                            <a class="ntl-detail-pr-num" href="@pr.Url" target="_blank">#@pr.Number</a>
                             <span class="ntl-detail-pr-title">@TruncateTitle(pr.Title, 60)</span>
                         </div>
                     }
