@@ -250,8 +250,29 @@ else
         _loading = true;
         try
         {
-            _issues = (await DataService.GetIssuesAsync()).ToList();
-            _pullRequests = (await DataService.GetPullRequestsAsync()).ToList();
+            // Use a timeout so the page doesn't hang if GitHub API is slow/queued
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            var issuesTask = DataService.GetIssuesAsync();
+            var prsTask = DataService.GetPullRequestsAsync();
+
+            try
+            {
+                await Task.WhenAll(issuesTask, prsTask).WaitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // Timeout — use whatever completed or empty lists
+            }
+
+            _issues = issuesTask.IsCompletedSuccessfully ? issuesTask.Result.ToList() : [];
+            _pullRequests = prsTask.IsCompletedSuccessfully ? prsTask.Result.ToList() : [];
+            BuildTimeline();
+        }
+        catch (Exception)
+        {
+            // Ensure page still renders even if fetch fails
+            _issues = [];
+            _pullRequests = [];
             BuildTimeline();
         }
         finally
