@@ -241,6 +241,7 @@ else
     private List<AgentPullRequest> _rawPullRequests = [];
     private List<NeonPhase> _phases = [];
     private HashSet<int> _syntheticPrNumbers = new(); // tracks which issue numbers are actually PRs
+    private string _dataFingerprint = ""; // hash to detect actual data changes
     private bool _loading = true;
     private bool _initialLoadComplete;
     private bool _refreshing;
@@ -277,11 +278,7 @@ else
         {
             while (await timer.WaitForNextTickAsync(ct))
             {
-                var prevCount = _phases.Sum(p => p.Items.Count);
                 await LoadDataAsync();
-                var newCount = _phases.Sum(p => p.Items.Count);
-                if (newCount != prevCount)
-                    await InvokeAsync(StateHasChanged);
             }
         }
         catch (OperationCanceledException) { }
@@ -293,20 +290,26 @@ else
         _isRateLimited = DataService.IsGitHubRateLimited;
         try
         {
-            // DashboardDataService now has its own 8s timeout with background retry,
-            // so we give it a generous window here
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(20));
             var issuesTask = DataService.GetIssuesAsync();
             var prsTask = DataService.GetPullRequestsAsync();
             try { await Task.WhenAll(issuesTask, prsTask).WaitAsync(cts.Token); }
             catch (OperationCanceledException) { }
 
-            _rawIssues = issuesTask.IsCompletedSuccessfully ? issuesTask.Result.ToList() : [];
-            _rawPullRequests = prsTask.IsCompletedSuccessfully ? prsTask.Result.ToList() : [];
+            var newIssues = issuesTask.IsCompletedSuccessfully ? issuesTask.Result.ToList() : [];
+            var newPRs = prsTask.IsCompletedSuccessfully ? prsTask.Result.ToList() : [];
             _isRateLimited = DataService.IsGitHubRateLimited;
+
+            // Compute fingerprint: issue/PR numbers + states + labels count + PR merged status
+            var fp = ComputeFingerprint(newIssues, newPRs);
+            if (fp == _dataFingerprint && !showOverlay)
+                return; // nothing changed — skip rebuild and re-render
+
+            _rawIssues = newIssues;
+            _rawPullRequests = newPRs;
+            _dataFingerprint = fp;
             BuildTimeline();
 
-            // Auto-retry: if empty data (rate-limited, timeout, or just not ready yet)
             if (_phases.Count == 0)
                 _ = RetryAfterDelay(TimeSpan.FromSeconds(_isRateLimited ? 30 : 15));
         }
@@ -314,6 +317,7 @@ else
         {
             _rawIssues = [];
             _rawPullRequests = [];
+            _dataFingerprint = "";
             BuildTimeline();
             _ = RetryAfterDelay(TimeSpan.FromSeconds(15));
         }
@@ -321,7 +325,33 @@ else
         {
             _loading = false;
             _initialLoadComplete = true;
+            await InvokeAsync(StateHasChanged);
         }
+    }
+
+    /// <summary>
+    /// Cheap fingerprint of issue/PR data to detect real changes without rebuilding the whole timeline.
+    /// </summary>
+    private static string ComputeFingerprint(List<AgentIssue> issues, List<AgentPullRequest> prs)
+    {
+        var hash = new System.HashCode();
+        hash.Add(issues.Count);
+        hash.Add(prs.Count);
+        foreach (var i in issues)
+        {
+            hash.Add(i.Number);
+            hash.Add(i.State);
+            hash.Add(i.Labels.Count);
+            hash.Add(i.UpdatedAt?.Ticks ?? 0);
+        }
+        foreach (var p in prs)
+        {
+            hash.Add(p.Number);
+            hash.Add(p.State);
+            hash.Add(p.IsMerged);
+            hash.Add(p.UpdatedAt?.Ticks ?? 0);
+        }
+        return hash.ToHashCode().ToString();
     }
 
     private async Task RetryAfterDelay(TimeSpan delay)
@@ -330,7 +360,6 @@ else
         if (_phases.Count == 0)
         {
             await LoadDataAsync(showOverlay: !_initialLoadComplete);
-            await InvokeAsync(StateHasChanged);
         }
     }
 
@@ -718,7 +747,6 @@ else
     private async void OnDataChanged()
     {
         await LoadDataAsync();
-        await InvokeAsync(StateHasChanged);
     }
 
     public async ValueTask DisposeAsync()
