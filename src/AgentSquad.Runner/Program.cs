@@ -244,6 +244,29 @@ reasoningApi.MapGet("/events/{agentId}/since", (string agentId, DateTime since, 
 reasoningApi.MapGet("/recent", (AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog log, int? count) =>
     Results.Ok(log.GetRecentEvents(count ?? 50)));
 
+// Gate approval API — for workflow-level gates that have no associated PR
+var gateApi = app.MapGroup("/api/gates").WithTags("Gates");
+
+gateApi.MapGet("/pending", (IGateCheckService gateCheck) =>
+{
+    var svc = gateCheck as GateCheckService;
+    if (svc is null) return Results.Ok(Array.Empty<object>());
+    return Results.Ok(svc.GetPendingGates());
+});
+
+gateApi.MapGet("/approved", (IGateCheckService gateCheck) =>
+{
+    var svc = gateCheck as GateCheckService;
+    if (svc is null) return Results.Ok(new Dictionary<string, DateTime>());
+    return Results.Ok(svc.GetApprovedGates());
+});
+
+gateApi.MapPost("/{gateId}/approve", (string gateId, IGateCheckService gateCheck) =>
+{
+    gateCheck.ApproveGate(gateId);
+    return Results.Ok(new { gateId, approved = true, message = $"Gate '{gateId}' approved" });
+});
+
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");
 

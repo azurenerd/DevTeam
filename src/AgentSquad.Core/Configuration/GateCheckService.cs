@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Notifications;
 using Microsoft.Extensions.Logging;
@@ -7,7 +8,10 @@ namespace AgentSquad.Core.Configuration;
 
 /// <summary>
 /// Evaluates human interaction gates at workflow touchpoints.
-/// When a gate requires human approval, adds a GitHub label and posts a comment.
+/// Supports two approval paths:
+///   1. GitHub-based: labels/comments on a PR or issue (when resourceNumber is provided)
+///   2. Local: in-memory approval via REST API/dashboard (always available, required for
+///      workflow-level gates like ResearchCompleteness that have no associated PR)
 /// When gates are disabled or set to auto, returns Proceed immediately.
 /// </summary>
 public class GateCheckService : IGateCheckService
@@ -15,6 +19,12 @@ public class GateCheckService : IGateCheckService
     private const string AwaitingHumanLabel = "awaiting-human-review";
     private const string HumanApprovedLabel = "human-approved";
     private const string GateCommentPrefix = "🚦 **Human Review Gate";
+
+    /// <summary>
+    /// Tracks gates approved via the local path (REST API / dashboard).
+    /// Key = gateId, Value = UTC timestamp of approval. Thread-safe.
+    /// </summary>
+    private readonly ConcurrentDictionary<string, DateTime> _localApprovals = new();
 
     private readonly HumanInteractionConfig _config;
     private readonly IGitHubService _github;
@@ -46,15 +56,22 @@ public class GateCheckService : IGateCheckService
             return GateResult.Proceed;
         }
 
+        // Already approved locally (e.g., pre-approved via dashboard before gate was hit)
+        if (_localApprovals.ContainsKey(gateId))
+        {
+            _logger.LogInformation("Gate {GateId} already approved locally, proceeding", gateId);
+            return GateResult.Proceed;
+        }
+
         var gateName = GetGateName(gateId);
-        _logger.LogInformation("Gate {GateId} ({GateName}) requires human approval: {Context}",
-            gateId, gateName, context);
+        _logger.LogInformation(
+            "Gate {GateId} ({GateName}) requires human approval: {Context} (resource: {Resource})",
+            gateId, gateName, context, resourceNumber?.ToString() ?? "none — use dashboard/API to approve");
 
         if (resourceNumber.HasValue)
         {
             try
             {
-                // Add awaiting-human-review label to the PR/issue
                 var pr = await _github.GetPullRequestAsync(resourceNumber.Value, ct);
                 if (pr is not null)
                 {
@@ -65,7 +82,6 @@ public class GateCheckService : IGateCheckService
                         await _github.UpdatePullRequestAsync(resourceNumber.Value, labels: labels.ToArray(), ct: ct);
                     }
 
-                    // Post a comment explaining what needs human review
                     var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
                         $"This PR is paused at gate `{gateId}` and requires human approval before proceeding.\n\n" +
                         $"**What needs review:** {context}\n\n" +
@@ -75,7 +91,6 @@ public class GateCheckService : IGateCheckService
                 }
                 else
                 {
-                    // Try as issue
                     var comment = $"{GateCommentPrefix}: {gateName}**\n\n" +
                         $"This issue is paused at gate `{gateId}` and requires human approval.\n\n" +
                         $"**What needs review:** {context}\n\n" +
@@ -110,11 +125,18 @@ public class GateCheckService : IGateCheckService
         string gateId, int resourceNumber, CancellationToken ct = default)
     {
         if (!_config.RequiresHuman(gateId))
-            return true; // Gate doesn't require human, always "approved"
+            return true;
+
+        // Always check local approvals first (fast, no API call)
+        if (_localApprovals.ContainsKey(gateId))
+        {
+            _logger.LogInformation("Gate {GateId} approved locally (while polling PR #{Number})", gateId, resourceNumber);
+            _notificationService?.Resolve(gateId, resourceNumber);
+            return true;
+        }
 
         try
         {
-            // Check for human-approved label on PR
             var pr = await _github.GetPullRequestAsync(resourceNumber, ct);
             if (pr?.Labels?.Contains(HumanApprovedLabel) == true)
             {
@@ -123,11 +145,9 @@ public class GateCheckService : IGateCheckService
                 return true;
             }
 
-            // Check for approval comment
             var comments = await _github.GetPullRequestCommentsAsync(resourceNumber, ct);
             foreach (var comment in comments.Reverse())
             {
-                // Skip bot comments
                 if (comment.Body?.Contains(GateCommentPrefix) == true) continue;
 
                 var body = comment.Body?.Trim().ToLowerInvariant() ?? "";
@@ -136,7 +156,6 @@ public class GateCheckService : IGateCheckService
                     _logger.LogInformation("Gate {GateId} approved via comment on PR #{Number}", gateId, resourceNumber);
                     _notificationService?.Resolve(gateId, resourceNumber);
 
-                    // Remove awaiting label, add approved label
                     if (pr is not null)
                     {
                         var labels = pr.Labels?.ToList() ?? new List<string>();
@@ -159,6 +178,39 @@ public class GateCheckService : IGateCheckService
         return false;
     }
 
+    public void ApproveGate(string gateId)
+    {
+        if (_localApprovals.TryAdd(gateId, DateTime.UtcNow))
+        {
+            _logger.LogInformation("Gate {GateId} approved locally via dashboard/API", gateId);
+            _notificationService?.Resolve(gateId);
+        }
+        else
+        {
+            _logger.LogDebug("Gate {GateId} was already approved locally", gateId);
+        }
+    }
+
+    public bool IsGateApprovedLocally(string gateId) => _localApprovals.ContainsKey(gateId);
+
+    /// <summary>Get all pending (non-approved) gates that require human approval.</summary>
+    public IReadOnlyList<PendingGateInfo> GetPendingGates()
+    {
+        var pending = new List<PendingGateInfo>();
+        foreach (var (_, id, name, description) in GateIds.AllGates)
+        {
+            if (_config.RequiresHuman(id) && !_localApprovals.ContainsKey(id))
+            {
+                pending.Add(new PendingGateInfo(id, name, description));
+            }
+        }
+        return pending;
+    }
+
+    /// <summary>Get all locally-approved gates with timestamps.</summary>
+    public IReadOnlyDictionary<string, DateTime> GetApprovedGates() =>
+        new Dictionary<string, DateTime>(_localApprovals);
+
     private static string GetGateName(string gateId)
     {
         foreach (var (_, id, name, _) in GateIds.AllGates)
@@ -168,3 +220,6 @@ public class GateCheckService : IGateCheckService
         return gateId;
     }
 }
+
+/// <summary>Info about a gate that is configured for human approval but not yet approved.</summary>
+public record PendingGateInfo(string GateId, string GateName, string Description);

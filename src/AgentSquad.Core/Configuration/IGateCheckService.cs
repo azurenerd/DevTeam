@@ -24,6 +24,16 @@ public interface IGateCheckService
     Task<bool> IsGateApprovedAsync(string gateId, int resourceNumber, CancellationToken ct = default);
 
     /// <summary>
+    /// Approve a gate locally (called from dashboard/REST API when no GitHub resource is involved).
+    /// </summary>
+    void ApproveGate(string gateId);
+
+    /// <summary>
+    /// Check if a gate has been approved locally (via dashboard).
+    /// </summary>
+    bool IsGateApprovedLocally(string gateId);
+
+    /// <summary>
     /// Check if the master human interaction switch is enabled.
     /// When false, all gates auto-proceed.
     /// </summary>
@@ -75,14 +85,25 @@ public static class GateCheckExtensions
             return false;
 
         // Gate requires human — poll for approval
-        if (!resourceNumber.HasValue)
-            return true; // No resource to poll — caller must handle
-
-        while (!ct.IsCancellationRequested)
+        if (resourceNumber.HasValue)
         {
-            await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds), ct);
-            if (await gateCheck.IsGateApprovedAsync(gateId, resourceNumber.Value, ct))
-                return true;
+            // Poll GitHub for label/comment approval
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds), ct);
+                if (await gateCheck.IsGateApprovedAsync(gateId, resourceNumber.Value, ct))
+                    return true;
+            }
+        }
+        else
+        {
+            // No GitHub resource — poll local approval (dashboard/REST API)
+            while (!ct.IsCancellationRequested)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(pollIntervalSeconds), ct);
+                if (gateCheck.IsGateApprovedLocally(gateId))
+                    return true;
+            }
         }
 
         ct.ThrowIfCancellationRequested();
