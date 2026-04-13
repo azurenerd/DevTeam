@@ -14,6 +14,12 @@ public record AssessmentResult
     public required bool Passed { get; init; }
     public required IReadOnlyList<string> Gaps { get; init; }
     public required string Summary { get; init; }
+
+    /// <summary>AI-reported confidence percentage (0-100). Null if not parsed or threshold disabled.</summary>
+    public int? Confidence { get; init; }
+
+    /// <summary>Severity of each gap: "critical", "major", or "minor".</summary>
+    public IReadOnlyList<string> GapSeverities { get; init; } = [];
 }
 
 /// <summary>
@@ -137,6 +143,34 @@ public class SelfAssessmentService
                 return currentOutput;
             }
 
+            // --- CONFIDENCE THRESHOLD CHECK ---
+            if (_config.ConfidenceThreshold.Enabled && assessment.Confidence.HasValue)
+            {
+                var hasBlockingGaps = assessment.GapSeverities.Any(s =>
+                    s.Equals("critical", StringComparison.OrdinalIgnoreCase) ||
+                    s.Equals("major", StringComparison.OrdinalIgnoreCase));
+
+                if (assessment.Confidence.Value >= _config.ConfidenceThreshold.MinConfidence && !hasBlockingGaps)
+                {
+                    _reasoningLog.Log(new AgentReasoningEvent
+                    {
+                        AgentId = agentId,
+                        AgentDisplayName = agentDisplayName,
+                        EventType = AgentReasoningEventType.Decision,
+                        Phase = phase,
+                        Summary = $"Confidence {assessment.Confidence}% ≥ {_config.ConfidenceThreshold.MinConfidence}% with only minor gaps — skipping refinement",
+                        Detail = $"Gaps (minor only): {string.Join("; ", assessment.Gaps)}",
+                        Passed = true,
+                        Iteration = iteration,
+                    });
+
+                    _logger.LogInformation(
+                        "[{Agent}] Confidence threshold met ({Confidence}% ≥ {Threshold}%), skipping refinement",
+                        agentDisplayName, assessment.Confidence.Value, _config.ConfidenceThreshold.MinConfidence);
+                    return currentOutput;
+                }
+            }
+
             // --- REFINE ---
             _logger.LogInformation(
                 "[{Agent}] Self-assessment found {GapCount} gaps on iteration {Iteration}, refining",
@@ -198,16 +232,31 @@ public class SelfAssessmentService
         CancellationToken ct)
     {
         var history = new ChatHistory();
+
+        var useConfidence = _config.ConfidenceThreshold.Enabled;
+        var formatInstructions = useConfidence
+            ? "Respond in this EXACT format:\n" +
+              "VERDICT: PASS or FAIL\n" +
+              "CONFIDENCE: <number 0-100>%\n" +
+              "SUMMARY: One sentence overall assessment\n" +
+              "GAPS:\n" +
+              "- [critical|major|minor] Gap description 1\n" +
+              "- [critical|major|minor] Gap description 2\n" +
+              "(leave GAPS empty if PASS)\n\n" +
+              "Severity guide: critical = would cause failures or missing core requirements, " +
+              "major = significant quality gap, minor = polish or nice-to-have."
+            : "Respond in this EXACT format:\n" +
+              "VERDICT: PASS or FAIL\n" +
+              "SUMMARY: One sentence overall assessment\n" +
+              "GAPS:\n" +
+              "- Gap description 1\n" +
+              "- Gap description 2\n" +
+              "(leave GAPS empty if PASS)";
+
         history.AddSystemMessage(
             "You are a strict quality assessor. Your job is to evaluate a document against specific criteria " +
             "and identify any gaps or weaknesses. Be thorough but fair — only flag genuine gaps, not stylistic preferences.\n\n" +
-            "Respond in this EXACT format:\n" +
-            "VERDICT: PASS or FAIL\n" +
-            "SUMMARY: One sentence overall assessment\n" +
-            "GAPS:\n" +
-            "- Gap description 1\n" +
-            "- Gap description 2\n" +
-            "(leave GAPS empty if PASS)");
+            formatInstructions);
 
         history.AddUserMessage(
             $"## Assessment Criteria\n{criteria}\n\n" +
@@ -255,7 +304,9 @@ public class SelfAssessmentService
         var lines = response.Split('\n', StringSplitOptions.TrimEntries);
         var passed = false;
         var summary = "";
+        int? confidence = null;
         var gaps = new List<string>();
+        var severities = new List<string>();
         var inGaps = false;
 
         foreach (var line in lines)
@@ -265,6 +316,12 @@ public class SelfAssessmentService
                 var verdict = line["VERDICT:".Length..].Trim();
                 passed = verdict.Contains("PASS", StringComparison.OrdinalIgnoreCase);
             }
+            else if (line.StartsWith("CONFIDENCE:", StringComparison.OrdinalIgnoreCase))
+            {
+                var confText = line["CONFIDENCE:".Length..].Trim().TrimEnd('%');
+                if (int.TryParse(confText, out var confValue))
+                    confidence = Math.Clamp(confValue, 0, 100);
+            }
             else if (line.StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase))
             {
                 summary = line["SUMMARY:".Length..].Trim();
@@ -272,28 +329,25 @@ public class SelfAssessmentService
             else if (line.StartsWith("GAPS:", StringComparison.OrdinalIgnoreCase))
             {
                 inGaps = true;
-                // Check if there's content on the same line as GAPS:
                 var gapContent = line["GAPS:".Length..].Trim();
                 if (gapContent.StartsWith("- ") || gapContent.StartsWith("* "))
-                    gaps.Add(gapContent[2..].Trim());
+                    ParseGapLine(gapContent[2..].Trim(), gaps, severities);
             }
             else if (inGaps && (line.StartsWith("- ") || line.StartsWith("* ")))
             {
                 var gap = line[2..].Trim();
                 if (!string.IsNullOrWhiteSpace(gap))
-                    gaps.Add(gap);
+                    ParseGapLine(gap, gaps, severities);
             }
             else if (inGaps && line.StartsWith("(") && line.Contains("empty"))
             {
-                // "(leave GAPS empty if PASS)" or similar
                 continue;
             }
             else if (inGaps && !string.IsNullOrWhiteSpace(line) && !line.StartsWith("-") && !line.StartsWith("*"))
             {
-                // Non-bullet line after GAPS section — might be numbered format: "1. Gap"
                 var numberMatch = System.Text.RegularExpressions.Regex.Match(line, @"^\d+\.\s+(.+)");
                 if (numberMatch.Success)
-                    gaps.Add(numberMatch.Groups[1].Value.Trim());
+                    ParseGapLine(numberMatch.Groups[1].Value.Trim(), gaps, severities);
             }
         }
 
@@ -305,6 +359,28 @@ public class SelfAssessmentService
             Passed = passed,
             Gaps = gaps,
             Summary = string.IsNullOrEmpty(summary) ? (passed ? "All criteria met." : "Gaps found.") : summary,
+            Confidence = confidence,
+            GapSeverities = severities,
         };
+    }
+
+    /// <summary>
+    /// Parse a gap line, extracting optional [severity] prefix.
+    /// Examples: "[critical] Missing error handling" → gap="Missing error handling", severity="critical"
+    /// "Missing error handling" → gap="Missing error handling", severity="unknown"
+    /// </summary>
+    private static void ParseGapLine(string text, List<string> gaps, List<string> severities)
+    {
+        var severityMatch = System.Text.RegularExpressions.Regex.Match(text, @"^\[(critical|major|minor)\]\s*(.+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (severityMatch.Success)
+        {
+            severities.Add(severityMatch.Groups[1].Value.ToLowerInvariant());
+            gaps.Add(severityMatch.Groups[2].Value.Trim());
+        }
+        else
+        {
+            severities.Add("unknown");
+            gaps.Add(text);
+        }
     }
 }

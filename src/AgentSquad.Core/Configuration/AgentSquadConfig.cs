@@ -494,6 +494,14 @@ public class AgenticLoopConfig
         ["TestEngineer"] = new() { Enabled = false },
     };
 
+    /// <summary>
+    /// Confidence threshold for skipping refinement on minor gaps.
+    /// When enabled, assessments include confidence scores and gap severities.
+    /// High-confidence results with only minor gaps skip refinement to save API calls.
+    /// Disabled by default — enable when using metered API keys.
+    /// </summary>
+    public ConfidenceThresholdConfig ConfidenceThreshold { get; set; } = new();
+
     /// <summary>Check if agentic loop is enabled for a specific agent role.</summary>
     public bool IsEnabledForRole(AgentRole role)
     {
@@ -511,4 +519,18 @@ public class AgenticRoleConfig
 
     /// <summary>Override MaxIterations for this role. Null = use global default.</summary>
     public int? MaxIterations { get; set; }
+}
+
+/// <summary>
+/// Confidence threshold configuration. When enabled, the assessment AI reports a confidence
+/// percentage and gap severities. If confidence ≥ MinConfidence and no critical/major gaps,
+/// refinement is skipped to save API calls.
+/// </summary>
+public class ConfidenceThresholdConfig
+{
+    /// <summary>When false (default), all failed assessments trigger refinement regardless of severity.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>Minimum confidence percentage (0-100) to skip refinement when only minor gaps exist.</summary>
+    public int MinConfidence { get; set; } = 80;
 }
