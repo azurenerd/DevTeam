@@ -4975,16 +4975,16 @@ div[title] .config-agent-name {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   NEON TIMELINE
+   NEON TIMELINE — Blue neon full-height phase columns
    ══════════════════════════════════════════════════════════════ */
 
-/* ── Phase color tokens ── */
-.phase-research    { --phase: #00e5ff; --phase-dim: rgba(0,229,255,0.08); --phase-mid: rgba(0,229,255,0.20); }
-.phase-pmspec      { --phase: #e040fb; --phase-dim: rgba(224,64,251,0.08); --phase-mid: rgba(224,64,251,0.20); }
-.phase-architecture{ --phase: #a855f7; --phase-dim: rgba(168,85,247,0.08); --phase-mid: rgba(168,85,247,0.20); }
-.phase-devplanning { --phase: #ff9100; --phase-dim: rgba(255,145,0,0.08);  --phase-mid: rgba(255,145,0,0.20);  }
-.phase-development { --phase: #00e676; --phase-dim: rgba(0,230,118,0.08);  --phase-mid: rgba(0,230,118,0.20);  }
-.phase-complete    { --phase: #ffd740; --phase-dim: rgba(255,215,64,0.08); --phase-mid: rgba(255,215,64,0.20); }
+/* ── Phase color tokens (all blue/cyan family for consistent neon feel) ── */
+.phase-research    { --phase: #00e5ff; --phase-glow: rgba(0,229,255,0.12); --phase-border: rgba(0,229,255,0.25); }
+.phase-pmspec      { --phase: #7c4dff; --phase-glow: rgba(124,77,255,0.10); --phase-border: rgba(124,77,255,0.22); }
+.phase-architecture{ --phase: #448aff; --phase-glow: rgba(68,138,255,0.10); --phase-border: rgba(68,138,255,0.22); }
+.phase-devplanning { --phase: #18ffff; --phase-glow: rgba(24,255,255,0.10); --phase-border: rgba(24,255,255,0.20); }
+.phase-development { --phase: #00e676; --phase-glow: rgba(0,230,118,0.08); --phase-border: rgba(0,230,118,0.18); }
+.phase-complete    { --phase: #69f0ae; --phase-glow: rgba(105,240,174,0.08); --phase-border: rgba(105,240,174,0.18); }
 
 /* ── Loading spinner ── */
 .ntl-loading {
@@ -5012,6 +5012,7 @@ div[title] .config-agent-name {
     flex-wrap: wrap;
     gap: 12px;
     margin-bottom: 12px;
+    padding: 0 8px;
 }
 .ntl-topbar-left { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
 .ntl-title {
@@ -5052,7 +5053,8 @@ div[title] .config-agent-name {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
+    padding: 0 8px;
 }
 .ntl-progress-bar {
     flex: 1;
@@ -5063,7 +5065,7 @@ div[title] .config-agent-name {
 }
 .ntl-progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #00e5ff, #a855f7, #00e676);
+    background: linear-gradient(90deg, #00e5ff, #448aff, #00e676);
     background-size: 200% 100%;
     border-radius: 2px;
     transition: width 0.6s ease;
@@ -5081,18 +5083,25 @@ div[title] .config-agent-name {
     text-align: right;
 }
 
+/* ── Viewport — fills available height ── */
+.ntl-viewport {
+    position: relative;
+    flex: 1;
+    min-height: calc(100vh - 180px);
+}
+
 /* ── Scroll area ── */
 .ntl-scroll-area {
     overflow-x: auto;
-    overflow-y: visible;
-    padding-bottom: 24px;
-    /* Custom scrollbar */
+    overflow-y: hidden;
+    height: 100%;
+    min-height: calc(100vh - 180px);
     scrollbar-width: thin;
-    scrollbar-color: #30363d transparent;
+    scrollbar-color: #1c2333 transparent;
 }
 .ntl-scroll-area::-webkit-scrollbar { height: 6px; }
 .ntl-scroll-area::-webkit-scrollbar-track { background: transparent; }
-.ntl-scroll-area::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+.ntl-scroll-area::-webkit-scrollbar-thumb { background: #1c2333; border-radius: 3px; }
 
 /* ── Timeline container ── */
 .ntl-timeline {
@@ -5100,85 +5109,99 @@ div[title] .config-agent-name {
     display: flex;
     gap: 0;
     min-width: max-content;
-    padding: 60px 32px 120px;
+    min-height: calc(100vh - 180px);
 }
 
-/* ── Spine — horizontal glowing line ── */
-.ntl-spine {
-    position: absolute;
-    left: 0; right: 0;
-    top: 44px;
-    height: 2px;
-    background: linear-gradient(90deg,
-        transparent 0%,
-        rgba(0,229,255,0.5) 5%,
-        rgba(168,85,247,0.5) 35%,
-        rgba(0,230,118,0.5) 65%,
-        rgba(255,215,64,0.5) 95%,
-        transparent 100%
-    );
-    box-shadow:
-        0 0 8px rgba(0,229,255,0.25),
-        0 0 20px rgba(168,85,247,0.15);
-    animation: ntl-spine-breathe 3s ease-in-out infinite;
-    z-index: 0;
-}
-@keyframes ntl-spine-breathe {
-    0%, 100% { opacity: 0.7; box-shadow: 0 0 8px rgba(0,229,255,0.2), 0 0 16px rgba(168,85,247,0.1); }
-    50%      { opacity: 1;   box-shadow: 0 0 12px rgba(0,229,255,0.4), 0 0 30px rgba(168,85,247,0.2); }
-}
-
-/* ── Phase zone ── */
-.ntl-phase-zone {
+/* ── Phase column — full-height vertical rectangle ── */
+.ntl-phase-column {
     position: relative;
     flex: 0 0 auto;
-    min-width: 180px;
-    padding: 0 8px;
-    z-index: 1;
+    min-width: 200px;
+    min-height: calc(100vh - 180px);
+    padding: 0;
+    background: var(--phase-glow);
+    border-left: 1px solid var(--phase-border);
+    border-right: 1px solid var(--phase-border);
+    margin-right: -1px;
+    transition: background 0.3s;
+    /* Neon glow on edges */
+    box-shadow:
+        inset 1px 0 12px -4px color-mix(in srgb, var(--phase) 15%, transparent),
+        inset -1px 0 12px -4px color-mix(in srgb, var(--phase) 15%, transparent);
+}
+.ntl-phase-column:first-child {
+    border-top-left-radius: 12px;
+    border-bottom-left-radius: 12px;
+}
+.ntl-phase-column:last-child {
+    border-top-right-radius: 12px;
+    border-bottom-right-radius: 12px;
+    margin-right: 0;
+}
+.ntl-phase-column:hover {
+    background: color-mix(in srgb, var(--phase-glow) 80%, rgba(255,255,255,0.02));
+    box-shadow:
+        inset 1px 0 20px -4px color-mix(in srgb, var(--phase) 22%, transparent),
+        inset -1px 0 20px -4px color-mix(in srgb, var(--phase) 22%, transparent);
 }
 
-/* Phase background glow */
-.ntl-phase-glow {
-    position: absolute;
-    inset: -20px -4px;
-    border-radius: 16px;
-    background: var(--phase-dim);
-    border: 1px solid var(--phase-mid);
-    opacity: 0.6;
-    z-index: -1;
-    transition: opacity 0.3s;
-}
-.ntl-phase-zone:hover .ntl-phase-glow { opacity: 1; }
-
-/* Phase label */
+/* Phase label — top-left justified */
 .ntl-phase-label {
     position: absolute;
-    top: -18px;
-    left: 50%;
-    transform: translateX(-50%);
-    white-space: nowrap;
+    top: 16px;
+    left: 16px;
     display: flex;
     align-items: center;
-    gap: 6px;
-    font-size: 0.65rem;
+    gap: 8px;
+    white-space: nowrap;
+    z-index: 3;
+}
+.ntl-phase-name {
+    font-size: 0.7rem;
     font-weight: 700;
     text-transform: uppercase;
-    letter-spacing: 0.08em;
+    letter-spacing: 0.1em;
     color: var(--phase);
-    opacity: 0.85;
+    text-shadow: 0 0 12px color-mix(in srgb, var(--phase) 50%, transparent);
 }
 .ntl-phase-counter {
     font-weight: 500;
     font-size: 0.6rem;
-    opacity: 0.6;
     color: #7d8590;
+    opacity: 0.7;
+}
+
+/* ── Spine segment — horizontal glowing line per phase ── */
+.ntl-spine-segment {
+    position: absolute;
+    left: 0; right: 0;
+    top: 60px;
+    height: 2px;
+    background: linear-gradient(90deg,
+        transparent 0%,
+        color-mix(in srgb, var(--phase) 50%, transparent) 15%,
+        color-mix(in srgb, var(--phase) 60%, transparent) 50%,
+        color-mix(in srgb, var(--phase) 50%, transparent) 85%,
+        transparent 100%
+    );
+    box-shadow:
+        0 0 6px color-mix(in srgb, var(--phase) 30%, transparent),
+        0 0 16px color-mix(in srgb, var(--phase) 15%, transparent);
+    animation: ntl-spine-breathe 3s ease-in-out infinite;
+    z-index: 1;
+}
+@keyframes ntl-spine-breathe {
+    0%, 100% { opacity: 0.6; }
+    50%      { opacity: 1; }
 }
 
 /* ── Nodes container ── */
 .ntl-phase-nodes {
     display: flex;
-    gap: 6px;
-    padding-top: 36px;
+    gap: 4px;
+    padding: 70px 10px 24px;
+    flex-wrap: wrap;
+    align-content: flex-start;
 }
 
 /* ── Node cluster (spine-dot + connector + card + children) ── */
@@ -5187,12 +5210,12 @@ div[title] .config-agent-name {
     display: flex;
     flex-direction: column;
     align-items: center;
-    min-width: 150px;
+    min-width: 160px;
     animation: ntl-node-appear 0.5s ease both;
     animation-delay: var(--node-delay, 0s);
 }
 @keyframes ntl-node-appear {
-    from { opacity: 0; transform: translateY(12px); }
+    from { opacity: 0; transform: translateY(10px); }
     to   { opacity: 1; transform: translateY(0); }
 }
 
@@ -5201,30 +5224,29 @@ div[title] .config-agent-name {
     width: 10px; height: 10px;
     border-radius: 50%;
     border: 2px solid var(--phase);
-    background: #0d1117;
+    background: #0a0e17;
     box-shadow: 0 0 6px var(--phase);
     z-index: 2;
     position: relative;
-    top: -1px;
     animation: ntl-dot-pulse 2.5s ease-in-out infinite;
     animation-delay: var(--node-delay, 0s);
 }
 .ntl-spine-dot.done {
     background: var(--phase);
     animation: none;
-    opacity: 0.6;
+    opacity: 0.5;
 }
 @keyframes ntl-dot-pulse {
     0%, 100% { box-shadow: 0 0 4px var(--phase); }
-    50%      { box-shadow: 0 0 10px var(--phase), 0 0 20px var(--phase); }
+    50%      { box-shadow: 0 0 12px var(--phase), 0 0 24px color-mix(in srgb, var(--phase) 40%, transparent); }
 }
 
 /* Vertical connector */
 .ntl-connector {
     width: 1px;
-    height: 16px;
+    height: 14px;
     background: linear-gradient(180deg, var(--phase), transparent);
-    opacity: 0.5;
+    opacity: 0.4;
 }
 
 /* ── Issue node card ── */
@@ -5233,38 +5255,40 @@ div[title] .config-agent-name {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 12px;
-    border-radius: 22px;
-    background: rgba(13,17,23,0.85);
+    padding: 8px 14px;
+    border-radius: 20px;
+    background: rgba(10,14,23,0.88);
     border: 1px solid rgba(255,255,255,0.06);
-    backdrop-filter: blur(8px);
+    backdrop-filter: blur(12px);
     cursor: pointer;
     transition: all 0.25s ease;
     white-space: nowrap;
-    max-width: 220px;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    max-width: 230px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.4);
 }
 .ntl-node:hover {
     border-color: var(--phase);
-    box-shadow: 0 0 12px color-mix(in srgb, var(--phase) 30%, transparent),
-                0 4px 16px rgba(0,0,0,0.4);
+    box-shadow:
+        0 0 14px color-mix(in srgb, var(--phase) 35%, transparent),
+        0 4px 20px rgba(0,0,0,0.5);
     transform: translateY(-2px);
 }
 .ntl-node-selected {
     border-color: var(--phase) !important;
-    box-shadow: 0 0 16px color-mix(in srgb, var(--phase) 40%, transparent),
-                0 0 32px color-mix(in srgb, var(--phase) 15%, transparent) !important;
+    box-shadow:
+        0 0 18px color-mix(in srgb, var(--phase) 45%, transparent),
+        0 0 40px color-mix(in srgb, var(--phase) 18%, transparent) !important;
 }
-.ntl-node-closed { opacity: 0.55; }
-.ntl-node-closed:hover { opacity: 0.85; }
+.ntl-node-closed { opacity: 0.45; }
+.ntl-node-closed:hover { opacity: 0.8; }
 
-/* Status indicator dot inside card */
+/* Status indicator dot */
 .ntl-node-indicator {
     flex-shrink: 0;
     width: 8px; height: 8px;
     border-radius: 50%;
 }
-.ind-open    { background: #00e676; box-shadow: 0 0 6px rgba(0,230,118,0.5); animation: ntl-ind-breathe-green 2s ease-in-out infinite; }
+.ind-open    { background: #00e676; box-shadow: 0 0 6px rgba(0,230,118,0.6); animation: ntl-ind-breathe-green 2s ease-in-out infinite; }
 .ind-closed  { background: #a855f7; box-shadow: 0 0 4px rgba(168,85,247,0.4); }
 .ind-merged  { background: #a855f7; box-shadow: 0 0 4px rgba(168,85,247,0.4); }
 .ind-open-pr { background: #3fb950; box-shadow: 0 0 4px rgba(63,185,80,0.4); }
@@ -5272,7 +5296,7 @@ div[title] .config-agent-name {
 
 @keyframes ntl-ind-breathe-green {
     0%, 100% { box-shadow: 0 0 4px rgba(0,230,118,0.3); }
-    50%      { box-shadow: 0 0 8px rgba(0,230,118,0.7); }
+    50%      { box-shadow: 0 0 10px rgba(0,230,118,0.8); }
 }
 
 .ntl-node-body {
@@ -5293,32 +5317,18 @@ div[title] .config-agent-name {
     line-height: 1.3;
 }
 
-/* PR count badge */
-.ntl-node-pr-badge {
-    flex-shrink: 0;
-    min-width: 18px; height: 18px;
-    line-height: 18px;
-    text-align: center;
-    font-size: 0.6rem;
-    font-weight: 700;
-    color: #e6edf3;
-    background: rgba(88,166,255,0.2);
-    border: 1px solid rgba(88,166,255,0.35);
-    border-radius: 10px;
-}
-
-/* ── Child nodes (linked PRs) ── */
+/* ── Child nodes (child issues) ── */
 .ntl-children {
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 4px;
+    gap: 3px;
     margin-top: 2px;
 }
 .ntl-child-connector {
     width: 1px;
-    height: 8px;
-    background: rgba(88,166,255,0.3);
+    height: 6px;
+    background: rgba(88,166,255,0.25);
 }
 .ntl-child-node {
     display: flex;
@@ -5326,37 +5336,93 @@ div[title] .config-agent-name {
     gap: 6px;
     padding: 4px 10px;
     border-radius: 14px;
-    background: rgba(22,27,34,0.9);
+    background: rgba(15,20,30,0.9);
     border: 1px solid rgba(255,255,255,0.04);
     cursor: pointer;
     transition: all 0.2s;
-    font-size: 0.65rem;
+    font-size: 0.62rem;
+    max-width: 200px;
 }
 .ntl-child-node:hover {
-    border-color: #58a6ff;
-    box-shadow: 0 0 8px rgba(88,166,255,0.2);
+    border-color: var(--phase);
+    box-shadow: 0 0 8px color-mix(in srgb, var(--phase) 25%, transparent);
 }
 .ntl-child-indicator {
     width: 6px; height: 6px;
     border-radius: 50%;
+    flex-shrink: 0;
 }
-.ntl-child-label { color: #7d8590; }
-.ntl-child-merged { opacity: 0.5; }
-.ntl-child-merged:hover { opacity: 0.8; }
+.ntl-child-label {
+    color: #7d8590;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 .ntl-child-closed { opacity: 0.4; }
+.ntl-child-closed:hover { opacity: 0.7; }
+.ntl-child-open { }
+
+/* ── Edge fade overlays ── */
+.ntl-edge-fade {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 40px;
+    pointer-events: none;
+    z-index: 10;
+}
+.ntl-edge-left {
+    left: 0;
+    background: linear-gradient(90deg, #0d1117 0%, transparent 100%);
+}
+.ntl-edge-right {
+    right: 0;
+    background: linear-gradient(270deg, #0d1117 0%, transparent 100%);
+}
+
+/* ── Ambient corner glow animations ── */
+.ntl-viewport::before,
+.ntl-viewport::after {
+    content: '';
+    position: absolute;
+    width: 200px;
+    height: 200px;
+    border-radius: 50%;
+    pointer-events: none;
+    z-index: 0;
+    filter: blur(80px);
+}
+.ntl-viewport::before {
+    top: -60px; left: -60px;
+    background: rgba(0,229,255,0.06);
+    animation: ntl-ambient-tl 6s ease-in-out infinite;
+}
+.ntl-viewport::after {
+    bottom: -60px; right: -60px;
+    background: rgba(68,138,255,0.06);
+    animation: ntl-ambient-br 6s ease-in-out infinite 3s;
+}
+@keyframes ntl-ambient-tl {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50%      { opacity: 0.8; transform: scale(1.2); }
+}
+@keyframes ntl-ambient-br {
+    0%, 100% { opacity: 0.4; transform: scale(1); }
+    50%      { opacity: 0.7; transform: scale(1.15); }
+}
 
 /* ── Detail panel ── */
 .ntl-detail-panel {
     position: fixed;
     bottom: 0; left: 0; right: 0;
     max-height: 280px;
-    background: #0d1117;
-    border-top: 1px solid #21262d;
+    background: rgba(10,14,23,0.95);
+    backdrop-filter: blur(16px);
+    border-top: 1px solid rgba(0,229,255,0.15);
     padding: 16px 24px;
     overflow-y: auto;
     z-index: 100;
     animation: ntl-slide-up 0.25s ease;
-    box-shadow: 0 -4px 24px rgba(0,0,0,0.4);
+    box-shadow: 0 -4px 30px rgba(0,0,0,0.5), 0 -1px 0 rgba(0,229,255,0.08);
 }
 @keyframes ntl-slide-up {
     from { transform: translateY(100%); }
@@ -5451,28 +5517,6 @@ div[title] .config-agent-name {
 .ntl-detail-pr-files { font-size: 0.65rem; color: #7d8590; margin-left: auto; white-space: nowrap; }
 .ntl-detail-pr.merged { opacity: 0.5; }
 .ntl-detail-pr.merged:hover { opacity: 0.75; }
-
-/* ── Edge breathing accents ── */
-.ntl-scroll-area::before,
-.ntl-scroll-area::after {
-    content: '';
-    position: absolute;
-    top: 0; bottom: 0;
-    width: 60px;
-    pointer-events: none;
-    z-index: 10;
-}
-.ntl-scroll-area {
-    position: relative;
-}
-.ntl-scroll-area::before {
-    left: 0;
-    background: linear-gradient(90deg, #0d1117 0%, transparent 100%);
-}
-.ntl-scroll-area::after {
-    right: 0;
-    background: linear-gradient(270deg, #0d1117 0%, transparent 100%);
-}
 
 /* ══════════════════════════════════════════════════════════════
    NOTIFICATION BELL & POPUP
