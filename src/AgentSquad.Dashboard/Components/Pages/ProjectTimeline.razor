@@ -50,6 +50,13 @@ else
             </div>
         </div>
         <div class="ntl-topbar-right">
+            <div class="ntl-theme-toggle">
+                <button class="ntl-theme-btn @(_designTheme == "default" ? "active" : "")" @onclick='() => SetTheme("default")' title="Default neon theme">Default</button>
+                <button class="ntl-theme-btn @(_designTheme == "blueprint" ? "active" : "")" @onclick='() => SetTheme("blueprint")' title="Blueprint flow theme">Blueprint</button>
+                <button class="ntl-theme-btn @(_designTheme == "metro" ? "active" : "")" @onclick='() => SetTheme("metro")' title="Metro minimal theme">Metro</button>
+                <button class="ntl-theme-btn @(_designTheme == "cards" ? "active" : "")" @onclick='() => SetTheme("cards")' title="Card grid theme">Cards</button>
+            </div>
+            <span class="ntl-topbar-divider">|</span>
             <div class="ntl-view-toggle">
                 <button class="ntl-view-btn @(_devViewMode == "pm" ? "active" : "")" @onclick='() => SetDevView("pm")' title="Show PM enhancement issues">📋 PM View</button>
                 <button class="ntl-view-btn @(_devViewMode == "engineering" ? "active" : "")" @onclick='() => SetDevView("engineering")' title="Show engineering tasks with linked PRs">🔧 Engineering View</button>
@@ -75,7 +82,7 @@ else
     <!-- Horizontal timeline with full-height phase columns -->
     <div class="ntl-viewport">
         <div class="ntl-scroll-area">
-            <div class="ntl-timeline">
+            <div class="ntl-timeline theme-@_designTheme">
                 @{ int nodeIdx = 0; }
                 @foreach (var phase in GetFilteredPhases())
                 {
@@ -243,6 +250,7 @@ else
 
     private string _statusFilter = "all";
     private string _devViewMode = "pm"; // "pm" = enhancement issues, "engineering" = engineering-task issues with PR children
+    private string _designTheme = "default"; // "default", "blueprint", "metro", "cards"
     private int? _selectedIssue;
     private IssueGroup? _selectedGroup;
 
@@ -646,6 +654,7 @@ else
     }
 
     private void SetFilter(string f) { _statusFilter = f; StateHasChanged(); }
+    private void SetTheme(string t) { _designTheme = t; StateHasChanged(); }
 
     private async Task ForceRefreshAsync()
     {

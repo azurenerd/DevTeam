@@ -5487,6 +5487,418 @@ div[title] .config-agent-name {
 .ntl-child-merged .ntl-child-label { color: #a371f7; }
 a.ntl-child-node { text-decoration: none; color: inherit; }
 
+/* ── Theme toggle buttons ── */
+.ntl-theme-toggle { display: flex; gap: 3px; }
+.ntl-theme-btn {
+    padding: 4px 10px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    border: 1px solid #21262d;
+    border-radius: 14px;
+    background: transparent;
+    color: #7d8590;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+.ntl-theme-btn:hover { border-color: #58a6ff; color: #c9d1d9; }
+.ntl-theme-btn.active {
+    background: rgba(88,166,255,0.15);
+    border-color: #58a6ff;
+    color: #58a6ff;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: BLUEPRINT — Blue gradient spine, L-shaped connectors
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Override phase columns to use a unified blue palette */
+.theme-blueprint .ntl-phase-column {
+    --phase: #3b82f6;
+    --phase-glow: rgba(59,130,246,0.08);
+    --phase-border: rgba(59,130,246,0.18);
+    background: linear-gradient(180deg, rgba(59,130,246,0.06) 0%, rgba(15,23,42,0.95) 100%);
+    border-left: none;
+    border-right: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+.theme-blueprint .ntl-phase-column:first-child { border-top-left-radius: 12px; border-bottom-left-radius: 12px; }
+.theme-blueprint .ntl-phase-column:last-child { border-top-right-radius: 12px; border-bottom-right-radius: 12px; }
+
+/* Keep individual phase colors for the label only */
+.theme-blueprint .phase-research .ntl-phase-name    { color: #38bdf8; text-shadow: 0 0 10px rgba(56,189,248,0.5); }
+.theme-blueprint .phase-pmspec .ntl-phase-name       { color: #a78bfa; text-shadow: 0 0 10px rgba(167,139,250,0.5); }
+.theme-blueprint .phase-architecture .ntl-phase-name { color: #60a5fa; text-shadow: 0 0 10px rgba(96,165,250,0.5); }
+.theme-blueprint .phase-development .ntl-phase-name  { color: #34d399; text-shadow: 0 0 10px rgba(52,211,153,0.5); }
+.theme-blueprint .phase-finalization .ntl-phase-name { color: #6ee7b7; text-shadow: 0 0 10px rgba(110,231,183,0.5); }
+
+/* Spine: thick blue gradient line with glow */
+.theme-blueprint .ntl-spine-segment {
+    height: 4px;
+    background: linear-gradient(90deg,
+        rgba(59,130,246,0.1) 0%,
+        #3b82f6 20%,
+        #60a5fa 50%,
+        #3b82f6 80%,
+        rgba(59,130,246,0.1) 100%
+    );
+    box-shadow:
+        0 0 10px rgba(59,130,246,0.6),
+        0 0 30px rgba(59,130,246,0.3),
+        0 0 60px rgba(59,130,246,0.1);
+    border-radius: 2px;
+}
+
+/* Spine dots: blue solid */
+.theme-blueprint .ntl-spine-dot {
+    width: 14px; height: 14px;
+    border: 3px solid #3b82f6;
+    background: #0f172a;
+    box-shadow: 0 0 10px rgba(59,130,246,0.7), 0 0 30px rgba(59,130,246,0.3);
+}
+.theme-blueprint .ntl-spine-dot.done {
+    background: #3b82f6;
+    box-shadow: 0 0 6px rgba(59,130,246,0.5);
+}
+
+/* Vertical connector: thicker blue */
+.theme-blueprint .ntl-connector {
+    width: 2px;
+    height: 18px;
+    background: linear-gradient(180deg, #3b82f6, rgba(59,130,246,0.2));
+    opacity: 0.7;
+}
+
+/* Node cards: frosted glass with blue accent */
+.theme-blueprint .ntl-node {
+    border-radius: 10px;
+    background: rgba(15,23,42,0.92);
+    border: 1px solid rgba(59,130,246,0.2);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4), 0 0 1px rgba(59,130,246,0.3);
+    padding: 10px 16px;
+}
+.theme-blueprint .ntl-node:hover {
+    border-color: #3b82f6;
+    box-shadow: 0 0 20px rgba(59,130,246,0.4), 0 4px 24px rgba(0,0,0,0.5);
+    transform: translateY(-3px);
+}
+.theme-blueprint .ntl-node-selected {
+    border-color: #60a5fa !important;
+    box-shadow: 0 0 24px rgba(96,165,250,0.5), 0 0 48px rgba(59,130,246,0.2) !important;
+}
+
+/* L-shaped child connectors */
+.theme-blueprint .ntl-children {
+    position: relative;
+    align-items: flex-start;
+    padding-left: 20px;
+    margin-top: 0;
+    gap: 0;
+}
+.theme-blueprint .ntl-child-connector {
+    display: none; /* replace with L-connector via pseudo-element */
+}
+.theme-blueprint .ntl-child-node {
+    position: relative;
+    margin-left: 16px;
+    margin-top: 4px;
+    border-radius: 8px;
+    background: rgba(15,23,42,0.85);
+    border: 1px solid rgba(59,130,246,0.12);
+    padding: 5px 12px;
+}
+.theme-blueprint .ntl-child-node::before {
+    content: '';
+    position: absolute;
+    left: -20px;
+    top: 50%;
+    width: 16px;
+    height: 2px;
+    background: rgba(59,130,246,0.35);
+}
+.theme-blueprint .ntl-children::before {
+    content: '';
+    position: absolute;
+    left: 16px;
+    top: 0;
+    bottom: 8px;
+    width: 2px;
+    background: linear-gradient(180deg, rgba(59,130,246,0.5), rgba(59,130,246,0.1));
+    border-radius: 1px;
+}
+.theme-blueprint .ntl-child-node:hover {
+    border-color: #3b82f6;
+    box-shadow: 0 0 12px rgba(59,130,246,0.3);
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: METRO — Clean, minimal, flat design with flowing lines
+   ═══════════════════════════════════════════════════════════════ */
+
+.theme-metro .ntl-phase-column {
+    background: rgba(13,17,23,0.6);
+    border-left: none;
+    border-right: 1px solid rgba(255,255,255,0.04);
+    box-shadow: none;
+    border-radius: 0;
+}
+.theme-metro .ntl-phase-column:first-child { border-top-left-radius: 8px; border-bottom-left-radius: 8px; }
+.theme-metro .ntl-phase-column:last-child { border-top-right-radius: 8px; border-bottom-right-radius: 8px; border-right: none; }
+.theme-metro .ntl-phase-column:hover {
+    background: rgba(13,17,23,0.75);
+    box-shadow: none;
+}
+
+/* Phase label: clean and understated */
+.theme-metro .ntl-phase-name {
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.15em;
+    text-shadow: none;
+    opacity: 0.8;
+}
+.theme-metro .ntl-phase-counter {
+    background: rgba(255,255,255,0.06);
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 0.55rem;
+}
+
+/* Spine: thin subtle line */
+.theme-metro .ntl-spine-segment {
+    height: 1px;
+    background: linear-gradient(90deg, transparent 0%, rgba(255,255,255,0.12) 20%, rgba(255,255,255,0.12) 80%, transparent 100%);
+    box-shadow: none;
+    animation: none;
+}
+
+/* Spine dots: small, clean circles */
+.theme-metro .ntl-spine-dot {
+    width: 8px; height: 8px;
+    border: 2px solid var(--phase);
+    background: #0d1117;
+    box-shadow: none;
+    animation: none;
+}
+.theme-metro .ntl-spine-dot.done {
+    background: var(--phase);
+    opacity: 0.6;
+}
+
+/* Connector: hairline */
+.theme-metro .ntl-connector {
+    width: 1px;
+    height: 12px;
+    background: rgba(255,255,255,0.08);
+    opacity: 1;
+}
+
+/* Nodes: flat rectangles, no rounded pills */
+.theme-metro .ntl-node {
+    border-radius: 6px;
+    background: rgba(22,27,34,0.95);
+    border: 1px solid rgba(255,255,255,0.06);
+    backdrop-filter: none;
+    box-shadow: none;
+    padding: 10px 14px;
+    transition: border-color 0.2s, background 0.2s;
+}
+.theme-metro .ntl-node:hover {
+    border-color: var(--phase);
+    box-shadow: none;
+    transform: none;
+    background: rgba(22,27,34,1);
+}
+.theme-metro .ntl-node-selected {
+    border-color: var(--phase) !important;
+    border-width: 2px !important;
+    box-shadow: none !important;
+}
+.theme-metro .ntl-node-closed { opacity: 0.35; }
+.theme-metro .ntl-node-closed:hover { opacity: 0.7; }
+
+/* Status indicator: square instead of circle */
+.theme-metro .ntl-node-indicator {
+    border-radius: 2px;
+    width: 6px; height: 6px;
+}
+
+/* Node text: slightly larger */
+.theme-metro .ntl-node-num {
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+.theme-metro .ntl-node-title {
+    font-size: 0.74rem;
+    color: #e6edf3;
+    font-weight: 400;
+}
+
+/* Children: flowing vertical list with left accent bar */
+.theme-metro .ntl-children {
+    position: relative;
+    align-items: stretch;
+    padding-left: 14px;
+    gap: 2px;
+    margin-top: 4px;
+}
+.theme-metro .ntl-children::before {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 0;
+    bottom: 4px;
+    width: 1px;
+    background: rgba(255,255,255,0.08);
+}
+.theme-metro .ntl-child-connector { display: none; }
+.theme-metro .ntl-child-node {
+    border-radius: 4px;
+    background: rgba(22,27,34,0.9);
+    border: 1px solid rgba(255,255,255,0.04);
+    padding: 5px 10px;
+    margin-left: 8px;
+}
+.theme-metro .ntl-child-node::before {
+    content: '';
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    width: 8px;
+    height: 1px;
+    background: rgba(255,255,255,0.08);
+}
+.theme-metro .ntl-child-node { position: relative; }
+.theme-metro .ntl-child-indicator { border-radius: 2px; }
+.theme-metro .ntl-child-node:hover {
+    border-color: rgba(255,255,255,0.12);
+    box-shadow: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   THEME: CARDS — Large card blocks, children embedded inside
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Phase columns: keep phase backgrounds */
+.theme-cards .ntl-phase-column {
+    min-width: 260px;
+}
+
+/* Hide the spine line */
+.theme-cards .ntl-spine-segment {
+    display: none;
+}
+.theme-cards .ntl-spine-dot {
+    display: none;
+}
+.theme-cards .ntl-connector {
+    display: none;
+}
+
+/* Nodes container: vertical stack */
+.theme-cards .ntl-phase-nodes {
+    padding: 52px 12px 20px;
+    gap: 10px;
+}
+
+/* Node cluster becomes a full card */
+.theme-cards .ntl-node-cluster {
+    width: 100%;
+    min-width: unset;
+    background: rgba(13,17,23,0.85);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: 10px;
+    padding: 0;
+    overflow: hidden;
+    align-items: stretch;
+    transition: border-color 0.25s, box-shadow 0.25s;
+}
+.theme-cards .ntl-node-cluster:hover {
+    border-color: var(--phase);
+    box-shadow: 0 0 16px color-mix(in srgb, var(--phase) 20%, transparent);
+}
+
+/* Card header (the main node) */
+.theme-cards .ntl-node {
+    width: 100%;
+    max-width: none;
+    border-radius: 0;
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    padding: 12px 16px;
+    box-shadow: none;
+    cursor: pointer;
+}
+.theme-cards .ntl-node:hover {
+    background: rgba(255,255,255,0.02);
+    border-color: rgba(255,255,255,0.04);
+    box-shadow: none;
+    transform: none;
+}
+.theme-cards .ntl-node-selected {
+    background: rgba(var(--phase), 0.05) !important;
+    box-shadow: none !important;
+    border-color: rgba(255,255,255,0.06) !important;
+}
+.theme-cards .ntl-node-closed { opacity: 0.5; }
+.theme-cards .ntl-node-closed:hover { opacity: 0.8; }
+
+/* Card body text */
+.theme-cards .ntl-node-num {
+    font-size: 0.65rem;
+    font-weight: 700;
+}
+.theme-cards .ntl-node-title {
+    font-size: 0.78rem;
+    color: #e6edf3;
+    white-space: normal;
+    line-height: 1.4;
+}
+
+/* Status indicator as left border accent */
+.theme-cards .ntl-node-indicator {
+    width: 4px;
+    height: 100%;
+    border-radius: 2px;
+    min-height: 24px;
+}
+
+/* Children are embedded inside the card (no separate container styling needed) */
+.theme-cards .ntl-children {
+    padding: 0;
+    margin: 0;
+    gap: 0;
+    align-items: stretch;
+}
+.theme-cards .ntl-child-connector { display: none; }
+.theme-cards .ntl-child-node {
+    border-radius: 0;
+    background: rgba(255,255,255,0.015);
+    border: none;
+    border-top: 1px solid rgba(255,255,255,0.03);
+    padding: 8px 16px 8px 32px;
+    max-width: none;
+    font-size: 0.68rem;
+}
+.theme-cards .ntl-child-node:hover {
+    background: rgba(255,255,255,0.04);
+    border-color: rgba(255,255,255,0.03);
+    box-shadow: none;
+}
+.theme-cards .ntl-child-indicator {
+    width: 5px; height: 5px;
+}
+.theme-cards .ntl-child-label {
+    white-space: normal;
+    color: #8b949e;
+}
+.theme-cards .ntl-child-closed { opacity: 0.4; }
+.theme-cards .ntl-child-merged { opacity: 0.5; }
+.theme-cards .ntl-child-merged .ntl-child-label { color: #a371f7; }
+
 /* ── Edge fade overlays ── */
 .ntl-edge-fade {
     position: absolute;
