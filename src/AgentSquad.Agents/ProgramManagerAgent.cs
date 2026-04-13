@@ -1627,6 +1627,12 @@ public class ProgramManagerAgent : AgentBase
                 "that applies. Include: layout type (grid/flex), colors (hex codes), component structure, " +
                 "key CSS patterns. If no design applies, write 'N/A']\n\n" +
                 "ACCEPTANCE_CRITERIA:\n- [ ] [criterion 1]\n- [ ] [criterion 2]\n...\n---\n\n" +
+                "IMPORTANT — OUTPUT ORDER MATTERS: You are deciding the order these GitHub Issues will be created. " +
+                "Issues will be assigned to engineers in this order, so list them by development dependency:\n" +
+                "1. Foundational items FIRST — project scaffolding, hosting setup, data configuration, shared infrastructure\n" +
+                "2. Then features that build on the foundation — UI components, business logic, integrations\n" +
+                "3. Polish/refinement items LAST — responsive layout, error states, visual polish\n" +
+                "Think: what would an engineer need to build first so everything else can depend on it?\n\n" +
                 "Be thorough — each Issue should have enough detail for an engineer to implement it " +
                 "without needing the full PMSpec. Include all relevant acceptance criteria from the spec. " +
                 "For UI stories, include visual design details and interaction scenarios in the description.");

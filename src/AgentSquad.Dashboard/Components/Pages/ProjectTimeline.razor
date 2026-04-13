@@ -296,11 +296,13 @@ else
         var existingNumbers = _issues.Select(i => i.Number).ToHashSet();
         foreach (var pr in _pullRequests)
         {
+            if (existingNumbers.Contains(pr.Number)) continue;
             var t = pr.Title;
             bool isDocPr = t.StartsWith("Researcher:", StringComparison.OrdinalIgnoreCase)
                 || t.StartsWith("ProgramManager:", StringComparison.OrdinalIgnoreCase)
                 || t.StartsWith("Architect:", StringComparison.OrdinalIgnoreCase);
-            if (isDocPr && !existingNumbers.Contains(pr.Number))
+            bool isFinalIntegration = t.Contains("Final Integration", StringComparison.OrdinalIgnoreCase);
+            if (isDocPr || isFinalIntegration)
             {
                 _issues.Add(new AgentIssue
                 {
@@ -315,6 +317,22 @@ else
                     AssignedAgent = pr.AssignedAgent
                 });
             }
+        }
+
+        // --- Step 2b: Remove older engineering-task duplicates ---
+        // When multiple runs create eng tasks for the same parent, keep only the latest burst.
+        // Detect the latest burst: eng tasks created within 30 min of the newest eng task.
+        var engTasks = _issues.Where(i => i.Labels.Any(l => l.Equals("engineering-task", StringComparison.OrdinalIgnoreCase))).ToList();
+        if (engTasks.Count > 0)
+        {
+            var newestEngTime = engTasks.Max(e => e.CreatedAt);
+            var burstCutoff = newestEngTime.AddMinutes(-30);
+            var latestBurstNumbers = engTasks.Where(e => e.CreatedAt >= burstCutoff).Select(e => e.Number).ToHashSet();
+            // Remove older eng tasks that aren't in the latest burst
+            _issues = _issues.Where(i =>
+                !i.Labels.Any(l => l.Equals("engineering-task", StringComparison.OrdinalIgnoreCase))
+                || latestBurstNumbers.Contains(i.Number)
+            ).ToList();
         }
 
         // --- Step 3: Build issue→PR links (for detail panel) ---
@@ -394,6 +412,11 @@ else
         foreach (var (name, icon, css) in phaseOrder)
         {
             var items = groups.Where(g => ClassifyPhase(g.Issue) == name).ToList();
+            // Sort by issue number (PM creates issues in dependency order)
+            if (name == "Dev Planning")
+            {
+                items = items.OrderBy(g => g.Issue.Number).ToList();
+            }
             if (items.Count > 0)
                 _phases.Add(new NeonPhase { Name = name, Icon = icon, CssClass = css, Items = items });
         }
