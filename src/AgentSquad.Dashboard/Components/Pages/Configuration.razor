@@ -583,7 +583,7 @@ else if (_config is not null)
             @if (_humanInteractionExpanded)
             {
                 <div class="config-card-body">
-                    <div class="config-field" title="Master switch for human interaction gates. When off, all gates auto-proceed and agents run fully autonomously.">
+                    <div class="config-field" title="Master switch for human interaction gates. When off, all gates auto-proceed and agents run fully autonomously — no pauses, no approvals, no waiting. When on, you control which workflow checkpoints require your review before agents continue.">
                         <label>Enable Human Checkpoints</label>
                         <label class="config-toggle">
                             <input type="checkbox" @bind="_config.HumanInteraction.Enabled" />
@@ -596,17 +596,17 @@ else if (_config is not null)
                         <span class="config-preset-label">Presets:</span>
                         <button class="config-preset-btn @(!_config.HumanInteraction.Enabled ? "config-preset-active" : "")"
                             @onclick="() => ApplyHumanPreset(HumanInteractionPreset.FullAuto)"
-                            title="All gates auto-proceed. Agents operate fully autonomously with no human involvement.">
+                            title="All gates auto-proceed. Agents operate fully autonomously with zero human involvement. Best for trusted projects, overnight runs, or when you want maximum speed. No pauses, no approvals — agents make all decisions end-to-end.">
                             🤖 Full Auto
                         </button>
                         <button class="config-preset-btn @(IsPresetActive(HumanInteractionPreset.Supervised) ? "config-preset-active" : "")"
                             @onclick="() => ApplyHumanPreset(HumanInteractionPreset.Supervised)"
-                            title="Critical gates (Spec, Architecture, Plan, Final PR, Deploy) require human approval. Routine gates auto-proceed.">
+                            title="Critical gates require human approval: PM Spec, Architecture, Engineering Plan, Final PR Approval, and Deployment. Routine gates (research, task assignment, individual reviews) auto-proceed. Best balance of oversight and speed — you review the important decisions while agents handle day-to-day work.">
                             👁️ Supervised
                         </button>
                         <button class="config-preset-btn @(IsPresetActive(HumanInteractionPreset.FullControl) ? "config-preset-active" : "")"
                             @onclick="() => ApplyHumanPreset(HumanInteractionPreset.FullControl)"
-                            title="All gates require human approval. Maximum oversight — every decision pauses for human review.">
+                            title="Every gate requires human approval. Maximum oversight — agents pause at every workflow checkpoint and wait for your go-ahead. Best for sensitive projects, learning the system, or when you want to review every decision. Significantly slower since agents wait for you at each step.">
                             🛡️ Full Control
                         </button>
                     </div>
