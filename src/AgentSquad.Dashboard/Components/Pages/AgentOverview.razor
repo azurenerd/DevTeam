@@ -6,7 +6,7 @@
 @using Microsoft.Extensions.Logging
 @using Markdig
 @implements IDisposable
-@inject DashboardDataService DataService
+@inject IDashboardDataService DataService
 @inject NavigationManager Navigation
 
 <PageTitle>AgentSquad — Overview</PageTitle>
@@ -26,6 +26,7 @@
         {
             <span class="header-badge danger">⚠ @ncCount Non-Compliant</span>
         }
+        <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh" disabled="@_refreshing"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
     </div>
 </div>
 
@@ -292,6 +293,7 @@ else
     private List<AgentChatMessage> _chatMessages = [];
     private string _chatInput = "";
     private bool _chatSending;
+    private bool _refreshing;
 
     protected override void OnInitialized()
     {
@@ -304,6 +306,22 @@ else
     {
         _agents = DataService.GetAllAgentSnapshots().ToList();
         _hasDeadlock = DataService.HasDeadlock(out _deadlockCycle);
+    }
+
+    private async Task ForceRefreshAsync()
+    {
+        _refreshing = true;
+        StateHasChanged();
+        try
+        {
+            DataService.ResetCaches();
+            RefreshData();
+        }
+        finally
+        {
+            _refreshing = false;
+            StateHasChanged();
+        }
     }
 
     private async void OnDataChanged()

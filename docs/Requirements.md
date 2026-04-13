@@ -49,7 +49,7 @@ AgentSquad is a multi-agent AI system where 7 specialized agent roles collaborat
 - **REQ-SYS-002**: The message bus uses `System.Threading.Channels` with bounded capacity (1000 messages). Messages route by `ToAgentId` — set to `"*"` for broadcast, or a specific agent `Identity.Id` for targeted delivery.
 - **REQ-SYS-003**: All message bus subscriptions and routing MUST use agent `Identity.Id` (e.g., `seniorengineer-{guid}`), never `DisplayName` (e.g., `Senior Engineer 1`). DisplayName is only for GitHub PR/Issue titles.
 - **REQ-SYS-004**: The system uses .NET 8, C# 12, with nullable reference types, file-scoped namespaces, and `record` types for messages/DTOs.
-- **REQ-SYS-005**: Workflow phases progress linearly: Initialization → Research → Architecture → EngineeringPlanning → ParallelDevelopment → Testing → Review → Completion. No backward transitions.
+- **REQ-SYS-005**: Workflow phases progress linearly: Initialization → Research → Architecture → EngineeringPlanning → ParallelDevelopment → Testing → Review → Finalization. No backward transitions. Note: the final phase was renamed from "Completion" to "Finalization" — only final review/validation items belong there. Closed engineering tasks remain in the Development phase with closed visual indicators.
 
 **Scenario: System Startup**
 1. Runner starts, registers DI services
@@ -856,8 +856,8 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 
 ### REQ-DASH-001: Blazor Server Dashboard
 
-- **REQ-DASH-001a**: Dashboard embedded in Runner process (Web SDK, not separate app).
-- **REQ-DASH-001b**: Real-time updates via SignalR (no page refresh needed).
+- **REQ-DASH-001a**: Dashboard can run in two modes: (1) embedded in the Runner process (in-process, default), or (2) as a standalone process via `AgentSquad.Dashboard.Host` on port 5051, separate from the Runner on port 5050. Standalone mode allows UI changes/restarts without killing running agents.
+- **REQ-DASH-001b**: Real-time updates via SignalR (no page refresh needed). In standalone mode, data is fetched via REST API instead of in-process services.
 - **REQ-DASH-001c**: Dark Grafana-style theme.
 - **REQ-DASH-001d**: Pages: Home (agent cards), AgentDetail, GitHubFeed, TeamViz (animated avatars), PullRequests, Issues.
 
@@ -921,6 +921,48 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 3. Sorts by "Most commented" → sees the most-discussed issues first
 4. Clicks "Closed" tab → sees completed work with closed dates
 5. Filters by assignee "senior-engineer-1" → sees only that agent's assigned issues
+
+### REQ-DASH-008: Dashboard Process Separation (Standalone Mode)
+
+- **REQ-DASH-008a**: `AgentSquad.Dashboard.Host` is a standalone Blazor Server project that runs on port 5051, separate from the Runner on port 5050. UI changes/restarts do not affect running agents.
+- **REQ-DASH-008b**: `IDashboardDataService` interface decouples Razor pages from the data source implementation. Two implementations exist: `DashboardDataService` (in-process, used when Runner hosts dashboard) and `HttpDashboardDataService` (HTTP client, used in standalone Dashboard.Host).
+- **REQ-DASH-008c**: Runner exposes a REST API at `/api/dashboard/*` (~30 endpoints) that the standalone dashboard consumes via `HttpDashboardDataService`.
+- **REQ-DASH-008d**: `DashboardMode(IsStandalone: bool)` record controls NavMenu visibility and behavior differences between embedded and standalone modes.
+- **REQ-DASH-008e**: `HttpDashboardDataService` MUST use `IHttpClientFactory` with named client pattern (not `AddHttpClient<T>` with separate singleton registration, which causes DI conflicts).
+- **REQ-DASH-008f**: Standalone dashboard requires stub service registrations for services it doesn't host: `NullGitHubService`, `GateNotificationService`, `AgentStateStore`, `BuildTestMetrics`.
+
+**Scenario: Dashboard Separation — UI Iteration Without Agent Disruption**
+```
+1. Runner starts on port 5050 with 7 agents actively working (PE implementing T3, Senior on T4)
+2. Developer needs to tweak the Timeline page layout
+3. Developer stops Dashboard.Host (port 5051) → edits Razor page → rebuilds Dashboard.Host → restarts
+4. Runner and all agents continue uninterrupted — no state loss, no agent restarts
+5. Dashboard.Host reconnects to Runner's REST API → resumes displaying live agent status
+```
+
+### REQ-DASH-009: Project Timeline Tab
+
+- **REQ-DASH-009a**: Dedicated Timeline page (`/timeline`) accessible from the nav menu. Visualizes the project as a hierarchical timeline with expandable/collapsible groups.
+- **REQ-DASH-009b**: **PM/Engineering toggle**: Timeline supports two views switched via toggle buttons. PM view shows enhancement issues as top-level groups with engineering-task children. Engineering view shows engineering-task issues as top-level groups with linked PRs as children.
+- **REQ-DASH-009c**: **Node type indicators**: PRs and Issues are visually distinguished with colored badges — "PR #X" in purple and "Issue #X" in green — in both node labels and detail popups.
+- **REQ-DASH-009d**: **Background refresh**: After initial load, auto-refresh happens silently without showing the "Syncing work items" overlay. The overlay only displays on first load or when the user clicks the manual refresh button.
+- **REQ-DASH-009e**: **Detail panel race condition safety**: When 30s auto-refresh rebuilds `_phases`/`_groupLookup`, the `_selectedGroup` reference must be re-fetched from the new `_groupLookup` after `BuildTimeline`. Use pattern matching for null safety to prevent `NullReferenceException` crashes.
+- **REQ-DASH-009f**: **Finalization phase mapping**: Only final review/validation items appear in the Finalization phase. Closed engineering tasks remain in the Development phase with closed visual indicators (strikethrough, muted colors).
+
+### REQ-DASH-010: Force Refresh
+
+- **REQ-DASH-010a**: Overview and Timeline pages include a Force Refresh button (🔄 icon) that invalidates all caches (including GitHub API list caches) and reloads data from source.
+- **REQ-DASH-010b**: Force refresh calls `InvalidateListCaches()` on the GitHub service before fetching fresh data.
+
+**Scenario: Timeline PM/Engineering Toggle**
+```
+1. User navigates to /timeline → sees PM view by default (enhancement issues as top-level)
+2. Enhancement "User Authentication" shows 3 child engineering-tasks: "Implement JWT auth", "Add OAuth flow", "Create login UI"
+3. User clicks "Engineering" toggle → view switches to engineering tasks as top-level
+4. "Implement JWT auth" now shows child PR #42 (purple badge) and linked Issue #15 (green badge)
+5. User clicks Force Refresh → caches invalidated → "Syncing work items" overlay appears → fresh data loads
+6. Subsequent 30s auto-refresh happens silently — no overlay, no flicker
+```
 
 ---
 
@@ -1002,7 +1044,7 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 12. PE's MergeTestedPRsAsync → sees `pm-approved` + `tests-added` → squash merge → branch deleted → Issue auto-closed
 13. PE's PR: PM + Architect review (PE can't self-review) → Architect Phase 1 → TE Phase 2 → PM Phase 3 → merge
 14. T1 complete (issue closed) → T4 depends on T1 → dependency met → PE assigns T4 to Junior
-15. All engineering-task issues closed → PE creates integration PR → PM + Architect review → merge → Completion phase
+15. All engineering-task issues closed → PE creates integration PR → PM + Architect review → merge → Finalization phase
 ```
 
 ### Scenario B: Clarification Loop with Multiple Rounds
@@ -1168,6 +1210,17 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 7. ALL downstream signals are still sent even when skipping creation, so dependent agents proceed
 ```
 
+### Scenario K: Dashboard Standalone Iteration Cycle
+
+```
+1. Runner is running on port 5050 with PE implementing T5 (High complexity) and Senior on T6
+2. Developer notices the Timeline page has a layout bug on the Engineering view
+3. Developer stops only Dashboard.Host (port 5051) → edits Timeline.razor → rebuilds → restarts Dashboard.Host
+4. Runner continues unaffected — PE commits code to PR #48, Senior receives ReviewRequestMessage
+5. Dashboard.Host reconnects to Runner's REST API at /api/dashboard/* → Timeline page shows updated layout
+6. Total agent downtime: zero. Total state loss: zero.
+```
+
 ---
 
 ## 21. PE Integration & Branch Sync Requirements
@@ -1178,7 +1231,7 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-INTEG-001b**: The integration PR is created from a new branch off latest main.
 - **REQ-INTEG-001c**: AI reviews the full codebase against PMSpec + Architecture + all merged PRs and generates integration fixes: missing wiring, broken imports, config/route registration, cross-module references.
 - **REQ-INTEG-001d**: The integration PR goes through the normal review cycle (PM + Architect review and approve).
-- **REQ-INTEG-001e**: On merge of the integration PR, signal `testing.integration.complete` and advance toward Completion phase.
+- **REQ-INTEG-001e**: On merge of the integration PR, signal `testing.integration.complete` and advance toward Finalization phase.
 
 ### REQ-INTEG-002: Branch Sync (Pull Latest Main)
 
@@ -1195,7 +1248,7 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 4. AI generates fixes → commits to integration branch → creates PR "PrincipalEngineer: Integration — Final Assembly"
 5. PM reviews integration PR → APPROVE (all user stories covered)
 6. Architect reviews → APPROVE (no architectural violations)
-7. Squash merge → signal testing.integration.complete → Completion phase
+7. Squash merge → signal testing.integration.complete → Finalization phase
 ```
 
 ---
@@ -1306,6 +1359,22 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-RL-004a**: Authenticated PAT: 5000 requests/hour (rolling window). Secondary limits: 100 concurrent requests, 900 reads/minute, 180 writes/minute.
 - **REQ-RL-004b**: Response headers: `X-RateLimit-Limit` (max), `X-RateLimit-Remaining` (left), `X-RateLimit-Reset` (Unix timestamp when window resets). Accessed via Octokit's `_client.GetLastApiInfo()`.
 - **REQ-RL-004c**: Exception types: `RateLimitExceededException` (primary, has `Reset` property), `AbuseException` (secondary, has `RetryAfterSeconds`), `ApiException` with 403 status (generic).
+
+### REQ-RL-005: In-Process List Cache
+
+- **REQ-RL-005a**: `GitHubService` maintains a 30-second TTL shared in-process cache for 7 hot-path list methods: open issues, all issues, open PRs, all PRs, merged PRs, and two label+state issue queries. This reduced API calls by ~90%.
+- **REQ-RL-005b**: Cache uses `SemaphoreSlim(1,1)` with double-checked locking pattern to prevent thundering herd on cache expiry (multiple agents requesting the same data simultaneously).
+- **REQ-RL-005c**: All GitHub mutation methods (create/update issue, create/update PR, post comment, merge PR, etc.) call `InvalidateListCaches()` to ensure subsequent reads reflect the mutation.
+- **REQ-RL-005d**: Dashboard Force Refresh button calls `InvalidateListCaches()` before fetching to guarantee fresh data on demand.
+
+**Scenario: Cache Reduces API Calls**
+```
+1. 7 agents poll every 30s. Each agent calls GetOpenIssuesAsync + GetOpenPullRequestsAsync = 14 API calls/cycle.
+2. Without cache: 14 API calls × 2 cycles/minute = 28 calls/minute for list endpoints alone.
+3. With 30s TTL cache: first agent's call hits GitHub API, next 6 agents get cached response = 2 API calls/cycle.
+4. Senior Engineer merges PR → InvalidateListCaches() called → next read hits GitHub API → fresh data.
+5. Net result: ~90% reduction in list-endpoint API calls.
+```
 
 **Scenario: Rate Limit Proactive Throttling**
 ```

@@ -23,14 +23,14 @@ AgentSquad is a C# .NET 8 system that creates and manages a team of specialized 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                        AgentSquad.Runner (Host)                         │
+│                   AgentSquad.Runner (Host, port 5050)                    │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
 │  │                   AgentSquad.Orchestrator                         │  │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌────────────────────────┐  │  │
 │  │  │ AgentRegistry │  │ SpawnManager │  │ WorkflowStateMachine   │  │  │
 │  │  └──────┬───────┘  └──────┬───────┘  │  Init → Research →    │  │  │
 │  │         │                 │           │  Arch → Plan → Dev →  │  │  │
-│  │  ┌──────┴───────┐  ┌─────┴────────┐  │  Test → Review → Done │  │  │
+│  │  ┌──────┴───────┐  ┌─────┴────────┐  │  Test → Review → Fin  │  │  │
 │  │  │HealthMonitor │  │DeadlockDetect│  └────────────────────────┘  │  │
 │  │  └──────────────┘  └──────────────┘                              │  │
 │  └──────────────────────────┬───────────────────────────────────────┘  │
@@ -44,44 +44,37 @@ AgentSquad is a C# .NET 8 system that creates and manages a team of specialized 
 │  ┌───┴──┐┌──┴───┐┌─┴────┐┌───┴────┐┌────┴───┐┌────┴───┐┌─────┴──┐   │
 │  │  PM  ││Rsrchr││Archt ││Prncpl  ││Senior  ││Junior  ││  Test  │   │
 │  │Agent ││Agent ││Agent ││Eng.    ││Eng.(n) ││Eng.(n) ││  Eng.  │   │
-│  │      ││      ││      ││Agent   ││Agents  ││Agents  ││ Agent  │   │
 │  └───┬──┘└──┬───┘└─┬────┘└───┬────┘└────┬───┘└────┬───┘└────┬───┘   │
-│      │      │      │          │          │         │          │       │
-│  ┌───┴──────┴──────┴──────────┴──────────┴─────────┴──────────┴───┐   │
-│  │                    AgentSquad.Core                              │   │
-│  │  GitHub Service │ Persistence │ Config │ Shared Models         │   │
-│  └──────────────────────┬─────────────────────────────────────────┘   │
-└─────────────────────────┼────────────────────────────────────────────┘
-                          │
-           ┌──────────────┴──────────────┐
-           │        GitHub (Remote)       │
-           │  PRs │ Issues │ Repo Files   │
-           │  TeamMembers.md              │
-           │  Research.md                 │
-           │  Architecture.md             │
-           │  EngineeringPlan.md          │
-           └─────────────────────────────┘
-
-┌──────────────────────────────────────────┐
-│        AgentSquad.Dashboard (Blazor)     │
-│  SignalR ← AgentHub ← DashboardData     │
-│  Pages: Overview │ Detail │ Metrics      │
-│         GitHub Feed │ Team Viz           │
-└──────────────────────────────────────────┘
+│      └──────┴──────┴─────────┴──────────┴─────────┴──────────┘       │
+│                    GitHubService (30s TTL cache)                       │
+│                    REST API (/api/dashboard/*)                         │
+│                    CopilotCliChatCompletionService                     │
+└─────────────────────────┬───────────────┬───────────────────────────┘
+                          │               │
+           ┌──────────────┴──────┐  ┌─────┴──────────────────────────┐
+           │   GitHub (Remote)   │  │  Dashboard.Host (port 5051)    │
+           │  PRs │ Issues │ Files│  │  Blazor Server (standalone)    │
+           │  Research.md        │  │  HttpDashboardDataService      │
+           │  PMSpec.md          │  │  → calls Runner REST API       │
+           │  Architecture.md    │  │  Pages: Overview, Timeline,    │
+           │  EngineeringPlan.md │  │  Metrics, PRs, Issues, Team    │
+           └─────────────────────┘  └────────────────────────────────┘
 ```
 
 ## Features
 
 - **7 Specialized Agent Roles** — Program Manager, Researcher, Architect, Principal Engineer, Senior Engineer, Junior Engineer, and Test Engineer — each with distinct responsibilities and AI behaviors
+- **Copilot CLI Integration** — Default AI provider routes all tiers through the GitHub Copilot CLI (`copilot` binary) with automatic fallback to direct API keys. Process-per-request model with concurrency limiting.
 - **Multi-Model Support** — Anthropic Claude, OpenAI GPT, Azure OpenAI, and local Ollama models with configurable tier assignments (premium / standard / budget / local)
 - **GitHub-Native Coordination** — Agents communicate and deliver work through real GitHub PRs and Issues with structured conventions for titles, labels, and branches
 - **Dynamic Agent Scaling** — The PM can request additional Senior/Junior Engineers at runtime; the Orchestrator enforces configurable limits
-- **Real-Time Blazor Dashboard** — Monitor agent status, team topology, GitHub activity feed, and system metrics with animated team visualization and SignalR push updates
+- **Standalone Dashboard** — Blazor Server monitoring UI that can run as a separate process (port 5051) from the Runner (port 5050), allowing UI iteration without disrupting running agents
+- **Project Timeline** — Visual workflow timeline with PM and Engineering views, PR/Issue type indicators, phase-based grouping, and silent background refresh
+- **GitHub API Rate Limit Management** — 30-second TTL in-process cache reduces API calls by ~90%, combined with proactive throttling and smart reset-timestamp pausing
 - **SQLite State Persistence** — Checkpoint agent state and activity logs for graceful shutdown and recovery
 - **Deadlock Detection** — Wait-for graph analysis detects circular agent dependencies
 - **Health Monitoring** — Background service detects stuck agents, tracks task duration, and reports system health
-- **Phase-Gated Workflow** — State machine enforces project progression: Initialization → Research → Architecture → Engineering → Development → Testing → Review → Completion
-- **Configurable Token Budgets & Rate Limiting** — Per-model token limits, daily budget caps, and GitHub API rate limit management with exponential backoff
+- **Phase-Gated Workflow** — State machine enforces project progression: Initialization → Research → Architecture → Engineering Planning → Parallel Development → Testing → Review → Finalization
 
 ## Quick Start
 
@@ -89,7 +82,8 @@ AgentSquad is a C# .NET 8 system that creates and manages a team of specialized 
 
 - [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or later
 - A [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope
-- At least one AI provider API key:
+- [GitHub Copilot CLI](https://github.com/features/copilot) v1.0.18+ (default AI provider — routes all model tiers through `copilot` binary)
+- **Or** at least one AI provider API key as fallback:
   - [Anthropic API key](https://console.anthropic.com/) (recommended for premium tier)
   - [OpenAI API key](https://platform.openai.com/api-keys)
   - [Ollama](https://ollama.ai/) installed locally (for local/free tier)
@@ -135,7 +129,16 @@ dotnet run
 
 ### 4. Open the Dashboard
 
-Navigate to `http://localhost:5000` to view the real-time monitoring dashboard.
+The dashboard runs embedded in the Runner at `http://localhost:5050`.
+
+**Standalone mode** (recommended for UI development):
+
+```bash
+cd src/AgentSquad.Dashboard.Host
+dotnet run
+```
+
+This launches the dashboard on `http://localhost:5051` as an independent process. The Runner continues on port 5050 — restarting the dashboard won't affect running agents.
 
 ## Configuration
 
@@ -167,15 +170,20 @@ See [docs/agent-behaviors.md](docs/agent-behaviors.md) for detailed behavior doc
 
 ## Dashboard
 
-The Blazor Server dashboard provides real-time visibility into the agent team:
+The Blazor Server dashboard provides real-time visibility into the agent team. It can run embedded in the Runner or as a standalone process.
 
 | Page | Route | Description |
 |------|-------|-------------|
-| **Agent Overview** | `/` | Grid of all agents with status badges, summary stats, and deadlock alerts |
-| **Agent Detail** | `/agent/{id}` | Deep dive into a single agent with pause/resume/terminate controls |
-| **GitHub Feed** | `/github` | Timeline of PRs, issues, and comments generated by the agents |
+| **Agent Overview** | `/` | Grid of all agents with status badges, model selectors, chat, error tracking, and deadlock alerts |
+| **Project Timeline** | `/timeline` | Visual workflow timeline with PM/Engineering views, phase grouping, PR/Issue type indicators |
 | **Metrics** | `/metrics` | System health, utilization ring chart, status breakdown, longest-running tasks |
-| **Team Viz** | `/team` | Visual office-metaphor layout with agent desks, status dots, and connection lines |
+| **Health Monitor** | `/health` | Real-time health checks, stuck agent detection, system diagnostics |
+| **Pull Requests** | `/pullrequests` | GitHub PR browser with state filters, labels, and branch info |
+| **Issues** | `/issues` | GitHub issue browser with label/assignee filters and sorting |
+| **Engineering Plan** | `/engineering-plan` | Interactive Cytoscape.js dependency graph of engineering tasks |
+| **Team View** | `/team` | Visual office-metaphor layout with agent desks and connection lines |
+| **Director CLI** | `/director-cli` | Terminal interface for issuing executive directives to agents |
+| **Agent Detail** | `/agent/{id}` | Deep dive into a single agent with pause/resume/terminate controls |
 
 <!-- TODO: Add dashboard screenshots here -->
 
@@ -187,8 +195,9 @@ AgentSquad/
 ├── src/
 │   ├── AgentSquad.Core/              # Shared abstractions and infrastructure
 │   │   ├── Agents/                   # AgentBase, IAgent, AgentRole, AgentStatus, AgentMessage
+│   │   ├── AI/                       # CopilotCliChatCompletionService, ProcessManager, Watchdog
 │   │   ├── Configuration/            # Config models, validation, wizard, ModelRegistry
-│   │   ├── GitHub/                   # GitHubService, PR/Issue workflows, rate limiting
+│   │   ├── GitHub/                   # GitHubService (30s TTL cache), rate limiting, PR/Issue workflows
 │   │   ├── Messaging/                # IMessageBus, InProcessMessageBus (Channels-based)
 │   │   └── Persistence/              # AgentStateStore (SQLite), ProjectFileManager
 │   │
@@ -199,9 +208,8 @@ AgentSquad/
 │   │   ├── PrincipalEngineerAgent.cs # Engineering planning and task assignment
 │   │   ├── SeniorEngineerAgent.cs    # Medium-complexity implementation
 │   │   ├── JuniorEngineerAgent.cs    # Low-complexity with self-validation
-│   │   ├── TestEngineerAgent.cs      # Test plan generation
-│   │   ├── AgentFactory.cs           # DI-based agent creation
-│   │   └── AgentTracking.cs          # Agent status DTO for PM tracking
+│   │   ├── TestEngineerAgent.cs      # Test plan generation and execution
+│   │   └── AgentFactory.cs           # DI-based agent creation
 │   │
 │   ├── AgentSquad.Orchestrator/      # Runtime coordination
 │   │   ├── AgentRegistry.cs          # Thread-safe agent lifecycle registry
@@ -211,25 +219,32 @@ AgentSquad/
 │   │   ├── HealthMonitor.cs          # Stuck agent detection and health snapshots
 │   │   └── GracefulShutdownHandler.cs# Clean shutdown with state persistence
 │   │
-│   ├── AgentSquad.Dashboard/         # Real-time monitoring UI
-│   │   ├── Components/Pages/         # Blazor pages (Overview, Detail, Metrics, etc.)
+│   ├── AgentSquad.Dashboard/         # Real-time monitoring UI (shared library)
+│   │   ├── Components/Pages/         # Blazor pages (Overview, Timeline, Metrics, etc.)
 │   │   ├── Hubs/AgentHub.cs          # SignalR hub for push updates
-│   │   └── Services/                 # DashboardDataService (cache + broadcast)
+│   │   └── Services/                 # IDashboardDataService, HttpDashboardDataService
 │   │
-│   └── AgentSquad.Runner/            # Application host
-│       ├── Program.cs                # DI setup and service registration
-│       ├── AgentSquadWorker.cs       # Bootstrap: spawns core agents
-│       └── appsettings.json          # Configuration file
+│   ├── AgentSquad.Dashboard.Host/    # Standalone dashboard process (port 5051)
+│   │   ├── Program.cs                # Independent Blazor host with IHttpClientFactory
+│   │   └── StandaloneServiceRegistration.cs  # Stub services for standalone mode
+│   │
+│   └── AgentSquad.Runner/            # Application host (port 5050)
+│       ├── Program.cs                # DI setup, REST API endpoints, service registration
+│       ├── AgentSquadWorker.cs       # Bootstrap: spawns core agents in phased sequence
+│       └── appsettings.json          # Configuration file (gitignored)
 │
 ├── tests/
 │   ├── AgentSquad.Core.Tests/
 │   ├── AgentSquad.Agents.Tests/
 │   └── AgentSquad.Integration.Tests/
 │
+├── scripts/
+│   └── fresh-reset.ps1               # Clean all GitHub artifacts for fresh run
+│
 └── docs/
-    ├── setup-guide.md
-    ├── architecture.md
-    └── agent-behaviors.md
+    ├── Requirements.md                # Detailed requirements with workflow scenarios
+    ├── MonitorPrompt.md               # Dashboard monitoring expectations
+    └── LessonsLearned.md              # Operational lessons from 70+ runs
 ```
 
 ## Development
@@ -253,7 +268,7 @@ cd src/AgentSquad.Runner
 dotnet run --environment Development
 ```
 
-The dashboard runs on the configured port (default `5000`). The Runner bootstraps the core agents and enters a steady-state loop where the PM manages all further coordination.
+The dashboard runs on the configured port (default `5050`). The Runner bootstraps the core agents and enters a steady-state loop where the PM manages all further coordination.
 
 ### Contributing
 
@@ -269,9 +284,9 @@ The dashboard runs on the configured port (default `5000`). The Runner bootstrap
 |-----------|-----------|
 | Runtime | .NET 8 / C# 12 |
 | AI Integration | Microsoft Semantic Kernel |
-| AI Providers | Anthropic Claude, OpenAI GPT, Azure OpenAI, Ollama |
+| AI Providers | GitHub Copilot CLI (default), Anthropic Claude, OpenAI GPT, Azure OpenAI, Ollama |
 | GitHub Integration | Octokit.net |
-| Dashboard | Blazor Server + SignalR |
+| Dashboard | Blazor Server + SignalR (embedded or standalone) |
 | Persistence | SQLite via Microsoft.Data.Sqlite |
 | Message Bus | System.Threading.Channels (in-process pub/sub) |
 | Dependency Injection | Microsoft.Extensions.DependencyInjection |

@@ -20,7 +20,7 @@ public sealed class ConfigurationService
     private readonly AgentRegistry _registry;
     private readonly AgentSpawnManager _spawnManager;
     private readonly WorkflowStateMachine _workflow;
-    private readonly DashboardDataService _dashboard;
+    private readonly IDashboardDataService _dashboard;
     private readonly ILogger<ConfigurationService> _logger;
     private readonly string _appSettingsPath;
 
@@ -36,7 +36,7 @@ public sealed class ConfigurationService
         AgentRegistry registry,
         AgentSpawnManager spawnManager,
         WorkflowStateMachine workflow,
-        DashboardDataService dashboard,
+        IDashboardDataService dashboard,
         ILogger<ConfigurationService> logger,
         IWebHostEnvironment env)
     {

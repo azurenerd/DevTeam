@@ -20,6 +20,8 @@
 10. [Design and UI Quality](#10-design-and-ui-quality)
 11. [Requirements and Scenario Documentation](#11-requirements-and-scenario-documentation)
 12. [Recommendations for Agent-Based Development](#12-recommendations-for-agent-based-development)
+13. [Dashboard Architecture and Process Separation](#13-dashboard-architecture-and-process-separation)
+14. [GitHub API Rate Limiting and Caching](#14-github-api-rate-limiting-and-caching)
 
 ---
 
@@ -94,6 +96,14 @@ If it's not in the prompt, it doesn't exist to the agent.
 - "Create another section in the overview cards for the agents to show errors or warnings"
 - "I want to be able to see a history for each agent, what were their tasks they have completed or are on currently"
 - "The status in the overview agent card in the dashboard are not updating... I have to refresh"
+
+### Timeline visualization iterations:
+- The Project Timeline page went through several iterations to become useful. Initial implementation showed a flat list with no way to understand parent-child relationships between enhancement issues, engineering tasks, and PRs.
+- A PM/Engineering toggle was added so the PM could see the project from a business perspective (enhancements → tasks) while engineers could see it from a technical perspective (tasks → PRs).
+- PRs and Issues needed visual distinction — colored badges ("PR #X" in purple, "Issue #X" in green) were added to both node labels and detail popups.
+- Auto-refresh caused a critical race condition: the 30-second background refresh rebuilt `_phases`/`_groupLookup`, which invalidated `_selectedGroup` in the detail panel. This caused `NullReferenceException` crashes. Fix: re-fetch the selected group from the new lookup after every rebuild, with null-safe pattern matching.
+- Background refresh also caused UX annoyance — the "Syncing work items" overlay flashed every 30 seconds. Fix: only show the overlay on first load or manual refresh; auto-refresh runs silently.
+- Phase naming confusion: "Complete" phase was renamed to "Finalization" because closed engineering tasks were landing there instead of staying in Development with closed visual indicators.
 
 ### Takeaway:
 **Build the monitoring dashboard BEFORE the agent pipeline.** Include:
@@ -377,4 +387,57 @@ The agents will not "figure out" what you want from a high-level description. Th
 
 ---
 
-*This document was compiled from 50+ checkpoints, 220+ conversation turns, and 30+ end-to-end test runs across two Copilot CLI sessions building the AgentSquad system.*
+## 13. Dashboard Architecture and Process Separation
+
+**Lesson:** Running the monitoring dashboard in the same process as the agents creates a devastating development feedback loop. Any UI tweak requires killing the runner, losing all agent state, rebuilding, and restarting from scratch.
+
+### What happened:
+- The dashboard was initially embedded in the Runner process as a Blazor Server app. This seemed simpler — one process, shared DI container, in-process data access.
+- During the timeline and overview page iterations, every CSS change, Razor fix, or layout tweak required stopping the Runner. All 7 agents died. In-memory state (message bus subscriptions, agent assignments, rework queues) was lost.
+- A typical UI iteration cycle was: stop Runner → edit Razor file → rebuild → restart → wait 2-3 minutes for agents to reinitialize → navigate to the page → discover the fix didn't work → repeat. Each cycle cost 5+ minutes of wall-clock time.
+- DLL locks from running processes prevented rebuilds — the `copilot` CLI child processes held locks on assemblies. Both the Runner PID and child `dotnet` PIDs had to be killed.
+
+### Guidance that was needed:
+- "The dashboard should be a separate process so I can iterate on the UI without killing agents"
+- "Agents lose all their state when the dashboard crashes or needs a rebuild"
+- "Need a way to restart just the UI without affecting the backend"
+
+### Technical decisions and pitfalls:
+- **`IDashboardDataService` interface**: Decouples Razor pages from the data source. `DashboardDataService` (in-process) vs. `HttpDashboardDataService` (HTTP client for standalone mode). Razor pages never know which implementation they're using.
+- **REST API exposure**: Runner exposes ~30 endpoints at `/api/dashboard/*` for the standalone dashboard to consume. This was the path of least resistance — SignalR cross-process would have been more complex.
+- **`IHttpClientFactory` vs `AddHttpClient<T>`**: `AddHttpClient<T>` registers a transient factory, which conflicts with singleton service registration. The standalone dashboard's `HttpDashboardDataService` is a singleton (it holds HTTP client state). Using `IHttpClientFactory` with named clients resolved the DI conflict.
+- **Stub services**: The standalone dashboard project needs registrations for services it doesn't host (`NullGitHubService`, `GateNotificationService`, `AgentStateStore`, `BuildTestMetrics`) because Razor pages reference them transitively through shared components.
+- **`DashboardMode(IsStandalone: bool)`**: A simple record that controls NavMenu visibility and other behavioral differences. Injected via DI — pages check `_dashboardMode.IsStandalone` to conditionally render elements.
+
+### Takeaway:
+**Separate the monitoring UI from the agent runtime from the start.** The embedded-dashboard shortcut saves 30 minutes of initial setup and costs hours of lost productivity during UI iteration. Architecture pattern: Runner exposes a REST API, Dashboard.Host consumes it via `HttpDashboardDataService`, shared Razor components use `IDashboardDataService` abstraction so they work in both modes.
+
+---
+
+## 14. GitHub API Rate Limiting and Caching
+
+**Lesson:** A multi-agent system with 7 agents polling GitHub every 30 seconds, plus a dashboard refreshing on its own cadence, will burn through the 5000/hour GitHub API rate limit in approximately 30 minutes without caching. Rate limiting and caching are not optimizations — they are prerequisites for the system to function.
+
+### What happened:
+- Early runs had no caching. Each agent called `GetOpenIssuesAsync` and `GetOpenPullRequestsAsync` every poll cycle. With 7 agents polling every 30 seconds: 14 list-endpoint calls × 2 cycles/minute = 28 calls/minute just for list endpoints.
+- Add mutation calls (creating issues, posting comments, updating labels) and the dashboard's own polling, and the system was making 50-80 API calls per minute.
+- After ~30 minutes, the system hit GitHub's rate limit. The `RateLimitManager` existed in code but was **never wired into `GitHubService`** — all 76 API call sites bypassed it entirely. This was a CRITICAL bug that went undetected for multiple sessions.
+- Even after wiring `RateLimitManager`, the system still consumed quota too fast because every agent independently fetched the same list data that hadn't changed since the last poll.
+
+### Guidance that was needed:
+- "Why are we hitting the rate limit so fast? We have 5000 calls per hour"
+- "The agents are all requesting the same data — can we cache it?"
+- "We need the rate limit manager to actually be used"
+
+### Technical solution:
+- **30-second TTL shared cache**: `GitHubService` caches responses for 7 hot-path list methods. First caller hits the API; subsequent callers within 30 seconds get the cached response. `SemaphoreSlim(1,1)` with double-checked locking prevents thundering herd.
+- **Mutation-triggered invalidation**: All mutation methods (create issue, update PR, post comment, merge, etc.) call `InvalidateListCaches()` so the next read reflects the change. This ensures cache staleness never exceeds 30 seconds AND mutations are immediately visible.
+- **Force Refresh**: Dashboard Force Refresh button calls `InvalidateListCaches()` before fetching, giving the user a way to bypass the cache on demand.
+- **Net result**: ~90% reduction in list-endpoint API calls. A full run that previously hit the rate limit at 30 minutes now runs for hours without approaching the limit.
+
+### Takeaway:
+**Implement caching and rate limit management before the first multi-agent run.** The math is straightforward: `agents × endpoints_per_poll × polls_per_minute = calls_per_minute`. If that number exceeds `5000 / 60 ≈ 83`, you'll hit the limit within an hour. A 30-second TTL cache is the simplest fix — it's short enough that staleness is rarely a problem, and mutation-triggered invalidation handles the cases where it would be.
+
+---
+
+*This document was compiled from 80+ checkpoints, 400+ conversation turns, and 70+ end-to-end test runs across four Copilot CLI sessions building the AgentSquad system.*

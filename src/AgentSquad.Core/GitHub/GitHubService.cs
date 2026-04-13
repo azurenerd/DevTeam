@@ -15,6 +15,36 @@ public class GitHubService : IGitHubService
     private readonly ILogger<GitHubService> _logger;
     private readonly RateLimitManager _rl;
 
+    // --- Shared in-process cache for high-frequency list queries ---
+    // Multiple agents poll GetOpenIssuesAsync/GetOpenPullRequestsAsync every 30s.
+    // Without caching, 7 agents × 2-5 list calls/cycle = 3000-5000 API calls/hour,
+    // blowing through the 5000/hr GitHub rate limit. A 30s TTL cache reduces this by ~90%.
+    private static readonly TimeSpan ListCacheTtl = TimeSpan.FromSeconds(30);
+
+    private IReadOnlyList<AgentIssue>? _openIssuesCache;
+    private DateTime _openIssuesCacheTime;
+    private readonly SemaphoreSlim _openIssuesLock = new(1, 1);
+
+    private IReadOnlyList<AgentIssue>? _allIssuesCache;
+    private DateTime _allIssuesCacheTime;
+    private readonly SemaphoreSlim _allIssuesLock = new(1, 1);
+
+    private IReadOnlyList<AgentPullRequest>? _openPrsCache;
+    private DateTime _openPrsCacheTime;
+    private readonly SemaphoreSlim _openPrsLock = new(1, 1);
+
+    private IReadOnlyList<AgentPullRequest>? _allPrsCache;
+    private DateTime _allPrsCacheTime;
+    private readonly SemaphoreSlim _allPrsLock = new(1, 1);
+
+    private IReadOnlyList<AgentPullRequest>? _mergedPrsCache;
+    private DateTime _mergedPrsCacheTime;
+    private readonly SemaphoreSlim _mergedPrsLock = new(1, 1);
+
+    // Cache for GetIssuesByLabelAsync — keyed by "label|state"
+    private readonly Dictionary<string, (IReadOnlyList<AgentIssue> Data, DateTime CachedAt)> _labelIssuesCache = new();
+    private readonly SemaphoreSlim _labelIssuesLock = new(1, 1);
+
     public string RepositoryFullName => $"{_owner}/{_repo}";
 
     public GitHubService(IOptions<AgentSquadConfig> config, RateLimitManager rateLimitManager, ILogger<GitHubService> logger)
@@ -34,6 +64,20 @@ public class GitHubService : IGitHubService
         {
             Credentials = new Credentials(projectConfig.GitHubToken)
         };
+    }
+
+    /// <summary>
+    /// Invalidate all list caches. Call after mutations (create/update/merge/close)
+    /// so the next read sees fresh data.
+    /// </summary>
+    private void InvalidateListCaches()
+    {
+        _openIssuesCache = null;
+        _allIssuesCache = null;
+        _openPrsCache = null;
+        _allPrsCache = null;
+        _mergedPrsCache = null;
+        lock (_labelIssuesCache) { _labelIssuesCache.Clear(); }
     }
 
     /// <summary>
@@ -77,6 +121,7 @@ public class GitHubService : IGitHubService
                     }
                 }
 
+                InvalidateListCaches();
                 return MapPullRequest(pr, labels.ToList());
             }
             catch (Exception ex)
@@ -122,42 +167,65 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetOpenPullRequestsAsync(CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        if (_openPrsCache is { } cached && DateTime.UtcNow - _openPrsCacheTime < ListCacheTtl)
+            return cached;
+
+        await _openPrsLock.WaitAsync(ct);
+        try
         {
-            try
+            // Double-check after acquiring lock
+            if (_openPrsCache is { } cached2 && DateTime.UtcNow - _openPrsCacheTime < ListCacheTtl)
+                return cached2;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var prs = await _client.PullRequest.GetAllForRepository(_owner, _repo,
                     new PullRequestRequest { State = ItemStateFilter.Open });
                 TrackRateLimit();
-
                 return prs.Select(pr => MapPullRequest(pr, pr.Labels.Select(l => l.Name).ToList())).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get open PRs");
-                throw;
-            }
-        }, ct);
+            }, ct);
+
+            _openPrsCache = result;
+            _openPrsCacheTime = DateTime.UtcNow;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get open PRs");
+            throw;
+        }
+        finally { _openPrsLock.Release(); }
     }
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetAllPullRequestsAsync(CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        if (_allPrsCache is { } cached && DateTime.UtcNow - _allPrsCacheTime < ListCacheTtl)
+            return cached;
+
+        await _allPrsLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_allPrsCache is { } cached2 && DateTime.UtcNow - _allPrsCacheTime < ListCacheTtl)
+                return cached2;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var prs = await _client.PullRequest.GetAllForRepository(_owner, _repo,
                     new PullRequestRequest { State = ItemStateFilter.All, SortDirection = SortDirection.Descending });
                 TrackRateLimit();
-
                 return prs.Select(pr => MapPullRequest(pr, pr.Labels.Select(l => l.Name).ToList())).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get all PRs");
-                throw;
-            }
-        }, ct);
+            }, ct);
+
+            _allPrsCache = result;
+            _allPrsCacheTime = DateTime.UtcNow;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get all PRs");
+            throw;
+        }
+        finally { _allPrsLock.Release(); }
     }
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetPullRequestsForAgentAsync(
@@ -178,24 +246,36 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetMergedPullRequestsAsync(CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        if (_mergedPrsCache is { } cached && DateTime.UtcNow - _mergedPrsCacheTime < ListCacheTtl)
+            return cached;
+
+        await _mergedPrsLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_mergedPrsCache is { } cached2 && DateTime.UtcNow - _mergedPrsCacheTime < ListCacheTtl)
+                return cached2;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var prs = await _client.PullRequest.GetAllForRepository(_owner, _repo,
                     new PullRequestRequest { State = ItemStateFilter.Closed, SortDirection = SortDirection.Descending });
                 TrackRateLimit();
-                return prs
+                return (IReadOnlyList<AgentPullRequest>)prs
                     .Where(pr => pr.Merged)
                     .Select(pr => MapPullRequest(pr, pr.Labels.Select(l => l.Name).ToList()))
                     .ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get merged PRs");
-                throw;
-            }
-        }, ct);
+            }, ct);
+
+            _mergedPrsCache = result;
+            _mergedPrsCacheTime = DateTime.UtcNow;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get merged PRs");
+            throw;
+        }
+        finally { _mergedPrsLock.Release(); }
     }
 
     public async Task<IReadOnlyList<string>> GetPullRequestChangedFilesAsync(int prNumber, CancellationToken ct = default)
@@ -345,6 +425,7 @@ public class GitHubService : IGitHubService
                 }
 
                 _logger.LogInformation("Updated PR #{Number}", prNumber);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -364,6 +445,7 @@ public class GitHubService : IGitHubService
                     new PullRequestUpdate { State = ItemState.Closed });
                 TrackRateLimit();
                 _logger.LogInformation("Closed PR #{Number}", prNumber);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -389,6 +471,7 @@ public class GitHubService : IGitHubService
                 await _client.PullRequest.Merge(_owner, _repo, prNumber, merge);
                 TrackRateLimit();
                 _logger.LogInformation("Merged PR #{Number}", prNumber);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -415,6 +498,7 @@ public class GitHubService : IGitHubService
 
                 var issue = await _client.Issue.Create(_owner, _repo, newIssue);
                 TrackRateLimit();
+                InvalidateListCaches();
                 return MapIssue(issue);
             }
             catch (Exception ex)
@@ -451,44 +535,64 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetOpenIssuesAsync(CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        if (_openIssuesCache is { } cached && DateTime.UtcNow - _openIssuesCacheTime < ListCacheTtl)
+            return cached;
+
+        await _openIssuesLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_openIssuesCache is { } cached2 && DateTime.UtcNow - _openIssuesCacheTime < ListCacheTtl)
+                return cached2;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo,
                     new RepositoryIssueRequest { State = ItemStateFilter.Open });
                 TrackRateLimit();
+                return (IReadOnlyList<AgentIssue>)issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
+            }, ct);
 
-                // Filter out pull requests (GitHub API returns PRs as issues too)
-                return issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get open issues");
-                throw;
-            }
-        }, ct);
+            _openIssuesCache = result;
+            _openIssuesCacheTime = DateTime.UtcNow;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get open issues");
+            throw;
+        }
+        finally { _openIssuesLock.Release(); }
     }
 
     public async Task<IReadOnlyList<AgentIssue>> GetAllIssuesAsync(CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        if (_allIssuesCache is { } cached && DateTime.UtcNow - _allIssuesCacheTime < ListCacheTtl)
+            return cached;
+
+        await _allIssuesLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_allIssuesCache is { } cached2 && DateTime.UtcNow - _allIssuesCacheTime < ListCacheTtl)
+                return cached2;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo,
                     new RepositoryIssueRequest { State = ItemStateFilter.All, SortDirection = SortDirection.Descending });
                 TrackRateLimit();
+                return (IReadOnlyList<AgentIssue>)issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
+            }, ct);
 
-                // Filter out pull requests (GitHub API returns PRs as issues too)
-                return issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get all issues");
-                throw;
-            }
-        }, ct);
+            _allIssuesCache = result;
+            _allIssuesCacheTime = DateTime.UtcNow;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get all issues");
+            throw;
+        }
+        finally { _allIssuesLock.Release(); }
     }
 
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesForAgentAsync(
@@ -558,6 +662,7 @@ public class GitHubService : IGitHubService
                 await _client.Issue.Update(_owner, _repo, issueNumber, new IssueUpdate { State = ItemState.Closed });
                 TrackRateLimit();
                 _logger.LogInformation("Closed issue #{Number}", issueNumber);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -593,6 +698,7 @@ public class GitHubService : IGitHubService
                 if (response.IsSuccessStatusCode && !responseBody.Contains("\"errors\""))
                 {
                     _logger.LogInformation("Deleted issue #{Number} via GraphQL", issueNumber);
+                    InvalidateListCaches();
                     return true;
                 }
 
@@ -613,9 +719,14 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        var cacheKey = $"{label}|open";
+        await _labelIssuesLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_labelIssuesCache.TryGetValue(cacheKey, out var entry) && DateTime.UtcNow - entry.CachedAt < ListCacheTtl)
+                return entry.Data;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var request = new RepositoryIssueRequest
                 {
@@ -626,17 +737,21 @@ public class GitHubService : IGitHubService
 
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
                 TrackRateLimit();
-                return issues
-                    .Where(i => i.PullRequest is null) // Exclude PRs from issue list
+                return (IReadOnlyList<AgentIssue>)issues
+                    .Where(i => i.PullRequest is null)
                     .Select(i => MapIssue(i))
                     .ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get issues with label {Label}", label);
-                throw;
-            }
-        }, ct);
+            }, ct);
+
+            _labelIssuesCache[cacheKey] = (result, DateTime.UtcNow);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get issues with label {Label}", label);
+            throw;
+        }
+        finally { _labelIssuesLock.Release(); }
     }
 
     public async Task UpdateIssueTitleAsync(int issueNumber, string newTitle, CancellationToken ct = default)
@@ -648,6 +763,7 @@ public class GitHubService : IGitHubService
                 await _client.Issue.Update(_owner, _repo, issueNumber, new IssueUpdate { Title = newTitle });
                 TrackRateLimit();
                 _logger.LogInformation("Updated issue #{Number} title to '{Title}'", issueNumber, newTitle);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -680,6 +796,7 @@ public class GitHubService : IGitHubService
                 await _client.Issue.Update(_owner, _repo, issueNumber, update);
                 TrackRateLimit();
                 _logger.LogInformation("Updated issue #{Number}", issueNumber);
+                InvalidateListCaches();
             }
             catch (Exception ex)
             {
@@ -691,9 +808,14 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, string state, CancellationToken ct = default)
     {
-        return await _rl.ExecuteAsync(async _ =>
+        var cacheKey = $"{label}|{state.ToLowerInvariant()}";
+        await _labelIssuesLock.WaitAsync(ct);
+        try
         {
-            try
+            if (_labelIssuesCache.TryGetValue(cacheKey, out var entry) && DateTime.UtcNow - entry.CachedAt < ListCacheTtl)
+                return entry.Data;
+
+            var result = await _rl.ExecuteAsync(async _ =>
             {
                 var stateFilter = string.Equals(state, "closed", StringComparison.OrdinalIgnoreCase)
                     ? ItemStateFilter.Closed
@@ -710,17 +832,21 @@ public class GitHubService : IGitHubService
 
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
                 TrackRateLimit();
-                return issues
+                return (IReadOnlyList<AgentIssue>)issues
                     .Where(i => i.PullRequest is null)
                     .Select(i => MapIssue(i))
                     .ToList();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Failed to get issues with label {Label} state {State}", label, state);
-                throw;
-            }
-        }, ct);
+            }, ct);
+
+            _labelIssuesCache[cacheKey] = (result, DateTime.UtcNow);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to get issues with label {Label} state {State}", label, state);
+            throw;
+        }
+        finally { _labelIssuesLock.Release(); }
     }
 
     // File Management

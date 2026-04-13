@@ -91,13 +91,19 @@ builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 builder.Services.AddSignalR();
 builder.Services.AddSingleton<DashboardDataService>();
+builder.Services.AddSingleton<IDashboardDataService>(sp => sp.GetRequiredService<DashboardDataService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataService>());
 builder.Services.AddSingleton<ConfigurationService>();
 builder.Services.AddScoped<EngineeringPlanDataService>();
 builder.Services.AddSingleton<DirectorCliService>();
+builder.Services.AddSingleton(new DashboardMode(IsStandalone: false));
 
 // Worker service that starts the core agents and kicks off the workflow
 builder.Services.AddHostedService<AgentSquadWorker>();
+
+// Enable CORS for standalone dashboard
+builder.Services.AddCors(o => o.AddPolicy("DashboardApi", p =>
+    p.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));
 
 var app = builder.Build();
 
@@ -108,8 +114,85 @@ if (!app.Environment.IsDevelopment())
     app.UseHsts();
 }
 
+app.UseCors("DashboardApi");
 app.UseStaticFiles();
 app.UseAntiforgery();
+
+// ── Dashboard REST API (consumed by standalone Dashboard.Host) ──
+var api = app.MapGroup("/api/dashboard").WithTags("Dashboard");
+
+api.MapGet("/agents", (DashboardDataService svc) =>
+    Results.Ok(svc.GetAllAgentSnapshots()));
+
+api.MapGet("/agents/{agentId}", (string agentId, DashboardDataService svc) =>
+    svc.GetAgentSnapshot(agentId) is { } snap ? Results.Ok(snap) : Results.NotFound());
+
+api.MapGet("/agents/{agentId}/errors", (string agentId, DashboardDataService svc) =>
+    Results.Ok(svc.GetAgentErrors(agentId)));
+
+api.MapPost("/agents/{agentId}/errors/clear", (string agentId, DashboardDataService svc) =>
+    { svc.ClearAgentErrors(agentId); return Results.Ok(); });
+
+api.MapGet("/agents/{agentId}/activity", async (string agentId, DashboardDataService svc, CancellationToken ct) =>
+    Results.Ok(await svc.GetActivityLogAsync(agentId, 100, ct)));
+
+api.MapPost("/agents/{agentId}/model", async (string agentId, HttpContext ctx, DashboardDataService svc) =>
+{
+    var body = await ctx.Request.ReadFromJsonAsync<SetModelRequest>();
+    if (body?.ModelName is null) return Results.BadRequest();
+    svc.SetAgentModel(agentId, body.ModelName);
+    return Results.Ok();
+});
+
+api.MapPost("/agents/{agentId}/chat", async (string agentId, HttpContext ctx, DashboardDataService svc, CancellationToken ct) =>
+{
+    var body = await ctx.Request.ReadFromJsonAsync<ChatRequest>();
+    if (body?.Message is null) return Results.BadRequest();
+    var reply = await svc.SendAgentChatAsync(agentId, body.Message, ct);
+    return Results.Ok(reply);
+});
+
+api.MapGet("/agents/{agentId}/chat-history", (string agentId, DashboardDataService svc) =>
+    Results.Ok(svc.GetAgentChatHistory(agentId)));
+
+api.MapPost("/agents/{agentId}/chat/clear", (string agentId, DashboardDataService svc) =>
+    { svc.ClearAgentChat(agentId); return Results.Ok(); });
+
+api.MapGet("/health/snapshot", (DashboardDataService svc) =>
+    Results.Ok(svc.GetCurrentHealthSnapshot()));
+
+api.MapGet("/health/assessment", (DashboardDataService svc) =>
+    Results.Ok(svc.GetExecutionHealthAssessment()));
+
+api.MapGet("/health/deadlock", (DashboardDataService svc) =>
+{
+    var hasDeadlock = svc.HasDeadlock(out var cycle);
+    return Results.Ok(new { HasDeadlock = hasDeadlock, Cycle = cycle });
+});
+
+api.MapGet("/health/diagnostics", (string? agentId, bool? compliant, int? limit, DashboardDataService svc) =>
+    Results.Ok(svc.GetDiagnosticHistory(agentId, compliant, limit ?? 200)));
+
+api.MapGet("/models", (DashboardDataService svc) =>
+    Results.Ok(svc.GetAvailableModels()));
+
+api.MapPost("/models/refresh", (DashboardDataService svc) =>
+    { svc.RefreshActiveModels(); return Results.Ok(); });
+
+api.MapGet("/timeline", (DashboardDataService svc) =>
+    Results.Ok(svc.GetExecutionTimeline()));
+
+api.MapGet("/github/issues", async (DashboardDataService svc) =>
+    Results.Ok(await svc.GetIssuesAsync()));
+
+api.MapGet("/github/pull-requests", async (DashboardDataService svc) =>
+    Results.Ok(await svc.GetPullRequestsAsync()));
+
+api.MapGet("/github/rate-limited", (DashboardDataService svc) =>
+    Results.Ok(new { IsRateLimited = svc.IsGitHubRateLimited }));
+
+api.MapPost("/reset", (DashboardDataService svc) =>
+    { svc.ResetCaches(); return Results.Ok(); });
 
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");
@@ -119,3 +202,7 @@ app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 app.Run();
+
+// Request DTOs for POST endpoints
+record SetModelRequest(string ModelName);
+record ChatRequest(string Message);

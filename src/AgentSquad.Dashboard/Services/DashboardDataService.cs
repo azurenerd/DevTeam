@@ -91,7 +91,7 @@ public sealed record ExecutionMilestone
     public string? AgentName { get; init; }
 }
 
-public sealed class DashboardDataService : BackgroundService
+public sealed class DashboardDataService : BackgroundService, IDashboardDataService
 {
     private readonly AgentRegistry _registry;
     private readonly HealthMonitor _healthMonitor;

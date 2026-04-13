@@ -1,6 +1,9 @@
-﻿<div class="sidebar-brand">
+﻿@using AgentSquad.Dashboard.Services
+@inject DashboardMode Mode
+
+<div class="sidebar-brand">
     <div class="brand-title">AgentSquad</div>
-    <div class="brand-subtitle">Monitoring Dashboard</div>
+    <div class="brand-subtitle">@(Mode.IsStandalone ? "Dashboard (Standalone)" : "Monitoring Dashboard")</div>
 </div>
 
 <input type="checkbox" title="Navigation menu" class="navbar-toggler" />
@@ -10,6 +13,12 @@
         <div class="nav-item">
             <NavLink class="nav-link" href="" Match="NavLinkMatch.All">
                 <span class="nav-icon">🏠</span> Overview
+            </NavLink>
+        </div>
+
+        <div class="nav-item">
+            <NavLink class="nav-link" href="timeline">
+                <span class="nav-icon">🗺️</span> Project Timeline
             </NavLink>
         </div>
 
@@ -43,17 +52,14 @@
             </NavLink>
         </div>
 
-        <div class="nav-item">
-            <NavLink class="nav-link" href="timeline">
-                <span class="nav-icon">🗺️</span> Project Timeline
-            </NavLink>
-        </div>
-
-        <div class="nav-item">
-            <NavLink class="nav-link" href="engineering-plan">
-                <span class="nav-icon">📐</span> Engineering Plan
-            </NavLink>
-        </div>
+        @if (!Mode.IsStandalone)
+        {
+            <div class="nav-item">
+                <NavLink class="nav-link" href="engineering-plan">
+                    <span class="nav-icon">📐</span> Engineering Plan
+                </NavLink>
+            </div>
+        }
 
         <div class="nav-item">
             <NavLink class="nav-link" href="team">
@@ -61,11 +67,14 @@
             </NavLink>
         </div>
 
-        <div class="nav-item">
-            <NavLink class="nav-link" href="configuration">
-                <span class="nav-icon">⚙️</span> Configuration
-            </NavLink>
-        </div>
+        @if (!Mode.IsStandalone)
+        {
+            <div class="nav-item">
+                <NavLink class="nav-link" href="configuration">
+                    <span class="nav-icon">⚙️</span> Configuration
+                </NavLink>
+            </div>
+        }
 
         <div class="nav-item nav-separator">
             <NavLink class="nav-link" href="director-cli">

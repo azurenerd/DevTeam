@@ -4984,7 +4984,7 @@ div[title] .config-agent-name {
 .phase-architecture{ --phase: #448aff; --phase-glow: rgba(68,138,255,0.10); --phase-border: rgba(68,138,255,0.22); }
 .phase-devplanning { --phase: #18ffff; --phase-glow: rgba(24,255,255,0.10); --phase-border: rgba(24,255,255,0.20); }
 .phase-development { --phase: #00e676; --phase-glow: rgba(0,230,118,0.08); --phase-border: rgba(0,230,118,0.18); }
-.phase-complete    { --phase: #69f0ae; --phase-glow: rgba(105,240,174,0.08); --phase-border: rgba(105,240,174,0.18); }
+.phase-finalization { --phase: #69f0ae; --phase-glow: rgba(105,240,174,0.08); --phase-border: rgba(105,240,174,0.18); }
 
 /* ── Loading spinner ── */
 .ntl-loading {
@@ -5029,6 +5029,26 @@ div[title] .config-agent-name {
 .ntl-stat-sep { color: #30363d; }
 
 /* Filter pills */
+.ntl-topbar-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ntl-view-toggle { display: flex; gap: 4px; }
+.ntl-view-btn {
+    padding: 4px 14px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    background: transparent;
+    color: #7d8590;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.ntl-view-btn:hover { border-color: #a855f7; color: #c9d1d9; }
+.ntl-view-btn.active {
+    background: rgba(168,85,247,0.12);
+    border-color: #a855f7;
+    color: #a855f7;
+}
+.ntl-topbar-divider { color: #30363d; font-size: 1.1rem; user-select: none; }
 .ntl-filter-pills { display: flex; gap: 4px; }
 .ntl-pill {
     padding: 4px 14px;
@@ -5047,6 +5067,35 @@ div[title] .config-agent-name {
     border-color: #58a6ff;
     color: #58a6ff;
 }
+
+/* ── Refresh button ── */
+.ntl-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    background: transparent;
+    color: #7d8590;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.ntl-refresh-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+.ntl-refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ntl-refresh-icon { width: 14px; height: 14px; }
+.ntl-refresh-btn.spinning .ntl-refresh-icon { animation: ntl-spin 0.8s linear infinite; }
+@keyframes ntl-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+/* ── Node type badges ── */
+.ntl-type-pr { color: #a371f7; }
+.ntl-type-issue { color: #3fb950; }
+.ntl-node-num.ntl-type-pr::before,
+.ntl-node-num.ntl-type-issue::before { font-size: 0.65rem; font-weight: 600; letter-spacing: 0.03em; }
+.ntl-detail-num.ntl-type-pr { color: #a371f7; }
+.ntl-detail-num.ntl-type-issue { color: #3fb950; }
 
 /* ── Progress bar ── */
 .ntl-progress-wrap {
@@ -5361,6 +5410,10 @@ div[title] .config-agent-name {
 .ntl-child-closed { opacity: 0.4; }
 .ntl-child-closed:hover { opacity: 0.7; }
 .ntl-child-open { }
+.ntl-child-merged { opacity: 0.6; }
+.ntl-child-merged:hover { opacity: 0.85; }
+.ntl-child-merged .ntl-child-label { color: #a371f7; }
+a.ntl-child-node { text-decoration: none; color: inherit; }
 
 /* ── Edge fade overlays ── */
 .ntl-edge-fade {
