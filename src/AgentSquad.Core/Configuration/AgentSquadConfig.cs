@@ -1,3 +1,4 @@
+using AgentSquad.Core.Agents;
 using AgentSquad.Core.Workspace;
 
 namespace AgentSquad.Core.Configuration;
@@ -12,6 +13,7 @@ public class AgentSquadConfig
     public CopilotCliConfig CopilotCli { get; set; } = new();
     public WorkspaceConfig Workspace { get; set; } = new();
     public HumanInteractionConfig HumanInteraction { get; set; } = new();
+    public AgenticLoopConfig AgenticLoop { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -457,4 +459,56 @@ public static class GateIds
         ("Completion", DeploymentDecision, "Deployment",
             "Ship/no-ship decision. When enabled: you make the final call on whether to deploy the completed project. When auto: the system marks the project as complete without a deployment gate."),
     };
+}
+
+/// <summary>
+/// Configuration for the agentic self-assessment loop.
+/// When enabled, document-producing agents (Researcher, PM, Architect, Principal Engineer)
+/// assess their own output against quality criteria and refine before publishing.
+/// This reduces downstream review cycles by catching gaps early.
+/// </summary>
+public class AgenticLoopConfig
+{
+    /// <summary>Master switch. When false, all agents use the classic single-pass generation.</summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Maximum self-assessment iterations before publishing best effort.
+    /// Each iteration = one assessment AI call + one refinement AI call.
+    /// </summary>
+    public int MaxIterations { get; set; } = 2;
+
+    /// <summary>
+    /// Per-role enablement. Allows turning on agentic loop for specific roles
+    /// while keeping others in classic mode. Only checked when Enabled=true.
+    /// Roles not listed here default to enabled when the master switch is on.
+    /// </summary>
+    public Dictionary<string, AgenticRoleConfig> Roles { get; set; } = new()
+    {
+        ["Researcher"] = new() { Enabled = true },
+        ["ProgramManager"] = new() { Enabled = true },
+        ["Architect"] = new() { Enabled = true },
+        ["PrincipalEngineer"] = new() { Enabled = true },
+        ["SeniorEngineer"] = new() { Enabled = false },
+        ["JuniorEngineer"] = new() { Enabled = false },
+        ["TestEngineer"] = new() { Enabled = false },
+    };
+
+    /// <summary>Check if agentic loop is enabled for a specific agent role.</summary>
+    public bool IsEnabledForRole(AgentRole role)
+    {
+        if (!Enabled) return false;
+        var roleName = role.ToString();
+        return !Roles.TryGetValue(roleName, out var roleConfig) || roleConfig.Enabled;
+    }
+}
+
+/// <summary>Per-role agentic loop configuration.</summary>
+public class AgenticRoleConfig
+{
+    /// <summary>When false, this role uses classic single-pass generation even if the master switch is on.</summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Override MaxIterations for this role. Null = use global default.</summary>
+    public int? MaxIterations { get; set; }
 }

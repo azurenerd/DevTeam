@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
@@ -21,6 +22,8 @@ public class ResearcherAgent : AgentBase
     private readonly AgentSquadConfig _config;
     private readonly PlaywrightRunner? _playwrightRunner;
     private readonly IGateCheckService _gateCheck;
+    private readonly SelfAssessmentService _selfAssessment;
+    private readonly IAgentReasoningLog _reasoningLog;
 
     private readonly Queue<ResearchDirective> _researchQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
@@ -36,6 +39,8 @@ public class ResearcherAgent : AgentBase
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
+        SelfAssessmentService selfAssessment,
+        IAgentReasoningLog reasoningLog,
         ILogger<ResearcherAgent> logger,
         PlaywrightRunner? playwrightRunner = null)
         : base(identity, logger, memoryStore)
@@ -47,6 +52,8 @@ public class ResearcherAgent : AgentBase
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
+        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
         _playwrightRunner = playwrightRunner;
     }
 
@@ -404,6 +411,32 @@ public class ResearcherAgent : AgentBase
         detailedAnalysis = analysisResponse.Content ?? "";
 
         } // end else (multi-turn)
+
+        // Self-assessment: assess and refine the research document
+        _reasoningLog.Log(new AgentReasoningEvent
+        {
+            AgentId = Identity.Id,
+            AgentDisplayName = Identity.DisplayName,
+            EventType = AgentReasoningEventType.Generating,
+            Phase = "Research",
+            Summary = $"Research document generated for '{directive.Topic}'",
+            Iteration = 0,
+        });
+
+        var criteria = AssessmentCriteria.GetForRole(Identity.Role);
+        if (criteria is not null)
+        {
+            synthesisContent = await _selfAssessment.AssessAndRefineAsync(
+                Identity.Id,
+                Identity.DisplayName,
+                Identity.Role,
+                "Research",
+                synthesisContent,
+                criteria,
+                $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\nTopic: {directive.Topic}",
+                chat,
+                ct);
+        }
 
         Logger.LogDebug("Research synthesis complete for {Topic}", directive.Topic);
         await RememberAsync(MemoryType.Decision,

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -23,6 +24,8 @@ public class ArchitectAgent : AgentBase
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentSquadConfig _config;
     private readonly IGateCheckService _gateCheck;
+    private readonly SelfAssessmentService _selfAssessment;
+    private readonly IAgentReasoningLog _reasoningLog;
 
     private readonly Queue<ArchitectureDirective> _taskQueue = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
@@ -43,6 +46,8 @@ public class ArchitectAgent : AgentBase
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
+        SelfAssessmentService selfAssessment,
+        IAgentReasoningLog reasoningLog,
         ILogger<ArchitectAgent> logger)
         : base(identity, logger, memoryStore)
     {
@@ -54,6 +59,8 @@ public class ArchitectAgent : AgentBase
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
+        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
     }
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
@@ -471,6 +478,32 @@ public class ArchitectAgent : AgentBase
         architectureDoc = architectureResponse.Content?.Trim() ?? "";
 
         } // end else (multi-turn)
+
+        // Self-assessment: assess and refine the architecture document
+        _reasoningLog.Log(new AgentReasoningEvent
+        {
+            AgentId = Identity.Id,
+            AgentDisplayName = Identity.DisplayName,
+            EventType = AgentReasoningEventType.Generating,
+            Phase = "Architecture",
+            Summary = $"Architecture document generated for '{directive.Title}'",
+            Iteration = 0,
+        });
+
+        var criteria = AssessmentCriteria.GetForRole(Identity.Role);
+        if (criteria is not null)
+        {
+            architectureDoc = await _selfAssessment.AssessAndRefineAsync(
+                Identity.Id,
+                Identity.DisplayName,
+                Identity.Role,
+                "Architecture",
+                architectureDoc,
+                criteria,
+                $"Project: {_config.Project.Description}\nPM Spec and Research available for reference",
+                chat,
+                ct);
+        }
 
         Logger.LogDebug("Architecture document compiled for {TaskId}", directive.TaskId);
 

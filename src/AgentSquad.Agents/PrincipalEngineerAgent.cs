@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -28,6 +29,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private readonly AgentRegistry _registry;
     private readonly IGateCheckService _gateCheck;
     private readonly EngineeringTaskIssueManager _taskManager;
+    private readonly SelfAssessmentService _selfAssessment;
+    private readonly IAgentReasoningLog _reasoningLog;
 
     private bool _planningComplete;
     private bool _planningSignalReceived;
@@ -88,6 +91,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
+        SelfAssessmentService selfAssessment,
+        IAgentReasoningLog reasoningLog,
         ILogger<PrincipalEngineerAgent> logger,
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
@@ -99,6 +104,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
+        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
         _taskManager = new EngineeringTaskIssueManager(github, logger);
     }
 
@@ -542,6 +549,32 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         var response = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         var structuredText = response.Content ?? "";
+
+        // Self-assessment: assess and refine the engineering plan
+        _reasoningLog.Log(new AgentReasoningEvent
+        {
+            AgentId = Identity.Id,
+            AgentDisplayName = Identity.DisplayName,
+            EventType = AgentReasoningEventType.Generating,
+            Phase = "Engineering Planning",
+            Summary = "Engineering plan generated from enhancement issues",
+            Iteration = 0,
+        });
+
+        var criteria = AssessmentCriteria.GetForRole(Identity.Role);
+        if (criteria is not null)
+        {
+            structuredText = await _selfAssessment.AssessAndRefineAsync(
+                Identity.Id,
+                Identity.DisplayName,
+                Identity.Role,
+                "Engineering Planning",
+                structuredText,
+                criteria,
+                $"Project: {Config.Project.Description}\nArchitecture doc available for reference",
+                chat,
+                ct);
+        }
 
         var parsedTasks = new List<EngineeringTask>();
         var issueMap = enhancementIssues.ToDictionary(i => i.Number);

@@ -80,6 +80,10 @@ builder.Services.AddSingleton<INotificationChannel, AgentSquad.Core.Notification
 builder.Services.AddSingleton<INotificationChannel, AgentSquad.Core.Notifications.SlackNotificationChannel>();
 builder.Services.AddSingleton<IGateCheckService, GateCheckService>();
 
+// Agentic loop: self-assessment and reasoning observability
+builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog, AgentSquad.Core.Agents.Reasoning.AgentReasoningLog>();
+builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.SelfAssessmentService>();
+
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();
 
@@ -224,6 +228,21 @@ configApi.MapPost("/cleanup/execute", async (HttpContext ctx, ConfigurationServi
     var result = await svc.ExecuteCleanupAsync(body?.Caveats, ct);
     return Results.Ok(result);
 });
+
+// ── Reasoning Log REST API (consumed by standalone Dashboard.Host) ──
+var reasoningApi = app.MapGroup("/api/reasoning").WithTags("Reasoning");
+
+reasoningApi.MapGet("/agents", (AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog log) =>
+    Results.Ok(log.GetAgentIds()));
+
+reasoningApi.MapGet("/events/{agentId}", (string agentId, AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog log) =>
+    Results.Ok(log.GetEvents(agentId)));
+
+reasoningApi.MapGet("/events/{agentId}/since", (string agentId, DateTime since, AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog log) =>
+    Results.Ok(log.GetEventsSince(agentId, since)));
+
+reasoningApi.MapGet("/recent", (AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog log, int? count) =>
+    Results.Ok(log.GetRecentEvents(count ?? 50)));
 
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");

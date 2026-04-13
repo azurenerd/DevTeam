@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -25,6 +26,8 @@ public class ProgramManagerAgent : AgentBase
     private readonly AgentRegistry _registry;
     private readonly AgentSquadConfig _config;
     private readonly IGateCheckService _gateCheck;
+    private readonly SelfAssessmentService _selfAssessment;
+    private readonly IAgentReasoningLog _reasoningLog;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
@@ -53,6 +56,8 @@ public class ProgramManagerAgent : AgentBase
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
+        SelfAssessmentService selfAssessment,
+        IAgentReasoningLog reasoningLog,
         ILogger<ProgramManagerAgent> logger)
         : base(identity, logger, memoryStore)
     {
@@ -66,6 +71,8 @@ public class ProgramManagerAgent : AgentBase
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
+        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
     }
 
     protected override Task OnInitializeAsync(CancellationToken ct)
@@ -1518,6 +1525,32 @@ public class ProgramManagerAgent : AgentBase
             var specResponse = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
             pmSpecDoc = specResponse.Content?.Trim() ?? "";
+            }
+
+            // Self-assessment: assess and refine the PM specification
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = Identity.Id,
+                AgentDisplayName = Identity.DisplayName,
+                EventType = AgentReasoningEventType.Generating,
+                Phase = "PM Specification",
+                Summary = $"PM Specification generated for '{projectName}'",
+                Iteration = 0,
+            });
+
+            var criteria = AssessmentCriteria.GetForRole(Identity.Role);
+            if (criteria is not null)
+            {
+                pmSpecDoc = await _selfAssessment.AssessAndRefineAsync(
+                    Identity.Id,
+                    Identity.DisplayName,
+                    Identity.Role,
+                    "PM Specification",
+                    pmSpecDoc,
+                    criteria,
+                    $"Project: {_config.Project.Description}\nResearch findings available in Research.md",
+                    chat,
+                    ct);
             }
 
             Logger.LogDebug("PM Spec document compiled for {ProjectName}", projectName);

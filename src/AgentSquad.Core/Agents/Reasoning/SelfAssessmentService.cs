@@ -1,0 +1,310 @@
+using AgentSquad.Core.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using Microsoft.SemanticKernel;
+using Microsoft.SemanticKernel.ChatCompletion;
+
+namespace AgentSquad.Core.Agents.Reasoning;
+
+/// <summary>
+/// Result of a self-assessment: whether the output passes quality criteria and what gaps remain.
+/// </summary>
+public record AssessmentResult
+{
+    public required bool Passed { get; init; }
+    public required IReadOnlyList<string> Gaps { get; init; }
+    public required string Summary { get; init; }
+}
+
+/// <summary>
+/// The agentic self-assessment loop. Wraps document generation with an assess → refine cycle.
+/// When enabled, agents generate output, assess it against role-specific criteria,
+/// and refine until criteria are met or max iterations reached.
+///
+/// This is the core "observe → act → iterate" pattern that makes agents self-correcting.
+/// All steps are logged to <see cref="IAgentReasoningLog"/> for human observability.
+/// </summary>
+public class SelfAssessmentService
+{
+    private readonly IAgentReasoningLog _reasoningLog;
+    private readonly AgenticLoopConfig _config;
+    private readonly ILogger<SelfAssessmentService> _logger;
+
+    public SelfAssessmentService(
+        IAgentReasoningLog reasoningLog,
+        IOptions<AgentSquadConfig> config,
+        ILogger<SelfAssessmentService> logger)
+    {
+        _reasoningLog = reasoningLog;
+        _config = config.Value.AgenticLoop;
+        _logger = logger;
+    }
+
+    /// <summary>
+    /// Run the agentic self-assessment loop on generated output.
+    /// If agentic loop is disabled for this role, returns the original output unchanged.
+    /// </summary>
+    /// <param name="agentId">Agent identity for logging.</param>
+    /// <param name="agentDisplayName">Human-readable agent name.</param>
+    /// <param name="role">Agent role (for per-role config check).</param>
+    /// <param name="phase">Current workflow phase name (for logging).</param>
+    /// <param name="generatedOutput">The initial output from the agent's generation step.</param>
+    /// <param name="assessmentCriteria">Role-specific criteria the output must meet.</param>
+    /// <param name="contextForRefinement">Additional context to include in refinement prompts (e.g., project description, upstream docs).</param>
+    /// <param name="chat">The chat completion service to use for assessment/refinement AI calls.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <returns>The final output (original if passed, or refined version).</returns>
+    public async Task<string> AssessAndRefineAsync(
+        string agentId,
+        string agentDisplayName,
+        AgentRole role,
+        string phase,
+        string generatedOutput,
+        string assessmentCriteria,
+        string contextForRefinement,
+        IChatCompletionService chat,
+        CancellationToken ct = default)
+    {
+        if (!_config.IsEnabledForRole(role))
+        {
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = agentId,
+                AgentDisplayName = agentDisplayName,
+                EventType = AgentReasoningEventType.Decision,
+                Phase = phase,
+                Summary = "Agentic loop disabled for this role — publishing first draft",
+                Iteration = 0,
+            });
+            return generatedOutput;
+        }
+
+        var roleName = role.ToString();
+        var maxIterations = _config.Roles.TryGetValue(roleName, out var roleConfig)
+            ? roleConfig.MaxIterations ?? _config.MaxIterations
+            : _config.MaxIterations;
+
+        var currentOutput = generatedOutput;
+
+        for (int iteration = 0; iteration < maxIterations; iteration++)
+        {
+            // --- ASSESS ---
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = agentId,
+                AgentDisplayName = agentDisplayName,
+                EventType = AgentReasoningEventType.Assessing,
+                Phase = phase,
+                Summary = $"Self-assessing output (iteration {iteration + 1}/{maxIterations})",
+                Iteration = iteration,
+            });
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            var assessment = await AssessOutputAsync(currentOutput, assessmentCriteria, chat, ct);
+            sw.Stop();
+
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = agentId,
+                AgentDisplayName = agentDisplayName,
+                EventType = AgentReasoningEventType.Assessing,
+                Phase = phase,
+                Summary = assessment.Passed
+                    ? $"Assessment PASSED — output meets all criteria"
+                    : $"Assessment found {assessment.Gaps.Count} gap(s)",
+                Detail = assessment.Summary,
+                Gaps = assessment.Gaps,
+                Passed = assessment.Passed,
+                Iteration = iteration,
+                Duration = sw.Elapsed,
+            });
+
+            if (assessment.Passed)
+            {
+                _reasoningLog.Log(new AgentReasoningEvent
+                {
+                    AgentId = agentId,
+                    AgentDisplayName = agentDisplayName,
+                    EventType = AgentReasoningEventType.Decision,
+                    Phase = phase,
+                    Summary = $"Output approved after {iteration + 1} assessment(s) — ready to publish",
+                    Iteration = iteration,
+                });
+
+                _logger.LogInformation(
+                    "[{Agent}] Self-assessment passed on iteration {Iteration}",
+                    agentDisplayName, iteration + 1);
+                return currentOutput;
+            }
+
+            // --- REFINE ---
+            _logger.LogInformation(
+                "[{Agent}] Self-assessment found {GapCount} gaps on iteration {Iteration}, refining",
+                agentDisplayName, assessment.Gaps.Count, iteration + 1);
+
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = agentId,
+                AgentDisplayName = agentDisplayName,
+                EventType = AgentReasoningEventType.Refining,
+                Phase = phase,
+                Summary = $"Refining output to address {assessment.Gaps.Count} gap(s)",
+                Detail = string.Join("\n", assessment.Gaps.Select((g, i) => $"{i + 1}. {g}")),
+                Iteration = iteration,
+            });
+
+            sw.Restart();
+            currentOutput = await RefineOutputAsync(
+                currentOutput, assessment, assessmentCriteria, contextForRefinement, chat, ct);
+            sw.Stop();
+
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = agentId,
+                AgentDisplayName = agentDisplayName,
+                EventType = AgentReasoningEventType.Refining,
+                Phase = phase,
+                Summary = $"Refinement complete (iteration {iteration + 1})",
+                Iteration = iteration,
+                Duration = sw.Elapsed,
+            });
+        }
+
+        // Max iterations exhausted — publish best effort
+        _reasoningLog.Log(new AgentReasoningEvent
+        {
+            AgentId = agentId,
+            AgentDisplayName = agentDisplayName,
+            EventType = AgentReasoningEventType.Decision,
+            Phase = phase,
+            Summary = $"Max iterations ({maxIterations}) reached — publishing best effort",
+            Iteration = maxIterations,
+        });
+
+        _logger.LogWarning(
+            "[{Agent}] Self-assessment exhausted {Max} iterations, publishing best effort",
+            agentDisplayName, maxIterations);
+        return currentOutput;
+    }
+
+    /// <summary>
+    /// Ask the AI to assess output against specific criteria.
+    /// Returns structured pass/fail with specific gaps.
+    /// </summary>
+    private async Task<AssessmentResult> AssessOutputAsync(
+        string output,
+        string criteria,
+        IChatCompletionService chat,
+        CancellationToken ct)
+    {
+        var history = new ChatHistory();
+        history.AddSystemMessage(
+            "You are a strict quality assessor. Your job is to evaluate a document against specific criteria " +
+            "and identify any gaps or weaknesses. Be thorough but fair — only flag genuine gaps, not stylistic preferences.\n\n" +
+            "Respond in this EXACT format:\n" +
+            "VERDICT: PASS or FAIL\n" +
+            "SUMMARY: One sentence overall assessment\n" +
+            "GAPS:\n" +
+            "- Gap description 1\n" +
+            "- Gap description 2\n" +
+            "(leave GAPS empty if PASS)");
+
+        history.AddUserMessage(
+            $"## Assessment Criteria\n{criteria}\n\n" +
+            $"## Document to Assess\n{output}");
+
+        var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        var responseText = response.Content ?? "";
+
+        return ParseAssessment(responseText);
+    }
+
+    /// <summary>
+    /// Ask the AI to refine the output, addressing the specific gaps found by assessment.
+    /// </summary>
+    private async Task<string> RefineOutputAsync(
+        string currentOutput,
+        AssessmentResult assessment,
+        string criteria,
+        string context,
+        IChatCompletionService chat,
+        CancellationToken ct)
+    {
+        var history = new ChatHistory();
+        history.AddSystemMessage(
+            "You are refining a document to address specific quality gaps identified by a reviewer. " +
+            "Produce the COMPLETE updated document — do not produce a partial diff or just the changed sections. " +
+            "Preserve all existing good content while addressing the gaps.");
+
+        var gapList = string.Join("\n", assessment.Gaps.Select((g, i) => $"{i + 1}. {g}"));
+
+        history.AddUserMessage(
+            $"## Quality Criteria\n{criteria}\n\n" +
+            (string.IsNullOrEmpty(context) ? "" : $"## Additional Context\n{context}\n\n") +
+            $"## Gaps to Address\n{gapList}\n\n" +
+            $"## Current Document (needs refinement)\n{currentOutput}\n\n" +
+            "Produce the complete refined document that addresses ALL the gaps above while preserving existing quality content.");
+
+        var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        return response.Content ?? currentOutput;
+    }
+
+    /// <summary>Parse the structured assessment response from the AI.</summary>
+    private static AssessmentResult ParseAssessment(string response)
+    {
+        var lines = response.Split('\n', StringSplitOptions.TrimEntries);
+        var passed = false;
+        var summary = "";
+        var gaps = new List<string>();
+        var inGaps = false;
+
+        foreach (var line in lines)
+        {
+            if (line.StartsWith("VERDICT:", StringComparison.OrdinalIgnoreCase))
+            {
+                var verdict = line["VERDICT:".Length..].Trim();
+                passed = verdict.Contains("PASS", StringComparison.OrdinalIgnoreCase);
+            }
+            else if (line.StartsWith("SUMMARY:", StringComparison.OrdinalIgnoreCase))
+            {
+                summary = line["SUMMARY:".Length..].Trim();
+            }
+            else if (line.StartsWith("GAPS:", StringComparison.OrdinalIgnoreCase))
+            {
+                inGaps = true;
+                // Check if there's content on the same line as GAPS:
+                var gapContent = line["GAPS:".Length..].Trim();
+                if (gapContent.StartsWith("- ") || gapContent.StartsWith("* "))
+                    gaps.Add(gapContent[2..].Trim());
+            }
+            else if (inGaps && (line.StartsWith("- ") || line.StartsWith("* ")))
+            {
+                var gap = line[2..].Trim();
+                if (!string.IsNullOrWhiteSpace(gap))
+                    gaps.Add(gap);
+            }
+            else if (inGaps && line.StartsWith("(") && line.Contains("empty"))
+            {
+                // "(leave GAPS empty if PASS)" or similar
+                continue;
+            }
+            else if (inGaps && !string.IsNullOrWhiteSpace(line) && !line.StartsWith("-") && !line.StartsWith("*"))
+            {
+                // Non-bullet line after GAPS section — might be numbered format: "1. Gap"
+                var numberMatch = System.Text.RegularExpressions.Regex.Match(line, @"^\d+\.\s+(.+)");
+                if (numberMatch.Success)
+                    gaps.Add(numberMatch.Groups[1].Value.Trim());
+            }
+        }
+
+        // Sanity: if verdict says PASS but there are gaps, trust the gaps
+        if (gaps.Count > 0) passed = false;
+
+        return new AssessmentResult
+        {
+            Passed = passed,
+            Gaps = gaps,
+            Summary = string.IsNullOrEmpty(summary) ? (passed ? "All criteria met." : "Gaps found.") : summary,
+        };
+    }
+}
