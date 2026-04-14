@@ -3,9 +3,9 @@
 @implements IDisposable
 
 <div class="cost-badge" title="@TooltipText">
-    <span class="cost-icon">💰</span>
-    <span class="cost-text">@FormatCost(_totalCost)</span>
-    <span class="cost-calls">@_totalCalls calls</span>
+    <span class="cost-amount">@FormatCost(_totalCost)</span>
+    <span class="cost-separator">·</span>
+    <span class="cost-calls">@_totalCalls call@(_totalCalls != 1 ? "s" : "")</span>
 </div>
 
 @code {

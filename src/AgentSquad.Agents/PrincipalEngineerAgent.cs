@@ -38,6 +38,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private bool _resourceRequestPending;
     private bool _recoveredReviewPRs;
     private bool _recoveredInProgressPR;
+    private bool _taskAssignmentGateCleared;
     private DateTime _lastResourceRequestTime = DateTime.MinValue;
     private static readonly TimeSpan SpawnCooldown = TimeSpan.FromSeconds(45);
     private bool _allTasksComplete;
@@ -977,10 +978,12 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 registeredEngineers.Add(new EngineerInfo { AgentId = agent.Identity.Id, Name = agent.Identity.DisplayName, Role = AgentRole.JuniorEngineer });
 
             // === Gate: TaskAssignment — human reviews task assignments ===
-            // Skip gate on resume if agents already have assignments
-            if (_agentAssignments.Count > 0)
+            // Only fire this gate once per lifetime; skip on resume if agents already have assignments
+            if (_taskAssignmentGateCleared || _agentAssignments.Count > 0)
             {
-                Logger.LogInformation("Agents already have assignments, skipping TaskAssignment gate (resume scenario)");
+                if (!_taskAssignmentGateCleared)
+                    Logger.LogInformation("Agents already have assignments, skipping TaskAssignment gate (resume scenario)");
+                _taskAssignmentGateCleared = true;
             }
             else
             {
@@ -989,6 +992,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     GateIds.TaskAssignment,
                     $"Ready to assign {_taskManager.PendingCount} engineering tasks to available engineers",
                     ct: ct);
+                _taskAssignmentGateCleared = true;
             }
 
             foreach (var engineer in registeredEngineers)
