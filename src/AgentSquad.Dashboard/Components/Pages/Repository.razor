@@ -241,7 +241,7 @@ else
     // PR state
     private List<AgentPullRequest> _allPrs = [];
     private List<AgentPullRequest> _filteredPrs = [];
-    private string _prFilter = "all";
+    private string _prFilter = "open";
     private int _prOpenCount => _allPrs.Count(p => p.State == "open" && !p.IsMerged);
     private int _prMergedCount => _allPrs.Count(p => p.IsMerged);
     private int _prClosedCount => _allPrs.Count(p => p.State != "open" && !p.IsMerged);
