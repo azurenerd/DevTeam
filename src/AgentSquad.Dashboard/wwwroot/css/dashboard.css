@@ -87,7 +87,7 @@ html, body {
 .sidebar {
     width: 260px;
     min-width: 260px;
-    background: linear-gradient(180deg, #131825 0%, #0f1219 100%);
+    background-color: #0d1117;
     border-right: 1px solid var(--border-subtle);
     position: sticky;
     top: 0;
@@ -123,8 +123,8 @@ main {
     width: 36px;
     height: 36px;
     border-radius: 10px;
-    background: linear-gradient(135deg, rgba(0, 212, 255, 0.2), rgba(0, 212, 255, 0.05));
-    border: 1px solid rgba(0, 212, 255, 0.25);
+    background-color: rgba(0, 212, 255, 0.1);
+    border: 1px solid rgba(0, 212, 255, 0.2);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -213,7 +213,7 @@ main {
 
 .nav-item a.active,
 .nav-item .nav-link.active {
-    background: linear-gradient(135deg, rgba(0, 212, 255, 0.1), rgba(0, 212, 255, 0.04));
+    background-color: rgba(0, 212, 255, 0.08);
     color: var(--accent-cyan);
     border-color: rgba(0, 212, 255, 0.15);
     font-weight: 600;
