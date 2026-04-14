@@ -134,6 +134,25 @@ public class AgentStateStore : IDisposable
                 updated_at        DATETIME NOT NULL DEFAULT (datetime('now'))
             );
 
+            CREATE TABLE IF NOT EXISTS gate_approvals (
+                gate_id     TEXT PRIMARY KEY,
+                approved_at DATETIME NOT NULL DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS gate_notifications (
+                id              TEXT PRIMARY KEY,
+                gate_id         TEXT NOT NULL,
+                gate_name       TEXT NOT NULL,
+                context         TEXT NOT NULL,
+                resource_number INTEGER,
+                resource_type   TEXT,
+                github_url      TEXT,
+                is_read         INTEGER NOT NULL DEFAULT 0,
+                is_resolved     INTEGER NOT NULL DEFAULT 0,
+                created_at      DATETIME NOT NULL DEFAULT (datetime('now')),
+                resolved_at     DATETIME
+            );
+
             INSERT OR IGNORE INTO run_metadata (key, value)
             VALUES ('run_started_utc', datetime('now'));
             """;
@@ -589,6 +608,9 @@ public class AgentStateStore : IDisposable
             DELETE FROM workflow_state;
             DELETE FROM agent_task_checkpoint;
             DELETE FROM processed_items;
+            DELETE FROM gate_approvals;
+            DELETE FROM gate_notifications;
+            DELETE FROM run_metadata WHERE key = 'project_complete_notified';
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -635,6 +657,155 @@ public class AgentStateStore : IDisposable
             );
         }
         return result;
+    }
+
+    // ── Gate Approvals ──────────────────────────────────────────────
+
+    /// <summary>Save a gate approval to SQLite.</summary>
+    public void SaveGateApproval(string gateId, DateTime approvedAt)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO gate_approvals (gate_id, approved_at)
+                VALUES (@id, @at)
+            ON CONFLICT(gate_id) DO UPDATE SET approved_at = excluded.approved_at;
+            """;
+        cmd.Parameters.AddWithValue("@id", gateId);
+        cmd.Parameters.AddWithValue("@at", approvedAt);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Load all persisted gate approvals.</summary>
+    public Dictionary<string, DateTime> LoadGateApprovals()
+    {
+        var result = new Dictionary<string, DateTime>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT gate_id, approved_at FROM gate_approvals;";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result[reader.GetString(0)] = reader.GetDateTime(1);
+        }
+        return result;
+    }
+
+    /// <summary>Clear all gate approvals (for reset).</summary>
+    public void ClearGateApprovals()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM gate_approvals;";
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Gate Notifications ───────────────────────────────────────────
+
+    /// <summary>Save a gate notification to SQLite.</summary>
+    public void SaveGateNotification(string id, string gateId, string gateName, string context,
+        int? resourceNumber, string? resourceType, string? githubUrl)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT OR IGNORE INTO gate_notifications (id, gate_id, gate_name, context, resource_number, resource_type, github_url)
+            VALUES (@id, @gateId, @gateName, @context, @resNum, @resType, @url);
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@gateId", gateId);
+        cmd.Parameters.AddWithValue("@gateName", gateName);
+        cmd.Parameters.AddWithValue("@context", context);
+        cmd.Parameters.AddWithValue("@resNum", (object?)resourceNumber ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@resType", (object?)resourceType ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@url", (object?)githubUrl ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Update notification read/resolved status.</summary>
+    public void UpdateGateNotification(string id, bool isRead, bool isResolved, DateTime? resolvedAt)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            UPDATE gate_notifications
+            SET is_read = @read, is_resolved = @resolved, resolved_at = @resolvedAt
+            WHERE id = @id;
+            """;
+        cmd.Parameters.AddWithValue("@id", id);
+        cmd.Parameters.AddWithValue("@read", isRead ? 1 : 0);
+        cmd.Parameters.AddWithValue("@resolved", isResolved ? 1 : 0);
+        cmd.Parameters.AddWithValue("@resolvedAt", (object?)resolvedAt ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Load all gate notifications from SQLite.</summary>
+    public List<(string Id, string GateId, string GateName, string Context, int? ResourceNumber,
+        string? ResourceType, string? GitHubUrl, bool IsRead, bool IsResolved, DateTime CreatedAt, DateTime? ResolvedAt)>
+        LoadGateNotifications()
+    {
+        var result = new List<(string, string, string, string, int?, string?, string?, bool, bool, DateTime, DateTime?)>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, gate_id, gate_name, context, resource_number, resource_type, github_url,
+                   is_read, is_resolved, created_at, resolved_at
+            FROM gate_notifications
+            ORDER BY created_at DESC;
+            """;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result.Add((
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.GetInt32(7) != 0,
+                reader.GetInt32(8) != 0,
+                reader.GetDateTime(9),
+                reader.IsDBNull(10) ? null : reader.GetDateTime(10)
+            ));
+        }
+        return result;
+    }
+
+    /// <summary>Remove resolved notifications older than cutoff.</summary>
+    public void PurgeResolvedNotifications(DateTime cutoff)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM gate_notifications WHERE is_resolved = 1 AND resolved_at < @cutoff;";
+        cmd.Parameters.AddWithValue("@cutoff", cutoff);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Clear all gate notifications (for reset).</summary>
+    public void ClearGateNotifications()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM gate_notifications;";
+        cmd.ExecuteNonQuery();
+    }
+
+    // ── Run Metadata helpers ─────────────────────────────────────────
+
+    /// <summary>Get a value from run_metadata by key.</summary>
+    public string? GetRunMetadata(string key)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT value FROM run_metadata WHERE key = @key;";
+        cmd.Parameters.AddWithValue("@key", key);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    /// <summary>Set a value in run_metadata (upsert).</summary>
+    public void SetRunMetadata(string key, string value)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO run_metadata (key, value) VALUES (@key, @value)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            """;
+        cmd.Parameters.AddWithValue("@key", key);
+        cmd.Parameters.AddWithValue("@value", value);
+        cmd.ExecuteNonQuery();
     }
 
     public void Dispose()

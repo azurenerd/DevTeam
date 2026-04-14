@@ -1,5 +1,6 @@
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -18,6 +19,7 @@ public class GateNotificationService : BackgroundService
     private readonly List<INotificationChannel> _channels;
     private readonly IServiceProvider _serviceProvider;
     private readonly AgentSquadConfig _config;
+    private readonly AgentStateStore? _stateStore;
     private readonly ILogger<GateNotificationService> _logger;
     private readonly object _lock = new();
 
@@ -41,12 +43,15 @@ public class GateNotificationService : BackgroundService
         IEnumerable<INotificationChannel> channels,
         IServiceProvider serviceProvider,
         IOptions<AgentSquadConfig> config,
-        ILogger<GateNotificationService> logger)
+        ILogger<GateNotificationService> logger,
+        AgentStateStore? stateStore = null)
     {
         _channels = channels.ToList();
         _serviceProvider = serviceProvider;
         _config = config.Value;
         _logger = logger;
+        _stateStore = stateStore;
+        RestoreFromStore();
     }
 
     // -- Queries --
@@ -129,6 +134,10 @@ public class GateNotificationService : BackgroundService
             _notifications.Add(notification);
         }
 
+        // Persist to SQLite
+        _stateStore?.SaveGateNotification(notification.Id, notification.GateId, notification.GateName,
+            notification.Context, notification.ResourceNumber, notification.ResourceType, notification.GitHubUrl);
+
         _logger.LogInformation("Gate notification added: {GateName} (#{Resource})",
             gateName, resourceNumber);
 
@@ -157,6 +166,7 @@ public class GateNotificationService : BackgroundService
             if (notification is not null)
             {
                 notification.IsRead = true;
+                _stateStore?.UpdateGateNotification(notification.Id, notification.IsRead, notification.IsResolved, notification.ResolvedAt);
                 _logger.LogDebug("Notification {Id} marked as read", notificationId);
             }
         }
@@ -169,7 +179,10 @@ public class GateNotificationService : BackgroundService
         lock (_lock)
         {
             foreach (var n in _notifications.Where(n => !n.IsRead))
+            {
                 n.IsRead = true;
+                _stateStore?.UpdateGateNotification(n.Id, n.IsRead, n.IsResolved, n.ResolvedAt);
+            }
         }
         OnChange?.Invoke();
     }
@@ -189,6 +202,7 @@ public class GateNotificationService : BackgroundService
             {
                 n.IsResolved = true;
                 n.ResolvedAt = DateTime.UtcNow;
+                _stateStore?.UpdateGateNotification(n.Id, n.IsRead, n.IsResolved, n.ResolvedAt);
                 changed = true;
             }
         }
@@ -208,6 +222,7 @@ public class GateNotificationService : BackgroundService
         {
             _notifications.RemoveAll(n => n.IsResolved && n.ResolvedAt < cutoff);
         }
+        _stateStore?.PurgeResolvedNotifications(cutoff);
         OnChange?.Invoke();
     }
 
@@ -336,6 +351,7 @@ public class GateNotificationService : BackgroundService
             // All clear — project is done. Set flag BEFORE creating the notification
             // to guarantee we never fire twice even if AddNotificationAsync throws.
             _projectCompleteNotified = true;
+            _stateStore?.SetRunMetadata("project_complete_notified", "true");
 
             _logger.LogInformation("🎉 Project complete — no open PRs or issues remain");
 
@@ -370,6 +386,50 @@ public class GateNotificationService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Error checking project completion status");
+        }
+    }
+
+    // -- Restore from SQLite --
+
+    private void RestoreFromStore()
+    {
+        if (_stateStore is null) return;
+        try
+        {
+            // Restore notifications
+            var saved = _stateStore.LoadGateNotifications();
+            foreach (var n in saved)
+            {
+                _notifications.Add(new GateNotification
+                {
+                    Id = n.Id,
+                    GateId = n.GateId,
+                    GateName = n.GateName,
+                    Context = n.Context,
+                    ResourceNumber = n.ResourceNumber,
+                    ResourceType = n.ResourceType,
+                    GitHubUrl = n.GitHubUrl,
+                    CreatedAt = n.CreatedAt,
+                    IsRead = n.IsRead,
+                    IsResolved = n.IsResolved,
+                    ResolvedAt = n.ResolvedAt,
+                });
+            }
+
+            if (saved.Count > 0)
+                _logger.LogInformation("Restored {Count} gate notification(s) from SQLite", saved.Count);
+
+            // Restore project-complete flag
+            var flag = _stateStore.GetRunMetadata("project_complete_notified");
+            if (flag == "true")
+            {
+                _projectCompleteNotified = true;
+                _logger.LogInformation("Restored project-complete flag from SQLite (will not re-notify)");
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to restore gate notifications from SQLite");
         }
     }
 

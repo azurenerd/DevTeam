@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text.Json;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Notifications;
+using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -25,6 +26,7 @@ public class GateCheckService : IGateCheckService
     private readonly IGitHubService _github;
     private readonly GateNotificationService? _notificationService;
     private readonly ModelRegistry? _modelRegistry;
+    private readonly AgentStateStore? _stateStore;
     private readonly ILogger<GateCheckService> _logger;
 
     private HumanInteractionConfig Config => _configMonitor.CurrentValue.HumanInteraction;
@@ -34,13 +36,16 @@ public class GateCheckService : IGateCheckService
         IGitHubService github,
         ILogger<GateCheckService> logger,
         GateNotificationService? notificationService = null,
-        ModelRegistry? modelRegistry = null)
+        ModelRegistry? modelRegistry = null,
+        AgentStateStore? stateStore = null)
     {
         _configMonitor = config;
         _github = github;
         _logger = logger;
         _notificationService = notificationService;
         _modelRegistry = modelRegistry;
+        _stateStore = stateStore;
+        RestoreApprovals();
     }
 
     public bool IsEnabled => Config.Enabled;
@@ -218,6 +223,7 @@ public class GateCheckService : IGateCheckService
         if (_localApprovals.TryAdd(gateId, DateTime.UtcNow))
         {
             _logger.LogInformation("Gate {GateId} approved locally via dashboard/API", gateId);
+            _stateStore?.SaveGateApproval(gateId, DateTime.UtcNow);
             _notificationService?.Resolve(gateId);
         }
         else
@@ -303,6 +309,25 @@ public class GateCheckService : IGateCheckService
             if (id == gateId) return name;
         }
         return gateId;
+    }
+
+    private void RestoreApprovals()
+    {
+        if (_stateStore is null) return;
+        try
+        {
+            var saved = _stateStore.LoadGateApprovals();
+            foreach (var (gateId, approvedAt) in saved)
+            {
+                _localApprovals.TryAdd(gateId, approvedAt);
+            }
+            if (saved.Count > 0)
+                _logger.LogInformation("Restored {Count} gate approval(s) from SQLite", saved.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to restore gate approvals from SQLite");
+        }
     }
 
     /// <summary>
