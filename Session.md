@@ -53,11 +53,21 @@ This is only available in embedded mode (Runner-hosted dashboard on port 5050).
 $headers = @{ Authorization = "token $pat"; Accept = "application/vnd.github+json" }
 Invoke-RestMethod "https://api.github.com/rate_limit" -Headers $headers | Select-Object -ExpandProperty rate
 
-# Must all return 0 / empty
+# Must all return 0 — MUST PAGINATE (GitHub returns max 100/page, runs often create 200+ issues)
 $repo = $settings.AgentSquad.Project.GitHubRepo
-(Invoke-RestMethod "https://api.github.com/repos/$repo/issues?state=open" -Headers $headers) | Where-Object { -not $_.pull_request } | Measure-Object
-(Invoke-RestMethod "https://api.github.com/repos/$repo/pulls?state=open" -Headers $headers) | Measure-Object
+$page = 1; $total = 0
+do {
+    $batch = Invoke-RestMethod "https://api.github.com/repos/$repo/issues?state=open&per_page=100&page=$page" -Headers $headers
+    $total += $batch.Count; $page++
+} while ($batch.Count -eq 100)
+Write-Host "Open issues+PRs: $total"  # MUST be 0
+
+# Branches: must only be 'main'
+$branches = Invoke-RestMethod "https://api.github.com/repos/$repo/branches?per_page=100" -Headers $headers
+Write-Host "Branches: $($branches.Count) ($($branches.name -join ', '))"  # MUST be 1 (main)
 ```
+
+> ⚠️ **CRITICAL: Always paginate GitHub API calls during reset.** A typical agent run creates 200+ issues. The API returns max 100 per page. A single non-paginated fetch will miss items and leave the repo dirty. When closing items, re-fetch page 1 each iteration (closing shifts items between pages).
 
 **Important:** The PAT is in `src/AgentSquad.Runner/appsettings.json` under `AgentSquad.Project.GitHubToken`. Note: this user is an Enterprise Managed User (EMU) — `gh issue create` may fail with 403. Use the runner's Octokit integration or direct REST API with the PAT instead.
 

@@ -26,6 +26,7 @@
 16. [Human Gate Configuration Must Be Enforced on ALL Code Paths](#16-human-gate-configuration-must-be-enforced-on-all-code-paths)
 17. [Port Conflicts When Multiple Agents Run Apps Simultaneously](#17-port-conflicts-when-multiple-agents-run-apps-simultaneously)
 18. [Standalone Dashboard Data Hydration from SQLite](#18-standalone-dashboard-data-hydration-from-sqlite)
+19. [GitHub API Pagination Is Mandatory During Reset](#19-github-api-pagination-is-mandatory-during-reset)
 
 ---
 
@@ -528,6 +529,36 @@ The agents will not "figure out" what you want from a high-level description. Th
 
 ### Takeaway:
 **When a read-only satellite process needs data from a write-primary process, plan the data contract.** Don't assume the schema has the right tables — check which tables actually get populated during operation. Accumulated historical records need filtering by run identity (boot timestamp, run ID, etc.) to avoid showing stale agents.
+
+---
+
+---
+
+## 19. GitHub API Pagination Is Mandatory During Reset
+
+**Lesson:** GitHub's REST API returns a maximum of 100 items per page. A typical agent run creates 200+ issues, 20+ PRs, and 20+ branches. A single non-paginated API call during reset silently misses everything beyond page 1, leaving the repo dirty for the next run.
+
+### What happened:
+- Reset script fetched `GET /repos/{owner}/{repo}/issues?state=open&per_page=100` — returned 100 items (page 1 of 2+).
+- Script closed all 100 items and reported "0 remaining" because the verification also only checked page 1.
+- 9 issues on page 2 were never seen or closed.
+- User discovered the leftover issues when checking the repo on another machine.
+
+### Why this keeps happening:
+- Copilot CLI sessions lose context through compaction — the "always paginate" detail gets lost.
+- One-shot API calls look correct because they return data successfully; there's no error indicating pagination was needed.
+- The verification step had the same bug as the cleanup step, so it confirmed "success" when the repo was still dirty.
+
+### Technical solution:
+- **Always use a pagination loop** for any GitHub API call during reset:
+  ```
+  do { fetch page; process items; page++ } while (batch.Count == per_page)
+  ```
+- **When closing items, always re-fetch page 1** each iteration (closing shifts items between pages — fetching page 2 after closing page 1 items skips newly-shifted items).
+- **Verification must also paginate** — the check is useless if it has the same bug as the cleanup.
+
+### Takeaway:
+**Any GitHub API call that could return more than 100 results MUST paginate.** This includes issues, PRs, branches, commits, and comments. The failure mode is silent — you get valid data back, just not all of it. Build the pagination loop once and reuse it everywhere.
 
 ---
 
