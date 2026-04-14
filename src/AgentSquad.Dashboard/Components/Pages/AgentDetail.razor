@@ -95,13 +95,13 @@ else
                                 <span class="detail-task-text">@_agent.StatusReason</span>
                             </div>
                         }
-                        @if (_agent.AssignedPullRequest is not null)
+                        @if (GetEffectivePrNumber() is { } detectedPr)
                         {
-                            var prUrl = $"https://github.com/{DataService.RepositoryFullName}/pull/{_agent.AssignedPullRequest}";
+                            var prUrl = $"https://github.com/{DataService.RepositoryFullName}/pull/{detectedPr}";
                             <div class="detail-task-active">
                                 <span class="detail-field-label">Pull Request</span>
                                 <a class="detail-pr-link" href="@prUrl" target="_blank" rel="noopener noreferrer">
-                                    PR #@_agent.AssignedPullRequest
+                                    PR #@detectedPr
                                     <span class="external-icon">↗</span>
                                 </a>
                             </div>
@@ -381,6 +381,16 @@ else
         < 1_000_000 => $"{tokens / 1000.0:N1}K",
         _ => $"{tokens / 1_000_000.0:N2}M"
     };
+
+    private string? GetEffectivePrNumber()
+        => ExtractPrNumber(_agent?.StatusReason) ?? _agent?.AssignedPullRequest;
+
+    private static string? ExtractPrNumber(string? statusReason)
+    {
+        if (statusReason is null) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(statusReason, @"PR #(\d+)");
+        return match.Success ? match.Groups[1].Value : null;
+    }
 
     private static string FormatCost(decimal cost) => cost switch
     {
