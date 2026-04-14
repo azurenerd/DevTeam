@@ -463,12 +463,39 @@ public partial class PullRequestWorkflow
 
         var fullPrTitle = $"{agentName}: {prTitle}";
 
-        // Idempotency: check if PR already exists
+        // Idempotency: check if an open PR already exists
         var existing = await FindExistingPullRequestAsync(fullPrTitle, ct);
         if (existing is not null)
         {
             _logger.LogInformation("Document PR '{Title}' already exists as #{Number}", fullPrTitle, existing.Number);
             return existing;
+        }
+
+        // Check if the document was already merged to main by a prior run's PR.
+        // This prevents creating duplicate PRs after a restart when the previous PR was already approved+merged.
+        try
+        {
+            var existingContent = await _github.GetFileContentAsync(documentPath, _defaultBranch, ct);
+            if (!string.IsNullOrWhiteSpace(existingContent))
+            {
+                _logger.LogInformation(
+                    "Document {Path} already exists on {Branch} — prior PR was already merged, skipping PR creation",
+                    documentPath, _defaultBranch);
+                return new AgentPullRequest
+                {
+                    Number = 0,
+                    Title = fullPrTitle,
+                    HeadBranch = _defaultBranch,
+                    BaseBranch = _defaultBranch,
+                    Url = "",
+                    MergedAt = DateTime.UtcNow, // Signals IsMerged = true
+                    Labels = new List<string>()
+                };
+            }
+        }
+        catch
+        {
+            // File doesn't exist on main — proceed to create PR
         }
 
         // 1. Create feature branch
