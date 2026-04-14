@@ -29,7 +29,7 @@ public sealed class HttpGateNotificationService : IDisposable
     public void Start()
     {
         _pollTimer = new Timer(async _ => await PollAsync(), null,
-            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(10));
     }
 
     public int UnreadCount => _unreadCount;

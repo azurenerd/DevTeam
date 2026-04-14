@@ -16,10 +16,10 @@ public class GitHubService : IGitHubService
     private readonly RateLimitManager _rl;
 
     // --- Shared in-process cache for high-frequency list queries ---
-    // Multiple agents poll GetOpenIssuesAsync/GetOpenPullRequestsAsync every 30s.
-    // Without caching, 7 agents × 2-5 list calls/cycle = 3000-5000 API calls/hour,
-    // blowing through the 5000/hr GitHub rate limit. A 30s TTL cache reduces this by ~90%.
-    private static readonly TimeSpan ListCacheTtl = TimeSpan.FromSeconds(30);
+    // Multiple agents poll GetOpenIssuesAsync/GetOpenPullRequestsAsync every 60s.
+    // Without caching, 7 agents × 2-5 list calls/cycle = many API calls/hour,
+    // blowing through the 5000/hr GitHub rate limit. A 60s TTL cache reduces this by ~90%.
+    private static readonly TimeSpan ListCacheTtl = TimeSpan.FromSeconds(60);
 
     private IReadOnlyList<AgentIssue>? _openIssuesCache;
     private DateTime _openIssuesCacheTime;
@@ -51,12 +51,12 @@ public class GitHubService : IGitHubService
     // Repo tree cache: keyed by branch name (60s TTL — tree data changes less frequently)
     private readonly Dictionary<string, CacheEntry<IReadOnlyList<string>>> _treeCache = new();
     private readonly SemaphoreSlim _treeCacheLock = new(1, 1);
-    private static readonly TimeSpan TreeCacheTtl = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan TreeCacheTtl = TimeSpan.FromSeconds(120);
 
     // File content cache: keyed by "path|branch"
     private readonly Dictionary<string, CacheEntry<string?>> _fileContentCache = new();
     private readonly SemaphoreSlim _fileContentCacheLock = new(1, 1);
-    private static readonly TimeSpan FileContentCacheTtl = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan FileContentCacheTtl = TimeSpan.FromSeconds(60);
 
     // Issue comments cache: keyed by issue number
     private readonly Dictionary<int, CacheEntry<IReadOnlyList<Models.IssueComment>>> _issueCommentsCache = new();

@@ -110,7 +110,7 @@ public class LimitsConfig
     }
 
     public int MaxDailyTokenBudget { get; set; } = 1_000_000;
-    public int GitHubPollIntervalSeconds { get; set; } = 30;
+    public int GitHubPollIntervalSeconds { get; set; } = 60;
     public int AgentTimeoutMinutes { get; set; } = 60;
     public int MaxConcurrentAgents { get; set; } = 10;
 

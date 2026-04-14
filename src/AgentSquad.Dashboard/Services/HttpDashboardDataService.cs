@@ -41,7 +41,7 @@ public sealed class HttpDashboardDataService : IDashboardDataService, IHostedSer
     public Task StartAsync(CancellationToken ct)
     {
         _pollTimer = new Timer(async _ => await PollRunnerAsync(), null,
-            TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5));
+            TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
         return Task.CompletedTask;
     }
 

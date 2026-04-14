@@ -32,7 +32,7 @@ public class GateNotificationService : BackgroundService
     /// Deliberately conservative (60s) to avoid exhausting rate limits.
     /// With N pending gates, this costs N API calls per minute.
     /// </summary>
-    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(60);
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(120);
 
     /// <summary>Raised when a notification is added, read, or resolved.</summary>
     public event Action? OnChange;
