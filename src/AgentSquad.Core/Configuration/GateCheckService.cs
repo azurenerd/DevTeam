@@ -232,7 +232,7 @@ public class GateCheckService : IGateCheckService
         string gateId, int resourceNumber, CancellationToken ct = default)
     {
         if (!Config.RequiresHuman(gateId))
-            return GateStatus.Approved;
+            return GateStatus.NotActivated;
 
         if (_localApprovals.ContainsKey(gateId))
             return GateStatus.Approved;
