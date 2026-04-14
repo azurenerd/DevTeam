@@ -202,7 +202,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     // (tasks to assign or PRs to review), not just because workers are busy
                     var hasActionableWork = isLeader
                         ? (pending > 0 || _reviewQueue.Count > 0)
-                        : (pending > 0 || _reviewQueue.Count > 0 || !_allTasksComplete || !_integrationPrCreated);
+                        : (CurrentPrNumber is not null || _reviewQueue.Count > 0);
                     var leaderTag = isLeader ? "Leader" : $"Worker#{Identity.Rank}";
                     var statusVerb = isLeader ? "Orchestrating" : "Working on";
 

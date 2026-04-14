@@ -378,6 +378,38 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                     roleCounters.TryGetValue(role, out var idx);
                     roleCounters[role] = idx + 1;
 
+                    // Parse actual status from activity details
+                    var inferredStatus = AgentStatus.Online;
+                    var statusReason = activity.Details ?? "";
+                    if (activity.EventType == "status" && !string.IsNullOrEmpty(activity.Details))
+                    {
+                        // Activity details format: "Working → Idle: reason" or "Idle → Working: reason"
+                        var details = activity.Details;
+                        if (details.Contains("→"))
+                        {
+                            var arrow = details.IndexOf("→", StringComparison.Ordinal);
+                            var afterArrow = details[(arrow + 1)..].Trim();
+                            var colonIdx = afterArrow.IndexOf(':');
+                            var targetState = colonIdx >= 0 ? afterArrow[..colonIdx].Trim() : afterArrow.Trim();
+                            statusReason = colonIdx >= 0 ? afterArrow[(colonIdx + 1)..].Trim() : "";
+
+                            inferredStatus = targetState switch
+                            {
+                                "Idle" => AgentStatus.Idle,
+                                "Working" => AgentStatus.Working,
+                                "Initializing" => AgentStatus.Initializing,
+                                "Online" => AgentStatus.Online,
+                                _ => AgentStatus.Idle
+                            };
+                        }
+                    }
+                    else if (!string.IsNullOrEmpty(activity.Details))
+                    {
+                        // Non-status events (task, build, test) mean the agent is working
+                        inferredStatus = AgentStatus.Working;
+                        statusReason = activity.Details;
+                    }
+
                     _agentCache[agentId] = new AgentSnapshot
                     {
                         Id = agentId,
@@ -389,8 +421,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                             AgentRole.JuniorEngineer => "budget",
                             _ => "standard"
                         },
-                        Status = AgentStatus.Working,
-                        StatusReason = activity.Details,
+                        Status = inferredStatus,
+                        StatusReason = statusReason,
                         CreatedAt = activity.Timestamp != default ? activity.Timestamp : DateTime.UtcNow,
                         ActiveModel = usage.LastModel ?? "",
                         LastStatusChange = activity.Timestamp != default ? activity.Timestamp : DateTime.UtcNow,
