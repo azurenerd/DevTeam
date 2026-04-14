@@ -152,6 +152,32 @@ public class AgentStateStore : IDisposable
     /// </summary>
     public DateTime RunStartedUtc { get; private set; }
 
+    /// <summary>The UTC timestamp of the most recent runner boot.</summary>
+    public DateTime LastBootUtc { get; private set; }
+
+    /// <summary>Record the current time as the runner's boot time. Call on each runner startup.</summary>
+    public void RecordBoot()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO run_metadata (key, value) VALUES ('last_boot_utc', datetime('now'))
+            ON CONFLICT(key) DO UPDATE SET value = datetime('now');
+            """;
+        cmd.ExecuteNonQuery();
+        LastBootUtc = DateTime.UtcNow;
+    }
+
+    /// <summary>Read the last boot time from the database.</summary>
+    public DateTime GetLastBootUtc()
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT value FROM run_metadata WHERE key = 'last_boot_utc'";
+        var result = cmd.ExecuteScalar();
+        if (result is string s)
+            return DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AssumeUniversal).ToUniversalTime();
+        return RunStartedUtc; // fallback to first run start
+    }
+
     /// <summary>Save or update an agent's checkpoint state.</summary>
     public async Task SaveCheckpointAsync(
         string agentId,
@@ -203,6 +229,52 @@ public class AgentStateStore : IDisposable
             CurrentTask: reader.IsDBNull(3) ? null : reader.GetString(3),
             SerializedState: reader.IsDBNull(4) ? null : reader.GetString(4),
             Timestamp: reader.GetDateTime(5));
+    }
+
+    /// <summary>Load all agent checkpoints from the database.</summary>
+    public async Task<IReadOnlyList<AgentCheckpoint>> LoadAllCheckpointsAsync(CancellationToken ct = default)
+    {
+        var results = new List<AgentCheckpoint>();
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT agent_id, role, status, current_task, serialized_state, last_checkpoint
+            FROM agent_state;
+            """;
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            results.Add(new AgentCheckpoint(
+                AgentId: reader.GetString(0),
+                Role: reader.GetString(1),
+                Status: reader.GetString(2),
+                CurrentTask: reader.IsDBNull(3) ? null : reader.GetString(3),
+                SerializedState: reader.IsDBNull(4) ? null : reader.GetString(4),
+                Timestamp: reader.GetDateTime(5)));
+        }
+        return results;
+    }
+
+    /// <summary>Get the most recent activity entry per agent.</summary>
+    public Dictionary<string, (string EventType, string Details, DateTime Timestamp)> GetLatestActivityPerAgent()
+    {
+        var result = new Dictionary<string, (string, string, DateTime)>();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT a.agent_id, a.event_type, a.details, a.timestamp
+            FROM activity_log a
+            INNER JOIN (SELECT agent_id, MAX(id) as max_id FROM activity_log GROUP BY agent_id) latest
+                ON a.id = latest.max_id;
+            """;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result[reader.GetString(0)] = (
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetDateTime(3));
+        }
+        return result;
     }
 
     /// <summary>Append an entry to the activity log.</summary>

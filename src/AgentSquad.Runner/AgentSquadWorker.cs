@@ -1,6 +1,7 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
+using AgentSquad.Core.Persistence;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Options;
 
@@ -13,6 +14,7 @@ public class AgentSquadWorker : BackgroundService
     private readonly WorkflowStateMachine _workflow;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly IGateCheckService _gateCheck;
+    private readonly AgentStateStore _stateStore;
     private readonly ILogger<AgentSquadWorker> _logger;
     private readonly AgentSquadConfig _config;
     private readonly List<Task> _agentTasks = new();
@@ -23,6 +25,7 @@ public class AgentSquadWorker : BackgroundService
         WorkflowStateMachine workflow,
         PullRequestWorkflow prWorkflow,
         IGateCheckService gateCheck,
+        AgentStateStore stateStore,
         ILogger<AgentSquadWorker> logger,
         IOptions<AgentSquadConfig> config)
     {
@@ -31,6 +34,7 @@ public class AgentSquadWorker : BackgroundService
         _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
@@ -39,6 +43,9 @@ public class AgentSquadWorker : BackgroundService
     {
         _logger.LogInformation("AgentSquad starting...");
         _logger.LogInformation("Project: {Name}", _config.Project.Name);
+
+        // Record boot time so the standalone dashboard can filter to current-run agents
+        _stateStore.RecordBoot();
 
         Console.WriteLine(@"
    ___                    __  ____                    __

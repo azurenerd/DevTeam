@@ -20,6 +20,32 @@ public class PlaywrightRunner
     }
 
     /// <summary>
+    /// Derive a unique port for the app under test based on the workspace path.
+    /// This prevents port conflicts when multiple agents run apps simultaneously.
+    /// Port range: 5100–5899 (800 slots).
+    /// </summary>
+    internal static int DeriveUniquePort(string workspacePath, int configuredPort = 5100)
+    {
+        var hash = Math.Abs(workspacePath.GetHashCode());
+        return 5100 + (hash % 800);
+    }
+
+    /// <summary>
+    /// Replace the port in a URL and optionally in an app start command.
+    /// </summary>
+    private static (string url, string? command) RewritePort(string baseUrl, string? appCommand, int newPort)
+    {
+        var uri = new Uri(baseUrl);
+        var newUrl = $"{uri.Scheme}://localhost:{newPort}";
+
+        string? newCommand = appCommand;
+        if (appCommand is not null && uri.Port > 0)
+            newCommand = appCommand.Replace($":{uri.Port}", $":{newPort}");
+
+        return (newUrl, newCommand);
+    }
+
+    /// <summary>
     /// Ensure Playwright browsers are installed in the shared cache directory.
     /// Installs Chromium only (smallest, ~80MB). Idempotent — no-op if already present.
     /// </summary>
@@ -273,7 +299,15 @@ public class PlaywrightRunner
         CancellationToken ct = default)
     {
         var browsersPath = config.GetPlaywrightBrowsersPath();
-        var baseUrl = config.AppBaseUrl;
+
+        // Derive unique port per workspace to prevent conflicts when agents run simultaneously
+        var uniquePort = DeriveUniquePort(workspacePath);
+        var (baseUrl, rewrittenCommand) = RewritePort(config.AppBaseUrl, config.AppStartCommand, uniquePort);
+        _logger.LogInformation("UI tests using unique port {Port} (workspace: {Path})", uniquePort, workspacePath);
+
+        // Temporarily override config command with port-rewritten version
+        var originalCommand = config.AppStartCommand;
+        if (rewrittenCommand is not null) config.AppStartCommand = rewrittenCommand;
 
         // Environment variables for headless Playwright
         var envVars = new Dictionary<string, string>
@@ -281,7 +315,8 @@ public class PlaywrightRunner
             ["PLAYWRIGHT_BROWSERS_PATH"] = browsersPath,
             ["HEADED"] = config.PlaywrightHeadless ? "0" : "1",
             ["BASE_URL"] = baseUrl,
-            ["BROWSER"] = "chromium"
+            ["BROWSER"] = "chromium",
+            ["ASPNETCORE_URLS"] = baseUrl
         };
 
         // Video recording: set env vars so test fixtures can configure BrowserNewContextOptions
@@ -414,6 +449,9 @@ public class PlaywrightRunner
                     appProcess.Dispose();
                 }
             }
+
+            // Restore original command
+            config.AppStartCommand = originalCommand;
         }
     }
 
@@ -858,6 +896,7 @@ public class PlaywrightRunner
         CancellationToken ct = default)
     {
         Process? appProcess = null;
+        string? originalCommand = config.AppStartCommand;
         try
         {
             var browsersPath = config.GetPlaywrightBrowsersPath();
@@ -871,6 +910,11 @@ public class PlaywrightRunner
             // Ensure data files exist so the app doesn't show an error page
             EnsureSampleDataExists(workspacePath);
 
+            // Derive unique port per workspace to prevent conflicts when agents run simultaneously
+            var uniquePort = DeriveUniquePort(workspacePath);
+            var (portUrl, _) = RewritePort(config.AppBaseUrl, null, uniquePort);
+            _logger.LogInformation("Screenshot using unique port {Port} (workspace: {Path})", uniquePort, workspacePath);
+
             // Derive or use configured app start command
             var appStartCommand = config.AppStartCommand;
             if (string.IsNullOrWhiteSpace(appStartCommand))
@@ -882,24 +926,31 @@ public class PlaywrightRunner
                         .StartsWith("src", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
                     .FirstOrDefault();
                 if (csproj is not null)
-                    appStartCommand = $"dotnet run --project \"{csproj}\" --urls {config.AppBaseUrl}";
+                    appStartCommand = $"dotnet run --project \"{csproj}\" --urls {portUrl}";
                 else
                     return null; // Can't start app without a command
             }
             else
             {
-                // Use ResolveAppStartCommand to handle configured-but-missing paths
+                // Use ResolveAppStartCommand then rewrite port
                 appStartCommand = ResolveAppStartCommand(workspacePath, config);
+                var configuredUri = new Uri(config.AppBaseUrl);
+                if (configuredUri.Port > 0)
+                    appStartCommand = appStartCommand.Replace($":{configuredUri.Port}", $":{uniquePort}");
             }
 
             var envVars = new Dictionary<string, string>
             {
                 ["PLAYWRIGHT_BROWSERS_PATH"] = browsersPath,
-                ["ASPNETCORE_URLS"] = config.AppBaseUrl,
+                ["ASPNETCORE_URLS"] = portUrl,
                 ["DOTNET_ENVIRONMENT"] = "Development"
             };
 
-            var screenshotUrl = config.AppBaseUrl;
+            var screenshotUrl = portUrl;
+
+            // Override config command with port-rewritten version (restored in finally)
+            config.AppStartCommand = appStartCommand;
+
             var (proc, detectedUrl) = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
             appProcess = proc;
 
@@ -1000,6 +1051,9 @@ public class PlaywrightRunner
         }
         finally
         {
+            // Restore original command
+            config.AppStartCommand = originalCommand;
+
             if (appProcess is not null)
             {
                 try

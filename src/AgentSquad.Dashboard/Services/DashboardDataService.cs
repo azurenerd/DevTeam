@@ -167,6 +167,9 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             while (await timer.WaitForNextTickAsync(stoppingToken))
             {
                 await PushHealthSnapshot(stoppingToken);
+                // In standalone mode, periodically refresh from DB since we don't get registry events
+                if (_registry.GetAllAgents().Count == 0)
+                    SeedFromDatabase();
             }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
@@ -329,6 +332,109 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                 SubscribeToErrors(agent);
             }
         }
+
+        // In standalone mode the registry is empty — hydrate from the shared SQLite DB
+        if (agents.Count == 0)
+        {
+            SeedFromDatabase();
+        }
+    }
+
+    private void SeedFromDatabase()
+    {
+        try
+        {
+            var usageMap = _stateStore.LoadAllAiUsage();
+            var activityMap = _stateStore.GetLatestActivityPerAgent();
+            var bootUtc = _stateStore.GetLastBootUtc();
+
+            // Combine all known agent IDs from both sources
+            var allAgentIds = new HashSet<string>(usageMap.Keys);
+            foreach (var id in activityMap.Keys) allAgentIds.Add(id);
+
+            if (allAgentIds.Count == 0) return;
+
+            // Only include agents active since the last runner boot
+            var activeIds = allAgentIds
+                .Where(id => activityMap.TryGetValue(id, out var a) && a.Timestamp >= bootUtc)
+                .OrderBy(id => id)
+                .ToList();
+
+            // Group by role and assign indices for display names
+            var roleCounters = new Dictionary<AgentRole, int>();
+
+            lock (_cacheLock)
+            {
+                // Remove stale agents no longer in the active set
+                var staleIds = _agentCache.Keys.Where(k => !activeIds.Contains(k) && !_trackedAgents.ContainsKey(k)).ToList();
+                foreach (var id in staleIds) _agentCache.Remove(id);
+
+                foreach (var agentId in activeIds)
+                {
+                    var usage = usageMap.GetValueOrDefault(agentId);
+                    activityMap.TryGetValue(agentId, out var activity);
+                    var role = InferRole(agentId);
+
+                    roleCounters.TryGetValue(role, out var idx);
+                    roleCounters[role] = idx + 1;
+
+                    _agentCache[agentId] = new AgentSnapshot
+                    {
+                        Id = agentId,
+                        DisplayName = FormatDisplayName(agentId, role, idx),
+                        Role = role,
+                        ModelTier = role switch
+                        {
+                            AgentRole.ProgramManager or AgentRole.Architect or AgentRole.PrincipalEngineer => "premium",
+                            AgentRole.JuniorEngineer => "budget",
+                            _ => "standard"
+                        },
+                        Status = AgentStatus.Working,
+                        StatusReason = activity.Details,
+                        CreatedAt = activity.Timestamp != default ? activity.Timestamp : DateTime.UtcNow,
+                        ActiveModel = usage.LastModel ?? "",
+                        LastStatusChange = activity.Timestamp != default ? activity.Timestamp : DateTime.UtcNow,
+                        EstPromptTokens = usage.PromptTokens,
+                        EstCompletionTokens = usage.CompletionTokens,
+                        AiCalls = usage.TotalCalls,
+                        EstimatedCost = usage.EstimatedCost
+                    };
+                }
+            }
+            NotifyStateChanged();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to seed agent cache from database");
+        }
+    }
+
+    private static AgentRole InferRole(string agentId)
+    {
+        if (agentId.StartsWith("programmanager", StringComparison.OrdinalIgnoreCase)) return AgentRole.ProgramManager;
+        if (agentId.StartsWith("researcher", StringComparison.OrdinalIgnoreCase)) return AgentRole.Researcher;
+        if (agentId.StartsWith("architect", StringComparison.OrdinalIgnoreCase)) return AgentRole.Architect;
+        if (agentId.StartsWith("principalengineer", StringComparison.OrdinalIgnoreCase)) return AgentRole.PrincipalEngineer;
+        if (agentId.StartsWith("seniorengineer", StringComparison.OrdinalIgnoreCase)) return AgentRole.SeniorEngineer;
+        if (agentId.StartsWith("juniorengineer", StringComparison.OrdinalIgnoreCase)) return AgentRole.JuniorEngineer;
+        if (agentId.StartsWith("testengineer", StringComparison.OrdinalIgnoreCase)) return AgentRole.TestEngineer;
+        return AgentRole.SeniorEngineer;
+    }
+
+    private static string FormatDisplayName(string agentId, AgentRole role, int indexInRole)
+    {
+        var baseName = role switch
+        {
+            AgentRole.ProgramManager => "Program Manager",
+            AgentRole.Researcher => "Researcher",
+            AgentRole.Architect => "Architect",
+            AgentRole.PrincipalEngineer => "Principal Engineer",
+            AgentRole.SeniorEngineer => "Senior Engineer",
+            AgentRole.JuniorEngineer => "Junior Engineer",
+            AgentRole.TestEngineer => "Test Engineer",
+            _ => agentId
+        };
+        return indexInRole > 0 ? $"{baseName} {indexInRole}" : baseName;
     }
 
     private void OnAgentRegistered(object? sender, AgentRegistryChangedEventArgs e)
