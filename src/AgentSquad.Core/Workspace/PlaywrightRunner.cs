@@ -309,7 +309,18 @@ public class PlaywrightRunner
             // Start app under test if configured
             if (!string.IsNullOrWhiteSpace(config.AppStartCommand))
             {
-                appProcess = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
+                var (proc, detectedUrl) = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
+                appProcess = proc;
+
+                // Use detected URL if the app overrode our configured port
+                var effectiveUrl = detectedUrl ?? baseUrl;
+                if (detectedUrl is not null && detectedUrl != baseUrl)
+                {
+                    _logger.LogInformation("App listening on {DetectedUrl} instead of configured {BaseUrl}, using detected URL",
+                        detectedUrl, baseUrl);
+                    baseUrl = detectedUrl;
+                    envVars["BASE_URL"] = baseUrl;
+                }
 
                 // Wait for app readiness
                 var ready = await WaitForAppReadyAsync(
@@ -405,9 +416,12 @@ public class PlaywrightRunner
 
     /// <summary>
     /// Start the application under test in a background process.
-    /// Returns the Process handle so it can be killed after tests.
+    /// Returns the Process handle and any detected listening URL so it can be killed after tests.
+    /// The detected URL comes from parsing "Now listening on:" lines in stdout/stderr,
+    /// which is needed because AI-generated apps often hardcode UseUrls() which overrides
+    /// both --urls and ASPNETCORE_URLS environment variable.
     /// </summary>
-    private async Task<Process> StartAppUnderTestAsync(
+    private async Task<(Process Process, string? DetectedUrl)> StartAppUnderTestAsync(
         string workspacePath,
         WorkspaceConfig config,
         Dictionary<string, string> envVars,
@@ -433,17 +447,67 @@ public class PlaywrightRunner
         var process = new Process { StartInfo = startInfo };
         process.Start();
 
-        // Consume output in background to prevent deadlocks
-        _ = Task.Run(() => process.StandardOutput.ReadToEndAsync(ct), ct);
-        _ = Task.Run(() => process.StandardError.ReadToEndAsync(ct), ct);
+        // Capture output to detect the actual listening URL
+        // AI-generated apps often hardcode UseUrls() which overrides our --urls/env var
+        var outputBuffer = new System.Text.StringBuilder();
+        string? detectedUrl = null;
+        var listeningPattern = new System.Text.RegularExpressions.Regex(
+            @"Now listening on:\s*(https?://[^\s]+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                string? line;
+                while ((line = await process.StandardOutput.ReadLineAsync(ct)) is not null)
+                {
+                    outputBuffer.AppendLine(line);
+                    var match = listeningPattern.Match(line);
+                    if (match.Success && detectedUrl is null)
+                    {
+                        // Prefer http over https for local testing
+                        var url = match.Groups[1].Value;
+                        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || detectedUrl is null)
+                            detectedUrl = url;
+                    }
+                }
+            }
+            catch { /* process exited */ }
+        }, ct);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                string? line;
+                while ((line = await process.StandardError.ReadLineAsync(ct)) is not null)
+                {
+                    outputBuffer.AppendLine(line);
+                    var match = listeningPattern.Match(line);
+                    if (match.Success && detectedUrl is null)
+                    {
+                        var url = match.Groups[1].Value;
+                        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || detectedUrl is null)
+                            detectedUrl = url;
+                    }
+                }
+            }
+            catch { /* process exited */ }
+        }, ct);
 
         _logger.LogInformation("Started app under test: {Command} (PID {Pid})",
             appCommand, process.Id);
 
-        // Give it a moment to initialize
-        await Task.Delay(2000, ct);
+        // Poll for URL detection — dotnet run includes compilation so it can take 30s+
+        for (var i = 0; i < 60 && detectedUrl is null && !process.HasExited; i++)
+            await Task.Delay(1000, ct);
 
-        return process;
+        if (detectedUrl is not null)
+            _logger.LogInformation("Detected app listening URL from process output: {Url}", detectedUrl);
+        else
+            _logger.LogDebug("No listening URL detected from process output after 60s");
+
+        return (process, detectedUrl);
     }
 
     /// <summary>
@@ -829,12 +893,23 @@ public class PlaywrightRunner
                 ["DOTNET_ENVIRONMENT"] = "Development"
             };
 
-            appProcess = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
-            var ready = await WaitForAppReadyAsync(config.AppBaseUrl, config.AppStartupTimeoutSeconds, ct);
+            var screenshotUrl = config.AppBaseUrl;
+            var (proc, detectedUrl) = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
+            appProcess = proc;
+
+            // Use detected URL if the app overrode our configured port
+            if (detectedUrl is not null && detectedUrl != screenshotUrl)
+            {
+                _logger.LogInformation("Screenshot: app listening on {DetectedUrl} instead of configured {BaseUrl}",
+                    detectedUrl, screenshotUrl);
+                screenshotUrl = detectedUrl;
+            }
+
+            var ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct);
 
             if (!ready)
             {
-                _logger.LogWarning("App not ready for screenshot at {Url} — attempting build first", config.AppBaseUrl);
+                _logger.LogWarning("App not ready for screenshot at {Url} — attempting build first", screenshotUrl);
                 // Kill the failed process and try building before starting
                 try { if (!appProcess.HasExited) appProcess.Kill(entireProcessTree: true); } catch { }
                 appProcess.Dispose();
@@ -856,8 +931,10 @@ public class PlaywrightRunner
                     if (buildProc.ExitCode == 0)
                     {
                         _logger.LogInformation("Build succeeded, retrying app start");
-                        appProcess = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
-                        ready = await WaitForAppReadyAsync(config.AppBaseUrl, config.AppStartupTimeoutSeconds, ct);
+                        var (proc2, detectedUrl2) = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
+                        appProcess = proc2;
+                        if (detectedUrl2 is not null) screenshotUrl = detectedUrl2;
+                        ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct);
                     }
                 }
 
@@ -884,7 +961,7 @@ public class PlaywrightRunner
                 });
 
                 var page = await context.NewPageAsync();
-                await page.GotoAsync(config.AppBaseUrl, new Microsoft.Playwright.PageGotoOptions
+                await page.GotoAsync(screenshotUrl, new Microsoft.Playwright.PageGotoOptions
                 {
                     WaitUntil = Microsoft.Playwright.WaitUntilState.NetworkIdle,
                     Timeout = 30000
@@ -901,7 +978,7 @@ public class PlaywrightRunner
 
                 await browser.DisposeAsync();
                 _logger.LogInformation("Captured UI screenshot ({Size} bytes) from {Url}",
-                    screenshotBytes.Length, config.AppBaseUrl);
+                    screenshotBytes.Length, screenshotUrl);
 
                 return screenshotBytes;
             }
