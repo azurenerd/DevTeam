@@ -5,9 +5,10 @@
 @using AgentSquad.Core.Persistence
 @using AgentSquad.Dashboard.Services
 @using AgentSquad.Orchestrator
+@using Microsoft.Extensions.DependencyInjection
 @implements IDisposable
 @inject IDashboardDataService DataService
-@inject AgentSpawnManager SpawnManager
+@inject IServiceProvider ServiceProvider
 @inject NavigationManager Navigation
 @inject IGitHubService GitHubService
 
@@ -56,6 +57,8 @@ else
                 </div>
             </div>
             <div class="detail-hero-actions">
+                @if (_spawnManager is not null)
+                {
                 @if (_agent.Status is AgentStatus.Working or AgentStatus.Online)
                 {
                     <button class="detail-btn btn-pause" @onclick="PauseAgent" disabled="@_actionInProgress">
@@ -73,6 +76,7 @@ else
                     <button class="detail-btn btn-terminate" @onclick="TerminateAgent" disabled="@_actionInProgress">
                         ⏹ Terminate
                     </button>
+                }
                 }
             </div>
         </div>
@@ -238,6 +242,7 @@ else
 
     protected override void OnInitialized()
     {
+        _spawnManager = ServiceProvider.GetService<AgentSpawnManager>();
         RefreshData();
         DataService.OnChange += OnDataChanged;
 
@@ -296,12 +301,15 @@ else
 
     private void GoBack() => Navigation.NavigateTo("/");
 
+    private AgentSpawnManager? _spawnManager;
+
     private async Task PauseAgent()
     {
+        if (_spawnManager is null) return;
         _actionInProgress = true;
         try
         {
-            await SpawnManager.PauseAgentAsync(AgentId);
+            await _spawnManager.PauseAgentAsync(AgentId);
         }
         finally
         {
@@ -311,10 +319,11 @@ else
 
     private async Task ResumeAgent()
     {
+        if (_spawnManager is null) return;
         _actionInProgress = true;
         try
         {
-            await SpawnManager.ResumeAgentAsync(AgentId);
+            await _spawnManager.ResumeAgentAsync(AgentId);
         }
         finally
         {
@@ -324,10 +333,11 @@ else
 
     private async Task TerminateAgent()
     {
+        if (_spawnManager is null) return;
         _actionInProgress = true;
         try
         {
-            await SpawnManager.TerminateAgentAsync(AgentId);
+            await _spawnManager.TerminateAgentAsync(AgentId);
         }
         finally
         {

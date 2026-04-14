@@ -534,6 +534,78 @@ public partial class PullRequestWorkflow
     }
 
     /// <summary>
+    /// Commit the document content to an existing PR's branch WITHOUT merging.
+    /// Use this to make the document visible for human review before a gate.
+    /// </summary>
+    public async Task CommitDocumentToPRAsync(
+        AgentPullRequest pr,
+        string documentPath,
+        string documentContent,
+        string commitMessage,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+        ArgumentException.ThrowIfNullOrWhiteSpace(documentContent);
+
+        _logger.LogInformation("Committing {Path} to branch {Branch} for review", documentPath, pr.HeadBranch);
+        await _github.CreateOrUpdateFileAsync(documentPath, documentContent, commitMessage, pr.HeadBranch, ct);
+    }
+
+    /// <summary>
+    /// Merge an existing document PR (assumes content already committed).
+    /// Cleans up tracking markers, updates labels, and auto-merges.
+    /// </summary>
+    public async Task MergeDocumentPRAsync(
+        AgentPullRequest pr,
+        string agentName,
+        string documentPath,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(pr);
+
+        // Clean up the tracking marker file
+        var docSlug = Slugify(System.IO.Path.GetFileNameWithoutExtension(documentPath));
+        var trackingPath = $".agentsquad/{docSlug}.tracking";
+        try
+        {
+            await _github.DeleteFileAsync(trackingPath, "Remove tracking marker", pr.HeadBranch, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not delete tracking file {Path} — may not exist", trackingPath);
+        }
+
+        // Update labels to show completion
+        await _github.UpdatePullRequestAsync(pr.Number,
+            labels: [Labels.ReadyForReview, Labels.Approved], ct: ct);
+
+        // Auto-merge
+        await Task.Delay(3000, ct);
+
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            try
+            {
+                await _github.MergePullRequestAsync(pr.Number,
+                    $"Merge {documentPath} — approved by {agentName}", ct);
+                _logger.LogInformation("Merged document PR #{Number}", pr.Number);
+                try { await _github.DeleteBranchAsync(pr.HeadBranch, ct); } catch { /* best-effort */ }
+                return;
+            }
+            catch (Exception ex) when (attempt < 3)
+            {
+                _logger.LogWarning(ex, "Merge attempt {Attempt}/3 failed for PR #{Number}, retrying",
+                    attempt, pr.Number);
+                await Task.Delay(5000 * attempt, ct);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "All merge attempts failed for document PR #{Number}", pr.Number);
+            }
+        }
+    }
+
+    /// <summary>
     /// Commit the final document content to an existing PR's branch, then auto-merge.
     /// Call this after the agent finishes generating the document content.
     /// </summary>

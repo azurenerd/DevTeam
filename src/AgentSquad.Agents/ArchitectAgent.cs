@@ -527,6 +527,15 @@ public class ArchitectAgent : AgentBase
 
         } // end else (fresh AI work, not resuming from gate)
 
+        // Commit document to PR so reviewers can see it before the gate
+        if (architectureDoc is not null && !pr.IsMerged)
+        {
+            UpdateStatus(AgentStatus.Working, "Committing Architecture.md for review");
+            await _prWorkflow.CommitDocumentToPRAsync(
+                pr, "Architecture.md", architectureDoc,
+                $"Add system architecture for {directive.Title}", ct);
+        }
+
         // === Gate: ArchitectureDesign — human reviews architecture before merge ===
         if (gateStatus != GateStatus.Approved)
         {
@@ -537,22 +546,12 @@ public class ArchitectAgent : AgentBase
                 pr.Number, ct: ct);
         }
 
-        // Commit final content and auto-merge (skip if PR already merged)
+        // Merge after gate approval (skip if PR already merged)
         if (!pr.IsMerged)
         {
-            if (architectureDoc is null)
-            {
-                // Resumed from pending gate — use placeholder (content was already committed)
-                architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct) ?? "# Architecture\n";
-            }
-            UpdateStatus(AgentStatus.Working, "Committing Architecture.md and merging PR");
-            await _prWorkflow.CommitAndMergeDocumentPRAsync(
-                pr,
-                Identity.DisplayName,
-                "Architecture.md",
-                architectureDoc,
-                $"Add system architecture for {directive.Title}",
-                ct);
+            UpdateStatus(AgentStatus.Working, "Merging Architecture.md PR");
+            await _prWorkflow.MergeDocumentPRAsync(
+                pr, Identity.DisplayName, "Architecture.md", ct);
         }
 
         Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);

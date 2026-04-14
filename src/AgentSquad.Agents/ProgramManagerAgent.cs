@@ -1360,6 +1360,14 @@ public class ProgramManagerAgent : AgentBase
                         qGateStatus, qPr.Number);
                 }
 
+                // Commit document to PR so reviewers can see it before the gate
+                if (qContent is not null && !qPr.IsMerged)
+                {
+                    await _prWorkflow.CommitDocumentToPRAsync(
+                        qPr, "PMSpec.md", qContent,
+                        $"Add PM Specification for {projectName}", ct);
+                }
+
                 // === Gate: PMSpecification — human reviews PMSpec before merge ===
                 if (qGateStatus != GateStatus.Approved)
                 {
@@ -1372,10 +1380,8 @@ public class ProgramManagerAgent : AgentBase
 
                 if (!qPr.IsMerged)
                 {
-                    qContent ??= await _projectFiles.GetPMSpecAsync(ct) ?? "# PM Specification\n";
-                    await _prWorkflow.CommitAndMergeDocumentPRAsync(
-                        qPr, Identity.DisplayName, "PMSpec.md", qContent,
-                        $"Add PM Specification for {projectName}", ct);
+                    await _prWorkflow.MergeDocumentPRAsync(
+                        qPr, Identity.DisplayName, "PMSpec.md", ct);
                 }
                 Logger.LogInformation("Quick PMSpec.md created and merged");
                 LogActivity("task", $"📝 Quick PMSpec.md created for {projectName}");
@@ -1597,6 +1603,14 @@ public class ProgramManagerAgent : AgentBase
 
             } // end else (fresh AI work, not resuming from gate)
 
+            // Commit document to PR so reviewers can see it before the gate
+            if (pmSpecDoc is not null && !pr.IsMerged)
+            {
+                await _prWorkflow.CommitDocumentToPRAsync(
+                    pr, "PMSpec.md", pmSpecDoc,
+                    $"Add PM Specification for {projectName}", ct);
+            }
+
             // === Gate: PMSpecification — human reviews PMSpec before merge ===
             if (pmGateStatus != GateStatus.Approved)
             {
@@ -1609,17 +1623,8 @@ public class ProgramManagerAgent : AgentBase
 
             if (!pr.IsMerged)
             {
-                if (pmSpecDoc is null)
-                {
-                    pmSpecDoc = await _projectFiles.GetPMSpecAsync(ct) ?? "# PM Specification\n";
-                }
-                await _prWorkflow.CommitAndMergeDocumentPRAsync(
-                    pr,
-                    Identity.DisplayName,
-                    "PMSpec.md",
-                    pmSpecDoc,
-                    $"Add PM Specification for {projectName}",
-                    ct);
+                await _prWorkflow.MergeDocumentPRAsync(
+                    pr, Identity.DisplayName, "PMSpec.md", ct);
             }
             Logger.LogInformation("PMSpec.md PR created and merged for project {ProjectName}", projectName);
             LogActivity("task", $"📝 PMSpec.md created and merged for {projectName}");

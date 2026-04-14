@@ -167,6 +167,15 @@ public class ResearcherAgent : AgentBase
                             updatedDoc += "\n";
                         }
 
+                        // Commit document to PR so reviewers can see it before the gate
+                        if (updatedDoc is not null && !pr.IsMerged)
+                        {
+                            UpdateStatus(AgentStatus.Working, "Committing Research.md for review");
+                            await _prWorkflow.CommitDocumentToPRAsync(
+                                pr, "Research.md", updatedDoc,
+                                $"Add research findings: {directive.Topic}", ct);
+                        }
+
                         // === Gate: ResearchFindings — human reviews before merge ===
                         if (gateStatus != GateStatus.Approved)
                         {
@@ -177,22 +186,12 @@ public class ResearcherAgent : AgentBase
                                 pr.Number, ct: ct);
                         }
 
-                        // Commit final content and auto-merge (skip if PR already merged)
+                        // Merge after gate approval (skip if PR already merged)
                         if (!pr.IsMerged)
                         {
-                            if (updatedDoc is null)
-                            {
-                                // Resumed from pending gate — read existing content from PR branch
-                                updatedDoc = await _projectFiles.GetResearchDocAsync(ct) ?? "# Research\n";
-                            }
-                            UpdateStatus(AgentStatus.Working, "Committing Research.md and merging PR");
-                            await _prWorkflow.CommitAndMergeDocumentPRAsync(
-                                pr,
-                                Identity.DisplayName,
-                                "Research.md",
-                                updatedDoc,
-                                $"Add research findings: {directive.Topic}",
-                                ct);
+                            UpdateStatus(AgentStatus.Working, "Merging Research.md PR");
+                            await _prWorkflow.MergeDocumentPRAsync(
+                                pr, Identity.DisplayName, "Research.md", ct);
                         }
 
                         Logger.LogInformation("Research.md PR created and merged for '{Topic}'", directive.Topic);
