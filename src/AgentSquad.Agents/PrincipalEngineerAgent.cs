@@ -1185,12 +1185,13 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             Logger.LogInformation("Principal Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
-            UpdateStatus(AgentStatus.Working, $"Planning: {task.Name}");
+            UpdateStatus(AgentStatus.Working, $"Generating PR description: {task.Name}");
             var prDescription = await GenerateTaskDescriptionAsync(task, ct);
 
             if (task.IssueNumber.HasValue)
                 prDescription = $"Closes #{task.IssueNumber}\n\n{prDescription}";
 
+            UpdateStatus(AgentStatus.Working, $"Creating branch & PR: {task.Name}");
             var branchName = await PrWorkflow.CreateTaskBranchAsync(
                 Identity.DisplayName,
                 $"{task.Id}-{task.Name}",
@@ -1249,6 +1250,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             if (!useSinglePass)
             {
                 // Multi-step path: generate steps then implement each one
+                UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating implementation steps");
                 var steps = await GenerateImplementationStepsAsync(
                     chat, pr, syntheticIssue, pmSpecDoc, architectureDoc, techStack, ct);
 
@@ -1346,6 +1348,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             if (useSinglePass)
             {
                 // Single-pass: complete implementation in one AI call
+                UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating code (single-pass)");
                 Logger.LogInformation("PE using single-pass implementation for task {TaskId}", task.Id);
 
                 var history = new ChatHistory();
@@ -1407,6 +1410,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 ReviewType = "CodeReview"
             }, ct);
 
+            UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} ready for review");
             Logger.LogInformation(
                 "Principal Engineer completed implementation for PR #{PrNumber} (task {TaskId})",
                 pr.Number, task.Id);

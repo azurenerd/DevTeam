@@ -575,6 +575,7 @@ public abstract class EngineerAgentBase : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Step 1: Generate ordered implementation steps from the PR description
+        UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating implementation steps");
         var steps = await GenerateImplementationStepsAsync(chat, pr, issue, pmSpecDoc, architectureDoc, techStack, ct);
 
         if (steps.Count == 0)

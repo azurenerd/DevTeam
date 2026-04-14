@@ -306,6 +306,9 @@ public class PlaywrightRunner
         Process? appProcess = null;
         try
         {
+            // Ensure data files exist so the app doesn't show an error page
+            EnsureSampleDataExists(workspacePath);
+
             // Start app under test if configured
             if (!string.IsNullOrWhiteSpace(config.AppStartCommand))
             {
@@ -865,6 +868,9 @@ public class PlaywrightRunner
             }
             Environment.SetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH", browsersPath);
 
+            // Ensure data files exist so the app doesn't show an error page
+            EnsureSampleDataExists(workspacePath);
+
             // Derive or use configured app start command
             var appStartCommand = config.AppStartCommand;
             if (string.IsNullOrWhiteSpace(appStartCommand))
@@ -1171,5 +1177,60 @@ public class PlaywrightRunner
             Traces = traces,
             Screenshots = screenshots
         };
+    }
+
+    /// <summary>
+    /// Ensures that sample data files exist before starting the app for screenshots/tests.
+    /// AI-generated apps often gitignore data.json (it may contain sensitive project names),
+    /// but include data.template.json or test data. Without data.json the app shows an error page,
+    /// producing misleading screenshots. This copies template/sample data when data.json is missing.
+    /// </summary>
+    private void EnsureSampleDataExists(string workspacePath)
+    {
+        // Search for the main app project directory (where data.json would live)
+        var appDirs = Directory.EnumerateFiles(workspacePath, "*.csproj", SearchOption.AllDirectories)
+            .Where(f => !Path.GetRelativePath(workspacePath, f).Contains("test", StringComparison.OrdinalIgnoreCase))
+            .Select(f => Path.GetDirectoryName(f)!)
+            .Distinct()
+            .ToList();
+
+        foreach (var appDir in appDirs)
+        {
+            var dataJsonPath = Path.Combine(appDir, "data.json");
+            if (File.Exists(dataJsonPath))
+                continue; // Already has data
+
+            // Strategy 1: Copy data.template.json from anywhere in the workspace
+            var templateCandidates = new[]
+            {
+                Path.Combine(appDir, "data.template.json"),
+                Path.Combine(workspacePath, "data.template.json"),
+            };
+
+            var template = templateCandidates.FirstOrDefault(File.Exists);
+            if (template is not null)
+            {
+                File.Copy(template, dataJsonPath);
+                _logger.LogInformation("Copied {Template} → {DataJson} for app preview",
+                    Path.GetRelativePath(workspacePath, template),
+                    Path.GetRelativePath(workspacePath, dataJsonPath));
+                continue;
+            }
+
+            // Strategy 2: Copy a valid test data file (prefer "full" variants)
+            var testDataFiles = Directory.EnumerateFiles(workspacePath, "valid-full*.json", SearchOption.AllDirectories)
+                .Concat(Directory.EnumerateFiles(workspacePath, "valid*.json", SearchOption.AllDirectories))
+                .Where(f => Path.GetRelativePath(workspacePath, f).Contains("TestData", StringComparison.OrdinalIgnoreCase))
+                .Distinct()
+                .ToList();
+
+            if (testDataFiles.Count > 0)
+            {
+                File.Copy(testDataFiles[0], dataJsonPath);
+                _logger.LogInformation("Copied test data {Source} → {DataJson} for app preview",
+                    Path.GetRelativePath(workspacePath, testDataFiles[0]),
+                    Path.GetRelativePath(workspacePath, dataJsonPath));
+            }
+        }
     }
 }
