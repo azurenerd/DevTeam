@@ -60,6 +60,9 @@ builder.Services.AddSingleton<HttpGateNotificationService>(sp =>
     return svc;
 });
 
+// Engineering plan visualization (works with the NullGitHubService stub)
+builder.Services.AddScoped<EngineeringPlanDataService>();
+
 // Director CLI — runs local copilot processes, no Runner dependency
 builder.Services.AddSingleton<DirectorCliService>();
 
