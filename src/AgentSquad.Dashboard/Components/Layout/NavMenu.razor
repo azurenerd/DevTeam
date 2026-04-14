@@ -1,5 +1,8 @@
-﻿@using AgentSquad.Dashboard.Services
+﻿@using AgentSquad.Core.Notifications
+@using AgentSquad.Dashboard.Services
 @inject DashboardMode Mode
+@inject IServiceProvider ServiceProvider
+@implements IDisposable
 
 <div class="sidebar-brand">
     <div class="brand-logo">
@@ -66,6 +69,16 @@
             </div>
 
             <div class="nav-item">
+                <NavLink class="nav-link" href="approvals">
+                    <span class="nav-icon">🚦</span> Approvals
+                    @if (_openGateCount > 0)
+                    {
+                        <span class="nav-badge">@_openGateCount</span>
+                    }
+                </NavLink>
+            </div>
+
+            <div class="nav-item">
                 <NavLink class="nav-link" href="team">
                     <span class="nav-icon">👥</span> Team View
                 </NavLink>
@@ -88,3 +101,43 @@
     </nav>
 </div>
 
+@code {
+    private int _openGateCount;
+    private GateNotificationService? _inProcessService;
+    private HttpGateNotificationService? _httpService;
+
+    protected override void OnInitialized()
+    {
+        _httpService = ServiceProvider.GetService<HttpGateNotificationService>();
+        _inProcessService = ServiceProvider.GetService<GateNotificationService>();
+
+        if (_httpService is not null)
+            _httpService.OnChange += OnNotificationChange;
+        else if (_inProcessService is not null)
+            _inProcessService.OnChange += OnNotificationChange;
+
+        RefreshCount();
+    }
+
+    private void OnNotificationChange()
+    {
+        InvokeAsync(() =>
+        {
+            RefreshCount();
+            StateHasChanged();
+        });
+    }
+
+    private void RefreshCount()
+    {
+        _openGateCount = _httpService?.OpenCount ?? _inProcessService?.OpenCount ?? 0;
+    }
+
+    public void Dispose()
+    {
+        if (_httpService is not null)
+            _httpService.OnChange -= OnNotificationChange;
+        else if (_inProcessService is not null)
+            _inProcessService.OnChange -= OnNotificationChange;
+    }
+}

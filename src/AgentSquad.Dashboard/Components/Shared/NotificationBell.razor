@@ -1,6 +1,8 @@
 @using AgentSquad.Core.Notifications
 @using AgentSquad.Dashboard.Services
+@using Microsoft.JSInterop
 @inject IServiceProvider ServiceProvider
+@inject IJSRuntime JS
 @implements IDisposable
 
 <div class="notification-container">
@@ -135,6 +137,8 @@
     private int _unreadCount;
     private int _openCount;
     private int _resolvedCount;
+    private int _lastNotifiedCount;
+    private bool _browserNotificationsEnabled;
     private NotificationFilter _currentFilter = NotificationFilter.Open;
     private IReadOnlyList<GateNotification> _notifications = Array.Empty<GateNotification>();
 
@@ -153,15 +157,62 @@
             _inProcessService.OnChange += HandleNotificationChange;
 
         RefreshData();
+        _lastNotifiedCount = _unreadCount;
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            try
+            {
+                var result = await JS.InvokeAsync<string>("BrowserNotifications.requestPermission");
+                _browserNotificationsEnabled = result == "granted";
+            }
+            catch { /* JS interop not available during prerender */ }
+        }
     }
 
     private void HandleNotificationChange()
     {
-        InvokeAsync(() =>
+        InvokeAsync(async () =>
         {
+            var previousUnread = _unreadCount;
             RefreshData();
+
+            // Fire browser notification for new gates
+            if (_browserNotificationsEnabled && _unreadCount > previousUnread)
+            {
+                var newest = GetNewestUnread();
+                if (newest is not null)
+                {
+                    try
+                    {
+                        await JS.InvokeVoidAsync("BrowserNotifications.show",
+                            "🚦 Gate Approval Needed",
+                            $"{newest.GateName}: {newest.Context}",
+                            null,
+                            newest.GitHubUrl);
+                    }
+                    catch { /* best effort */ }
+                }
+            }
+
             StateHasChanged();
         });
+    }
+
+    private GateNotification? GetNewestUnread()
+    {
+        IReadOnlyList<GateNotification> all;
+        if (_httpService is not null)
+            all = _httpService.GetByStatus(NotificationFilter.Open);
+        else if (_inProcessService is not null)
+            all = _inProcessService.GetByStatus(NotificationFilter.Open);
+        else
+            return null;
+
+        return all.Where(n => !n.IsRead).OrderByDescending(n => n.CreatedAt).FirstOrDefault();
     }
 
     private void RefreshData()

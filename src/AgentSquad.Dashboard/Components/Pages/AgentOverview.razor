@@ -2,12 +2,16 @@
 @rendermode InteractiveServer
 @using AgentSquad.Core.Agents
 @using AgentSquad.Core.Diagnostics
+@using AgentSquad.Core.GitHub
+@using AgentSquad.Core.Notifications
 @using AgentSquad.Dashboard.Services
 @using Microsoft.Extensions.Logging
 @using Markdig
 @implements IDisposable
 @inject IDashboardDataService DataService
 @inject NavigationManager Navigation
+@inject IGitHubService GitHubService
+@inject IServiceProvider ServiceProvider
 
 <PageTitle>AgentSquad — Overview</PageTitle>
 
@@ -122,6 +126,41 @@ else
                             <span class="detail-value task-idle">Idle</span>
                         }
                     </div>
+
+                    @* Work item link (PR or Issue) *@
+                    @{ var prNum = ExtractPrNumber(agent.StatusReason) ?? agent.AssignedPullRequest; }
+                    @if (prNum is not null)
+                    {
+                        <div class="agent-detail" @onclick:stopPropagation="true">
+                            <span class="detail-label">🔗 Work</span>
+                            <a class="detail-value work-link" href="https://github.com/@GitHubService.RepositoryFullName/pull/@prNum" target="_blank" rel="noopener">
+                                PR #@prNum ↗
+                            </a>
+                        </div>
+                    }
+
+                    @* Approval details when awaiting gate *@
+                    @if (IsAwaitingApproval(agent))
+                    {
+                        var gate = GetActiveGateForAgent(agent);
+                        <div class="agent-detail approval-detail">
+                            <span class="detail-label">🚦 Gate</span>
+                            <span class="detail-value approval-value">
+                                @if (gate is not null)
+                                {
+                                    <span title="@gate.Context">@gate.GateName</span>
+                                    @if (gate.GitHubUrl is not null)
+                                    {
+                                        <a class="gate-link" href="@gate.GitHubUrl" target="_blank" rel="noopener" @onclick:stopPropagation="true">Review ↗</a>
+                                    }
+                                }
+                                else
+                                {
+                                    <span>@ExtractGateName(agent.StatusReason)</span>
+                                }
+                            </span>
+                        </div>
+                    }
 
                     @* Diagnostic justification *@
                     @if (!string.IsNullOrEmpty(agent.DiagnosticSummary))
@@ -525,6 +564,62 @@ else
             _chatSending = false;
             StateHasChanged();
         }
+    }
+
+    // Gate notification helpers
+    private IReadOnlyList<GateNotification> _openGates = Array.Empty<GateNotification>();
+    private DateTime _lastGateRefresh = DateTime.MinValue;
+
+    private IReadOnlyList<GateNotification> GetOpenGates()
+    {
+        // Cache for 2 seconds to avoid repeated lookups per render
+        if ((DateTime.UtcNow - _lastGateRefresh).TotalSeconds > 2)
+        {
+            var svc = ServiceProvider.GetService<GateNotificationService>();
+            var httpSvc = ServiceProvider.GetService<HttpGateNotificationService>();
+            _openGates = svc?.GetByStatus(NotificationFilter.Open)
+                      ?? httpSvc?.GetByStatus(NotificationFilter.Open)
+                      ?? Array.Empty<GateNotification>();
+            _lastGateRefresh = DateTime.UtcNow;
+        }
+        return _openGates;
+    }
+
+    private GateNotification? GetActiveGateForAgent(AgentSnapshot agent)
+    {
+        var gates = GetOpenGates();
+        // Match by PR number if available
+        var prNum = ExtractPrNumber(agent.StatusReason) ?? agent.AssignedPullRequest;
+        if (prNum is not null && int.TryParse(prNum, out var num))
+        {
+            var match = gates.FirstOrDefault(g => g.ResourceNumber == num && !g.IsResolved);
+            if (match is not null) return match;
+        }
+        // Fallback: match by gate name extracted from status
+        var gateName = ExtractGateName(agent.StatusReason);
+        if (gateName is not null)
+            return gates.FirstOrDefault(g => g.GateName.Contains(gateName, StringComparison.OrdinalIgnoreCase) && !g.IsResolved);
+        return null;
+    }
+
+    private static string? ExtractPrNumber(string? statusReason)
+    {
+        if (statusReason is null) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(statusReason, @"PR #(\d+)");
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    private static string ExtractGateName(string? statusReason)
+    {
+        if (statusReason is null) return "Unknown gate";
+        // Pattern: "⏳ Awaiting human approval — gate-name" or "on PR #123"
+        var dashIdx = statusReason.IndexOf('—');
+        if (dashIdx >= 0 && dashIdx + 2 < statusReason.Length)
+            return statusReason[(dashIdx + 2)..].Trim();
+        var onIdx = statusReason.IndexOf("on PR", StringComparison.OrdinalIgnoreCase);
+        if (onIdx >= 0)
+            return statusReason[onIdx..].Trim();
+        return "Approval required";
     }
 
     public void Dispose()
