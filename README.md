@@ -46,7 +46,7 @@ AgentSquad is a C# .NET 8 system that creates and manages a team of specialized 
 │  │Agent ││Agent ││Agent ││Eng.    ││Eng.(n) ││Eng.(n) ││  Eng.  │   │
 │  └───┬──┘└──┬───┘└─┬────┘└───┬────┘└────┬───┘└────┬───┘└────┬───┘   │
 │      └──────┴──────┴─────────┴──────────┴─────────┴──────────┘       │
-│                    GitHubService (30s TTL cache)                       │
+│                    GitHubService (60s TTL cache)                       │
 │                    REST API (/api/dashboard/*)                         │
 │                    CopilotCliChatCompletionService                     │
 └─────────────────────────┬───────────────┬───────────────────────────┘
@@ -70,11 +70,13 @@ AgentSquad is a C# .NET 8 system that creates and manages a team of specialized 
 - **Dynamic Agent Scaling** — The PM can request additional Senior/Junior Engineers at runtime; the Orchestrator enforces configurable limits
 - **Standalone Dashboard** — Blazor Server monitoring UI that can run as a separate process (port 5051) from the Runner (port 5050), allowing UI iteration without disrupting running agents
 - **Project Timeline** — Visual workflow timeline with PM and Engineering views, PR/Issue type indicators, phase-based grouping, and silent background refresh
-- **GitHub API Rate Limit Management** — 30-second TTL in-process cache reduces API calls by ~90%, combined with proactive throttling and smart reset-timestamp pausing
+- **GitHub API Rate Limit Management** — 60-second TTL in-process cache reduces API calls by ~90%, combined with proactive throttling and smart reset-timestamp pausing
 - **SQLite State Persistence** — Checkpoint agent state and activity logs for graceful shutdown and recovery
 - **Deadlock Detection** — Wait-for graph analysis detects circular agent dependencies
 - **Health Monitoring** — Background service detects stuck agents, tracks task duration, and reports system health
 - **Phase-Gated Workflow** — State machine enforces project progression: Initialization → Research → Architecture → Engineering Planning → Parallel Development → Testing → Review → Finalization
+- **Vision-Based PR Review** — AI reviewers download and analyze actual screenshots from PR comments using base64-embedded images, catching broken UIs that text-only reviews would miss
+- **Human Gate Checkpoints** — Configurable gates pause workflow at key points for human review. Hot-reloadable configuration via `IOptionsMonitor`. Gate presets: Full Auto, Supervised, Full Control.
 
 ## Quick Start
 
@@ -183,6 +185,8 @@ The Blazor Server dashboard provides real-time visibility into the agent team. I
 | **Engineering Plan** | `/engineering-plan` | Interactive Cytoscape.js dependency graph of engineering tasks |
 | **Team View** | `/team` | Visual office-metaphor layout with agent desks and connection lines |
 | **Director CLI** | `/director-cli` | Terminal interface for issuing executive directives to agents |
+| **Approvals** | `/approvals` | Human gate approval management with filter buttons |
+| **Configuration** | `/configuration` | Settings editor, gate presets, GitHub cleanup (embedded mode only) |
 | **Agent Detail** | `/agent/{id}` | Deep dive into a single agent with pause/resume/terminate controls |
 
 <!-- TODO: Add dashboard screenshots here -->
@@ -197,7 +201,7 @@ AgentSquad/
 │   │   ├── Agents/                   # AgentBase, IAgent, AgentRole, AgentStatus, AgentMessage
 │   │   ├── AI/                       # CopilotCliChatCompletionService, ProcessManager, Watchdog
 │   │   ├── Configuration/            # Config models, validation, wizard, ModelRegistry
-│   │   ├── GitHub/                   # GitHubService (30s TTL cache), rate limiting, PR/Issue workflows
+│   │   ├── GitHub/                   # GitHubService (60s TTL cache), rate limiting, PR/Issue workflows
 │   │   ├── Messaging/                # IMessageBus, InProcessMessageBus (Channels-based)
 │   │   └── Persistence/              # AgentStateStore (SQLite), ProjectFileManager
 │   │

@@ -2,7 +2,7 @@
 
 > **Author:** Ben Humphrey (azurenerd) with Copilot CLI  
 > **Project:** AgentSquad — a .NET 8 multi-agent system where 7 AI agents (PM, Researcher, Architect, Principal Engineer, Senior/Junior Engineers, Test Engineer) collaborate through GitHub PRs/Issues to build software.  
-> **Purpose:** This document captures hard-won lessons from ~50+ iterative build-run-fix cycles over multiple sessions. It's intended for engineering teams considering AI agent-based development pipelines, to help them avoid the same pitfalls and build better agent orchestration from day one.
+> **Purpose:** This document captures hard-won lessons from ~85+ iterative build-run-fix cycles over multiple sessions. It's intended for engineering teams considering AI agent-based development pipelines, to help them avoid the same pitfalls and build better agent orchestration from day one.
 
 ---
 
@@ -22,6 +22,8 @@
 12. [Recommendations for Agent-Based Development](#12-recommendations-for-agent-based-development)
 13. [Dashboard Architecture and Process Separation](#13-dashboard-architecture-and-process-separation)
 14. [GitHub API Rate Limiting and Caching](#14-github-api-rate-limiting-and-caching)
+15. [Vision-Based Screenshot Review](#15-vision-based-screenshot-review)
+16. [Human Gate Configuration Must Be Enforced on ALL Code Paths](#16-human-gate-configuration-must-be-enforced-on-all-code-paths)
 
 ---
 
@@ -440,4 +442,46 @@ The agents will not "figure out" what you want from a high-level description. Th
 
 ---
 
-*This document was compiled from 80+ checkpoints, 400+ conversation turns, and 70+ end-to-end test runs across four Copilot CLI sessions building the AgentSquad system.*
+---
+
+## 15. Vision-Based Screenshot Review
+
+**Lesson:** If your AI agent receives a screenshot URL as plain text, it will "review" the screenshot based solely on the URL's presence — not its visual content. The AI will hallucinate a review, producing plausible-sounding approval text, because it literally cannot see the image.
+
+### What happened:
+- The Test Engineer posted screenshots of the running application as PR comments (e.g., "Screenshot: https://github.com/user/repo/assets/123/screenshot.png"). The three reviewers (PM, Architect, PE) received these URLs as plain text in their AI prompts.
+- PR #1152 shipped with a screenshot that clearly showed a broken UI — an error page with "Error: Failed to load data.json" visible in the image. All three reviewers approved the PR because they could see the text "Screenshot: https://..." but physically could not view the image content.
+- The AI models produced confident, specific-sounding reviews: "Screenshots confirm the UI is functioning correctly" — pure hallucination based on URL presence.
+
+### Technical solution:
+- Added `GetPRScreenshotImagesAsync` to `PullRequestWorkflow.cs` that downloads actual image bytes from GitHub PR comment URLs (max 5 images per PR, max 2MB each, 15-second timeout per download).
+- `CopilotCliChatCompletionService` updated with `AppendMessageContent` helper that handles `ImageContent` by converting to base64 data URIs embedded directly in the prompt.
+- All three reviewer agents (PM, Architect, PE) now receive actual screenshot images as Semantic Kernel `ImageContent` items in their ChatHistory — not just URLs.
+- PM and Architect prompts explicitly instruct: "examine the screenshots for error pages, blank screens, JSON parse errors, broken layouts, missing CSS, or any visual indication the application is not working correctly."
+- Falls back to URL-only text context (`GetPRScreenshotContextAsync`) if image download fails — degraded but not broken.
+
+### Takeaway:
+**If AI can't perceive the data format, it will hallucinate a review.** URL text ≠ image content. Always verify the AI can actually consume the input format you're providing. This applies broadly: don't pass audio file paths and expect transcription, don't pass binary data and expect parsing, don't pass image URLs and expect visual analysis. If the model needs to see something, you must embed the actual data in a format it can process.
+
+---
+
+## 16. Human Gate Configuration Must Be Enforced on ALL Code Paths
+
+**Lesson:** A gate check that exists on one code path but not another is worse than no gate at all — it creates false confidence that human review is happening when it's silently bypassed on the unchecked path.
+
+### What happened:
+- The PE agent had two paths that could lead to a PR merge: (1) a direct merge path via `ApproveAndMaybeMergeAsync` (PE approves and immediately merges), and (2) a Phase 3 path via `MergeTestedPRsAsync` (after PM + TE approval). Only the Phase 3 path had the `FinalPRApproval` gate check. The direct merge path completely bypassed human gate review.
+- Gate rejection results from `AssessGateApprovalAsync` were silently discarded — when a human posted "Not approved" on a PR, the PE ignored the rejection and continued to the next task without triggering rework.
+- `GateCheckService` used `IOptions<AgentSquadConfig>` which captures config once at construction time. Changing gate configuration in the dashboard or appsettings.json had no effect until the runner was restarted, making it impossible to dynamically enable gates during a run.
+
+### Technical solution:
+- Added `ReadyToMerge` enum value and `deferMerge` parameter to `ApproveAndMaybeMergeAsync`. PE now checks `_gateCheck.RequiresHuman(GateIds.FinalPRApproval)` on BOTH merge paths.
+- Gate rejection results are now properly handled: if `GateDecision.Rejected`, PE sends a `ChangesRequestedMessage` with the human's feedback and triggers a rework cycle. Human-initiated rework uses "HumanReviewer" as `ReviewerAgent`.
+- Changed `GateCheckService` from `IOptions<AgentSquadConfig>` to `IOptionsMonitor<AgentSquadConfig>` with a `Config` property that reads `_configMonitor.CurrentValue.HumanInteraction` on every gate check call. Changes to appsettings.json are now picked up at runtime.
+
+### Takeaway:
+**Every code path that can produce the gated outcome must be audited for the gate check.** This is the same class of bug as "forgot to check permissions on the admin endpoint" — the fix is systematic: enumerate all paths to the outcome, verify each one enforces the gate, and write unit tests that exercise each path with the gate enabled. For configuration, use `IOptionsMonitor` (not `IOptions`) whenever the setting might need to change at runtime.
+
+---
+
+*This document was compiled from 80+ checkpoints, 400+ conversation turns, and 85+ end-to-end test runs across five Copilot CLI sessions building the AgentSquad system.*

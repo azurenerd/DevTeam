@@ -35,7 +35,8 @@
 23. [Multi-Tier Test Execution Requirements](#23-multi-tier-test-execution-requirements)
 24. [AI Conversation Mode Requirements](#24-ai-conversation-mode-requirements)
 25. [GitHub API Rate Limit Handling](#25-github-api-rate-limit-handling)
-26. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+26. [Human Gate Enforcement Requirements](#26-human-gate-enforcement-requirements)
+27. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -653,6 +654,21 @@ Code PRs go through a **sequential three-phase** review pipeline. Each phase has
 - **REQ-REV-006a**: During Phase 3 review, PM gathers TE visual evidence (screenshots and videos) from PR comments by scanning for image URLs and video links.
 - **REQ-REV-006b**: PM's AI prompt includes this visual evidence alongside the PMSpec, linked issue, and code files to validate whether the PR meets design and business outcome expectations.
 - **REQ-REV-006c**: After approval, PM sends a `StatusUpdateMessage` to notify the PE that the PR is ready for merge.
+
+### REQ-REV-007: Vision-Based Screenshot Review
+
+- **REQ-REV-007a**: All reviewers (PM, Architect, PE) that evaluate screenshots MUST download actual image bytes from PR comment URLs and include them as `ImageContent` items in the AI prompt — not just pass URLs as text.
+- **REQ-REV-007b**: `PullRequestWorkflow.GetPRScreenshotImagesAsync` downloads images with: max 5 images per PR, max 2MB per image, 15-second timeout per download.
+- **REQ-REV-007c**: Images are embedded as base64 data URIs in the CopilotCli prompt via `AppendMessageContent` helper.
+- **REQ-REV-007d**: If image download fails, reviewers fall back to URL-only text context (`GetPRScreenshotContextAsync`) — degraded but not broken.
+- **REQ-REV-007e**: AI review prompts MUST explicitly instruct: "examine the screenshots for error pages, blank screens, JSON parse errors, broken layouts, missing CSS, or any visual indication the application is not working correctly."
+
+**Scenario: Vision-Based Screenshot Catches Broken UI**
+1. TE posts screenshot of application on PR #35 — screenshot shows a white page with "Error: Failed to load data.json"
+2. PM downloads actual image bytes (420KB PNG) → embeds as base64 ImageContent in ChatHistory
+3. PM's AI prompt includes: "Examine screenshots for error pages, broken UI..."
+4. AI sees the actual error page → responds: "CHANGES REQUESTED — Screenshot shows application error: 'Failed to load data.json'. The data layer is broken."
+5. Engineer receives ChangesRequestedMessage with specific visual feedback → fixes data loading → TE re-screenshots → PM re-reviews → APPROVED
 
 **Scenario: Sequential Three-Phase PR Review and Merge**
 1. Engineer marks PR #35 ready-for-review → broadcasts `ReviewRequestMessage`
@@ -1396,6 +1412,38 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 
 ---
 
+## 26. Human Gate Enforcement Requirements
+
+### REQ-GATE-001: Gate Check on All Merge Paths
+
+- **REQ-GATE-001a**: The `FinalPRApproval` gate MUST be checked on EVERY code path that can result in a PR merge. Both the direct merge path (`ApproveAndMaybeMergeAsync`) and the Phase 3 merge path (`MergeTestedPRsAsync`) must check `_gateCheck.RequiresHuman(GateIds.FinalPRApproval)`.
+- **REQ-GATE-001b**: When a gate requires human approval and returns `WaitingForHuman`, the merge MUST be deferred (not silently skipped). The `deferMerge` parameter on `ApproveAndMaybeMergeAsync` returns `ReadyToMerge` status instead of executing the merge.
+- **REQ-GATE-001c**: Gate rejection results (from `AssessGateApprovalAsync`) MUST be checked. If `GateDecision.Rejected`, the PE MUST send a `ChangesRequestedMessage` with the human's feedback and trigger a rework cycle.
+- **REQ-GATE-001d**: Human-initiated rework via gate rejection uses "HumanReviewer" as the `ReviewerAgent` field in `ChangesRequestedMessage`. There is NO limit on human review rework cycles — humans can request as many rounds as needed.
+
+### REQ-GATE-002: Gate Configuration Hot-Reload
+
+- **REQ-GATE-002a**: `GateCheckService` uses `IOptionsMonitor<AgentSquadConfig>` (not `IOptions`) so gate configuration changes in appsettings.json are picked up at runtime without requiring a runner restart.
+- **REQ-GATE-002b**: The `Config` property reads `_configMonitor.CurrentValue.HumanInteraction` on every gate check call, ensuring the latest config is always used.
+
+**Scenario: Human Gate Blocks Direct Merge**
+1. PE reviews PR #40 authored by Senior Engineer 1 → APPROVED via AI review
+2. PE calls `ApproveAndMaybeMergeAsync(40, deferMerge: true)` — method approves PR on GitHub but returns `ReadyToMerge` instead of merging
+3. PE checks `_gateCheck.RequiresHuman(GateIds.FinalPRApproval)` → returns true
+4. PE calls `_gateCheck.CheckGateAsync("FinalPRApproval", ...)` → posts gate comment on PR, adds `awaiting-human-review` label → returns `WaitingForHuman`
+5. PE skips merge, moves to next task
+6. Human reviews PR on GitHub → posts "approved" comment
+7. Next PE loop: `AssessGateApprovalAsync` → AI classifies comment as APPROVED → PE merges PR
+
+**Scenario: Human Rejects at Gate**
+1. PE calls `AssessGateApprovalAsync("FinalPRApproval", prNumber)` → human posted "Not approved — the color scheme doesn't match the design spec"
+2. AI classifies as REJECTED with feedback: "the color scheme doesn't match the design spec"
+3. PE sends `ChangesRequestedMessage { ReviewerAgent="HumanReviewer", Feedback="..." }`
+4. Engineer receives rework → fixes colors → re-marks ready-for-review
+5. Full review pipeline repeats → eventually reaches human gate again → human approves → merge
+
+---
+
 ## Appendix: Known Bugs Fixed
 
 These bugs were discovered during scenario analysis and fixed. Listed here as regression test targets:
@@ -1426,3 +1474,8 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 | TE missing .csproj scaffolding | MODERATE | AI-generated test code has no .csproj, build fails | Test Engineer AI sometimes omits .csproj file in generated output | Added auto-scaffolding: detect .cs files without .csproj → generate test .csproj with xUnit + Playwright packages |
 | PE misses PM enhancements | MODERATE | Enhancement issues stay open forever with no engineering tasks | PE's AI-generated engineering plan doesn't always cover all PM enhancement issues; PM's completion review skips enhancements with 0 sub-issues | TODO: Add PE enhancement coverage validation pass + PM orphaned enhancement detection |
 | RateLimitManager never wired into GitHubService | CRITICAL | Rate limit handling existed in code but was completely inactive — all 76 API calls bypassed it | `RateLimitManager` was registered in DI as singleton but never injected into `GitHubService` constructor; all `_client` calls went directly to Octokit with no throttling | Added constructor injection of `RateLimitManager`, wrapped all 42 public methods with `_rl.ExecuteAsync()`, added `TrackRateLimit()` after each API call |
+| Reviewers can't see screenshots | CRITICAL | AI reviewers received screenshot URLs as text, approved broken UIs without seeing them | `GetPRScreenshotContextAsync` passed URLs as plain text to AI prompt — models can't view images from URLs | Added `GetPRScreenshotImagesAsync` to download actual bytes, embedded as base64 `ImageContent` in AI prompts |
+| Human gate bypassed on direct merge | CRITICAL | PRs merged without human approval despite FinalPRApproval gate enabled | Two merge paths in PE: direct and Phase 3. Only Phase 3 had gate check. Gate rejection results silently discarded. | Added `deferMerge` parameter, gate check on both paths, rejection handling with rework cycle |
+| Gate config not hot-reloadable | MODERATE | Changing gate settings required runner restart | `GateCheckService` used `IOptions` (snapshot at construction) | Changed to `IOptionsMonitor` with `Config` property reading current value |
+| Config page gate CSS missing | MODERATE | Human Interaction section on Configuration page showed unstyled raw HTML | CSS classes `.config-gate-*` and `.config-preset-*` were not in dashboard.css | Added full CSS for preset buttons, gate grid, gate items, phase titles, badges |
+| Standalone dashboard PR links 404 | MODERATE | PR links in agent cards went to github.com/standalone/not-connected/pull/N | `NullGitHubService.RepositoryFullName` returns placeholder in standalone mode | Added `/api/dashboard/repo-info` endpoint, `HttpDashboardDataService` fetches real name |

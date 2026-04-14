@@ -136,6 +136,7 @@ Read `docs/MonitorPrompt.md` for the full checklist. Key points:
 2. **Agent status cycles**: Idle → Working → Idle is normal. Idle → Idle → Idle with open work = stuck.
 3. **PR pipeline per engineering PR**: created → `ready-for-review` → Architect review → `architect-approved` → TE tests → `tests-added` → PM review → `pm-approved` → PE merge
 4. **Rate limiting**: GitHub API limit is 5000/hr. Runner has 30s TTL shared cache (~90% reduction). Watch for `Rate limit exceeded` in logs.
+5. **Human gates**: If FinalPRApproval gate is enabled, PRs will pause with `awaiting-human-review` label. Check the Approvals page or PR comments to approve/reject.
 
 ### Dashboard pages
 | Page | URL | Key Features |
@@ -208,6 +209,9 @@ Key settings:
 - `AgentSquad.CopilotCli.MaxConcurrentRequests`: `5`
 - `AgentSquad.Models`: Per-tier model definitions (premium/standard/budget/local)
 - `AgentSquad.Limits.MaxAdditionalEngineers`: `3`
+- `AgentSquad.HumanInteraction.Enabled`: `true` (enables human gate checkpoints)
+- `AgentSquad.HumanInteraction.Preset`: Use Full Auto / Supervised / Full Control via Configuration page
+- Note: Gate configuration is hot-reloadable — changes take effect without runner restart
 
 ### Model tier strategy
 | Tier | Used By | Default Model |
@@ -227,8 +231,10 @@ Key settings:
 5. **PM issue ordering**: The PM extraction prompt instructs dependency-ordered issue creation (scaffolding first). If issues come out in wrong order, check the extraction prompt in `ProgramManagerAgent.CreateUserStoryIssuesAsync()`.
 6. **DLL locks during build**: Runner/Dashboard must be stopped before rebuilding. Use `.\scripts\stop-runner.ps1` first.
 7. **Standalone dashboard limitations**: Configuration page and Engineering Plan page are hidden. Use embedded dashboard (port 5050) or `fresh-reset.ps1` script for cleanup.
+8. **Vision review requires network access**: Screenshot download in PR reviews needs the runner to reach GitHub's raw content URLs. If behind a proxy, images fall back to URL-only text context.
+9. **Gate config hot-reload**: Gate settings are hot-reloaded via `IOptionsMonitor`. Other config sections (Models, Agents, Limits) still require restart.
 
 Note: Don't do any long pauses that are more than 1 minute long in the Copilot chat, as that makes it so you ignore me for X minutes--always keep checking back no more than a minute so the chat
 thread isn't blocked to get instructions from me. 
 
-*Last updated: 2026-04-13*
+*Last updated: 2026-04-14*
