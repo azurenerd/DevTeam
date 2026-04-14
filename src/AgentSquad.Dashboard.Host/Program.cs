@@ -43,12 +43,13 @@ builder.Services.AddSingleton<IDashboardDataService>(sp => sp.GetRequiredService
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HttpDashboardDataService>());
 
 // HTTP-based configuration service (talks to Runner REST API)
+// Uses IHttpClientFactory directly (fresh client per request) to avoid stale connection issues
+// when the polling service shares the same handler pool.
 builder.Services.AddSingleton<IConfigurationService>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
-    var client = factory.CreateClient("RunnerApi");
     var logger = sp.GetRequiredService<ILogger<HttpConfigurationService>>();
-    return new HttpConfigurationService(client, logger);
+    return new HttpConfigurationService(factory, "RunnerApi", logger);
 });
 
 // HTTP-based notification service (polls Runner for gate notifications)
