@@ -48,14 +48,11 @@
         _totalCalls = _dataService.GetTotalAiCalls();
     }
 
-    private static string FormatCost(decimal cost) => cost switch
+    private static string FormatCost(decimal cost)
     {
-        < 0.01m => "$0.00",
-        < 1m => cost.ToString("$0.00"),
-        < 10m => cost.ToString("$0.00"),
-        < 100m => cost.ToString("$0.00"),
-        _ => cost.ToString("$#,##0.00")
-    };
+        if (cost < 0.01m) return "$0.00";
+        return cost.ToString("$#,##0.00");
+    }
 
     private string TooltipText =>
         $"Estimated AI cost this run: {FormatCost(_totalCost)} across {_totalCalls} AI calls (MSRP pricing)";
