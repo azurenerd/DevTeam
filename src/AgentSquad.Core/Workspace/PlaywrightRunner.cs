@@ -1475,7 +1475,10 @@ public class PlaywrightRunner
             "    public IPlaywright Playwright { get; private set; } = null!;\n" +
             "    public IBrowser Browser { get; private set; } = null!;\n\n" +
             "    public string BaseUrl =>\n" +
-            "        Environment.GetEnvironmentVariable(\"BASE_URL\") ?? \"http://localhost:5000\";\n\n" +
+            "        Environment.GetEnvironmentVariable(\"BASE_URL\")\n" +
+            "            ?? throw new InvalidOperationException(\n" +
+            "                \"BASE_URL environment variable not set. \" +\n" +
+            "                \"The test runner should set this to the app's URL.\");\n\n" +
             "    public async Task InitializeAsync()\n" +
             "    {\n" +
             "        Playwright = await Microsoft.Playwright.Playwright.CreateAsync();\n" +

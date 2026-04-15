@@ -759,6 +759,10 @@ public abstract class EngineerAgentBase : AgentBase
                     ?? new List<AgentSquad.Core.AI.CodeFileParser.CodeFile>(resolved);
             }
 
+            // Enforce file scope: only allow files listed in the task's File Plan
+            if (codeFiles.Count > 0)
+                codeFiles = FilterToAllowedScope(codeFiles, pr.Body, issue.Body, pr.Number);
+
             if (codeFiles.Count > 0)
             {
                 var commitMsg = $"Step {stepNumber}/{steps.Count}: {Truncate(step, 72)}";
@@ -1139,6 +1143,10 @@ public abstract class EngineerAgentBase : AgentBase
         if (codeFiles.Count == 0)
             codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fallbackImpl);
 
+        // Enforce file scope before committing
+        if (codeFiles.Count > 0)
+            codeFiles = FilterToAllowedScope(codeFiles, pr.Body, issue.Body, pr.Number);
+
         if (codeFiles.Count > 0)
         {
             Logger.LogInformation("{Role} {Name} parsed {Count} code files for PR #{Number}",
@@ -1379,6 +1387,11 @@ public abstract class EngineerAgentBase : AgentBase
                 var changesSummary = PullRequestWorkflow.ExtractChangesSummary(updatedImpl);
 
                 var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(updatedImpl);
+
+                // Enforce file scope during rework too
+                if (codeFiles.Count > 0)
+                    codeFiles = FilterToAllowedScope(codeFiles, pr.Body, null, pr.Number);
+
                 if (codeFiles.Count > 0)
                 {
                     bool committed;
@@ -1734,6 +1747,10 @@ public abstract class EngineerAgentBase : AgentBase
                 if (codeFiles.Count == 0)
                     codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
 
+                // Enforce file scope
+                if (codeFiles.Count > 0)
+                    codeFiles = FilterToAllowedScope(codeFiles, pr.Body, syntheticIssue.Body, pr.Number);
+
                 if (codeFiles.Count > 0)
                 {
                     if (Workspace is not null && BuildRunnerSvc is not null)
@@ -1816,6 +1833,10 @@ public abstract class EngineerAgentBase : AgentBase
                     var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(finalStep);
                     if (codeFiles.Count == 0)
                         codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(stepImpl);
+
+                    // Enforce file scope
+                    if (codeFiles.Count > 0)
+                        codeFiles = FilterToAllowedScope(codeFiles, pr.Body, syntheticIssue.Body, pr.Number);
 
                     if (codeFiles.Count > 0)
                     {
@@ -2847,6 +2868,153 @@ public abstract class EngineerAgentBase : AgentBase
         if (Workspace is null) return;
         await Workspace.SyncWithMainAsync(ct);
         await Workspace.CreateBranchAsync(branchName, ct);
+    }
+
+    #endregion
+
+    #region File Scope Enforcement
+
+    /// <summary>
+    /// Extracts allowed file paths from a PR/Issue description's File Plan section.
+    /// Returns CREATE and MODIFY paths. Returns empty if no file plan is found (fail open).
+    /// </summary>
+    internal static HashSet<string> ExtractAllowedFilesFromDescription(string? description)
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(description)) return allowed;
+
+        foreach (var line in description.Split('\n'))
+        {
+            var trimmed = line.Trim();
+
+            // Markdown format: "- ➕ **Create:** `path`" or "- ✏️ **Modify:** `path`"
+            if (trimmed.Contains("**Create:**") || trimmed.Contains("**Modify:**"))
+            {
+                var backtickStart = trimmed.IndexOf('`');
+                var backtickEnd = trimmed.LastIndexOf('`');
+                if (backtickStart >= 0 && backtickEnd > backtickStart)
+                {
+                    var path = trimmed[(backtickStart + 1)..backtickEnd].Trim();
+                    if (!string.IsNullOrEmpty(path))
+                        allowed.Add(NormalizePath(path));
+                }
+            }
+
+            // Raw format: "CREATE:path" or "MODIFY:path"
+            if (trimmed.StartsWith("CREATE:", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("MODIFY:", StringComparison.OrdinalIgnoreCase))
+            {
+                var colonIdx = trimmed.IndexOf(':');
+                var path = trimmed[(colonIdx + 1)..].Trim();
+                if (!string.IsNullOrEmpty(path))
+                    allowed.Add(NormalizePath(path));
+            }
+        }
+
+        return allowed;
+    }
+
+    /// <summary>
+    /// Filters code files to only those within the task's file plan scope.
+    /// Infrastructure files (.csproj, .sln, .props, Directory.Build.targets) are always allowed.
+    /// If no file plan exists, all files pass through (fail open with warning).
+    /// </summary>
+    internal List<AgentSquad.Core.AI.CodeFileParser.CodeFile> FilterToAllowedScope(
+        IReadOnlyList<AgentSquad.Core.AI.CodeFileParser.CodeFile> codeFiles,
+        string? prDescription,
+        string? issueDescription,
+        int prNumber)
+    {
+        // Try PR description first, then issue description
+        var allowed = ExtractAllowedFilesFromDescription(prDescription);
+        if (allowed.Count == 0)
+            allowed = ExtractAllowedFilesFromDescription(issueDescription);
+
+        // Fail open: no file plan found, allow everything but log a warning
+        if (allowed.Count == 0)
+        {
+            Logger.LogWarning("{Role} {Name} PR #{PrNumber}: No file plan found in description — skipping scope filter",
+                Identity.Role, Identity.DisplayName, prNumber);
+            return codeFiles as List<AgentSquad.Core.AI.CodeFileParser.CodeFile>
+                ?? new List<AgentSquad.Core.AI.CodeFileParser.CodeFile>(codeFiles);
+        }
+
+        var result = new List<AgentSquad.Core.AI.CodeFileParser.CodeFile>();
+        var blocked = new List<string>();
+
+        foreach (var file in codeFiles)
+        {
+            var normalized = NormalizePath(file.Path);
+
+            // Always allow infrastructure/build files
+            if (IsInfrastructureFile(normalized))
+            {
+                result.Add(file);
+                continue;
+            }
+
+            // Check if file is in the allowed set (exact match or filename match)
+            if (IsFileAllowed(normalized, allowed))
+            {
+                result.Add(file);
+            }
+            else
+            {
+                blocked.Add(file.Path);
+            }
+        }
+
+        if (blocked.Count > 0)
+        {
+            Logger.LogWarning("{Role} {Name} PR #{PrNumber}: Blocked {Count} out-of-scope files: {Files}",
+                Identity.Role, Identity.DisplayName, prNumber, blocked.Count, string.Join(", ", blocked));
+            LogActivity("scope", $"🚫 Blocked {blocked.Count} out-of-scope files on PR #{prNumber}: {string.Join(", ", blocked)}");
+        }
+
+        return result;
+    }
+
+    private static string NormalizePath(string path)
+        => path.Replace('\\', '/').TrimStart('/');
+
+    private static bool IsInfrastructureFile(string normalizedPath)
+    {
+        var fileName = Path.GetFileName(normalizedPath);
+        return fileName.EndsWith(".csproj", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".sln", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".props", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".targets", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("Directory.Build.props", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("Directory.Build.targets", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("global.json", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsFileAllowed(string normalizedPath, HashSet<string> allowed)
+    {
+        // Exact match (after normalization)
+        if (allowed.Contains(normalizedPath))
+            return true;
+
+        // Match by filename only (handles path prefix differences)
+        var fileName = Path.GetFileName(normalizedPath);
+        foreach (var a in allowed)
+        {
+            var allowedFileName = Path.GetFileName(a);
+            // Full filename match (e.g., "TimelineSection.razor" matches any path ending with that)
+            if (fileName.Equals(allowedFileName, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // The generated path ends with the allowed path (handles missing prefix)
+            if (normalizedPath.EndsWith(a, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            // The allowed path ends with the generated path (handles extra prefix in plan)
+            if (a.EndsWith(normalizedPath, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        return false;
     }
 
     #endregion

@@ -906,8 +906,9 @@ public class ProgramManagerAgent : AgentBase
                 }
 
                 // Phase 3 gate: PM only reviews AFTER TE has added tests (inline workflow)
+                // NOTE: This gate applies even for force-approval PRs — PM should never
+                // approve before TE finishes testing, regardless of rework cycle count.
                 if (_config.Workspace.IsInlineTestWorkflow &&
-                    !_forceApprovalPrs.Contains(prNumber) &&
                     !pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
                 {
                     Logger.LogDebug("PM skipping PR #{Number} — waiting for TE to add tests (Phase 2)", prNumber);
@@ -917,8 +918,8 @@ public class ProgramManagerAgent : AgentBase
                 // Defense-in-depth: even if tests-added label is present, verify TE posted a
                 // completion comment. This prevents the PM from reviewing before TE finishes
                 // posting results (label and comment are separate API calls).
-                if (_config.Workspace.IsInlineTestWorkflow &&
-                    !_forceApprovalPrs.Contains(prNumber))
+                // NOTE: This check also applies for force-approval PRs.
+                if (_config.Workspace.IsInlineTestWorkflow)
                 {
                     var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
                     var hasTeCompletionComment = comments.Any(c =>
