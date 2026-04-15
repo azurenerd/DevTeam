@@ -29,6 +29,12 @@ public interface IPromptTemplateService
         CancellationToken ct = default);
 
     /// <summary>
+    /// Lists all agent role directories that have prompt templates.
+    /// Returns directory names (e.g., "researcher", "pm", "architect").
+    /// </summary>
+    IReadOnlyList<string> ListRoles();
+
+    /// <summary>
     /// Lists all template files for a given agent role directory.
     /// Returns relative paths (e.g., "researcher/system-message").
     /// </summary>

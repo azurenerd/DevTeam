@@ -2,8 +2,10 @@
 @using AgentSquad.Core.Configuration
 @using AgentSquad.Core.Workspace
 @using AgentSquad.Dashboard.Services
+@using AgentSquad.Core.Prompts
 @inject IConfigurationService ConfigService
 @inject IDashboardDataService DataService
+@inject IPromptTemplateService PromptService
 @inject ILogger<Configuration> Logger
 @rendermode InteractiveServer
 
@@ -1022,6 +1024,82 @@ else if (_config is not null)
         </div>
 
         @* ═══════════════════════════════════════════════════════════════════
+           PROMPT TEMPLATE EDITOR
+           ═══════════════════════════════════════════════════════════════════ *@
+        <div class="config-divider"></div>
+
+        <div class="config-section-header">
+            <span class="config-section-icon">📝</span>
+            <div>
+                <h2 class="config-section-title">Prompt Templates</h2>
+                <p class="config-section-desc">Edit agent AI prompts. Changes are hot-reloaded automatically — no restart required.</p>
+            </div>
+        </div>
+
+        @if (_promptRoles is not null)
+        {
+            @foreach (var role in _promptRoles)
+            {
+                <div class="config-card">
+                    <div class="config-card-header" @onclick="() => TogglePromptRole(role)">
+                        <span class="config-card-icon">🤖</span>
+                        <span class="config-card-title">@FormatRoleName(role)</span>
+                        <span class="config-card-badge">@(GetTemplateCount(role)) templates</span>
+                        <span class="config-card-chevron @(_expandedPromptRoles.Contains(role) ? "expanded" : "")">▶</span>
+                    </div>
+                    @if (_expandedPromptRoles.Contains(role))
+                    {
+                        <div class="config-card-body">
+                            @if (_promptTemplates.TryGetValue(role, out var templates))
+                            {
+                                    @foreach (var tmpl in templates)
+                                    {
+                                        var key = tmpl;
+                                        var displayName = tmpl.Contains('/') ? tmpl[(tmpl.LastIndexOf('/') + 1)..] : tmpl;
+                                    <div class="prompt-template-item">
+                                        <div class="prompt-template-header" @onclick="() => TogglePromptTemplate(key)">
+                                            <span class="prompt-template-name">@displayName</span>
+                                            @if (_promptMetadata.TryGetValue(key, out var meta))
+                                            {
+                                                <span class="prompt-template-desc">@meta.Description</span>
+                                            }
+                                            <span class="config-card-chevron @(_expandedPromptTemplates.Contains(key) ? "expanded" : "")">▶</span>
+                                        </div>
+                                        @if (_expandedPromptTemplates.Contains(key))
+                                        {
+                                            <div class="prompt-template-editor">
+                                                <textarea class="prompt-textarea" rows="15"
+                                                    value="@GetPromptContent(key)"
+                                                    @oninput="e => SetPromptContent(key, e.Value?.ToString() ?? string.Empty)"></textarea>
+                                                <div class="prompt-template-actions">
+                                                    <button class="prompt-save-btn" @onclick="() => SavePromptTemplate(key)"
+                                                        disabled="@(!_modifiedPrompts.Contains(key))">
+                                                        💾 Save
+                                                    </button>
+                                                    <button class="prompt-reset-btn" @onclick="() => ResetPromptTemplate(key)">
+                                                        🔄 Reset to Default
+                                                    </button>
+                                                    @if (_promptSaveSuccess == key)
+                                                    {
+                                                        <span class="badge badge-success">✓ Saved</span>
+                                                    }
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <div class="config-empty">Loading templates...</div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+        }
+
+        @* ═══════════════════════════════════════════════════════════════════
            GITHUB REPO CLEANUP — separated from config
            ═══════════════════════════════════════════════════════════════════ *@
         <div class="config-divider"></div>
@@ -1245,6 +1323,16 @@ else if (_config is not null)
     private PatValidationResult? _patValidation;
     private bool _validatingPat;
 
+    // Prompt template editor state
+    private List<string>? _promptRoles;
+    private readonly Dictionary<string, List<string>> _promptTemplates = new();
+    private readonly Dictionary<string, Core.Prompts.PromptMetadata> _promptMetadata = new();
+    private readonly Dictionary<string, string> _promptContents = new();
+    private readonly HashSet<string> _expandedPromptRoles = new();
+    private readonly HashSet<string> _expandedPromptTemplates = new();
+    private readonly HashSet<string> _modifiedPrompts = new();
+    private string? _promptSaveSuccess;
+
     protected override async Task OnInitializedAsync()
     {
         try
@@ -1268,6 +1356,7 @@ else if (_config is not null)
         // Scan repo in background so stats are ready when user scrolls down
         await Task.Yield(); // ensure UI renders before long network call
         _ = ScanRepoBackground();
+        _ = LoadPromptRolesBackground();
     }
 
     private async Task ScanRepoBackground()
@@ -1533,4 +1622,132 @@ else if (_config is not null)
         var json = System.Text.Json.JsonSerializer.Serialize(src);
         return System.Text.Json.JsonSerializer.Deserialize<AgentSquadConfig>(json) ?? new();
     }
+
+    // ── Prompt Template Methods ──
+
+    private async Task LoadPromptRolesBackground()
+    {
+        try
+        {
+            var roles = PromptService.ListRoles();
+            _promptRoles = roles.OrderBy(r => r).ToList();
+            await InvokeAsync(StateHasChanged);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to load prompt roles");
+        }
+    }
+
+    private async void TogglePromptRole(string role)
+    {
+        if (!_expandedPromptRoles.Remove(role))
+        {
+            _expandedPromptRoles.Add(role);
+            // Lazy-load templates for this role
+            if (!_promptTemplates.ContainsKey(role))
+            {
+                var templates = PromptService.ListTemplates(role);
+                _promptTemplates[role] = templates.OrderBy(t => t).ToList();
+            }
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private async void TogglePromptTemplate(string key)
+    {
+        if (!_expandedPromptTemplates.Remove(key))
+        {
+            _expandedPromptTemplates.Add(key);
+            // Lazy-load content and metadata
+            if (!_promptContents.ContainsKey(key))
+            {
+                try
+                {
+                    var content = await PromptService.GetRawContentAsync(key);
+                    _promptContents[key] = content ?? "";
+
+                    var metadata = await PromptService.GetMetadataAsync(key);
+                    if (metadata is not null)
+                    {
+                        _promptMetadata[key] = metadata;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "Failed to load prompt template {Key}", key);
+                    _promptContents[key] = $"Error loading template: {ex.Message}";
+                }
+            }
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    private string GetPromptContent(string key) =>
+        _promptContents.TryGetValue(key, out var content) ? content : "";
+
+    private void SetPromptContent(string key, string value)
+    {
+        _promptContents[key] = value;
+        _modifiedPrompts.Add(key);
+    }
+
+    private int GetTemplateCount(string role) =>
+        _promptTemplates.TryGetValue(role, out var t) ? t.Count : 0;
+
+    private async Task SavePromptTemplate(string key)
+    {
+        try
+        {
+            if (_promptContents.TryGetValue(key, out var content))
+            {
+                await PromptService.SaveRawContentAsync(key, content);
+                _modifiedPrompts.Remove(key);
+                _promptSaveSuccess = key;
+                StateHasChanged();
+                _ = ClearPromptSaveSuccess(key);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to save prompt template {Key}", key);
+        }
+    }
+
+    private async Task ResetPromptTemplate(string key)
+    {
+        try
+        {
+            // Read from prompts-defaults/ and write back to prompts/
+            var defaultPath = Path.Combine("prompts-defaults", key + ".md");
+            if (File.Exists(defaultPath))
+            {
+                var defaultContent = await File.ReadAllTextAsync(defaultPath);
+                await PromptService.SaveRawContentAsync(key, defaultContent);
+                _promptContents[key] = defaultContent;
+                _modifiedPrompts.Remove(key);
+                _promptSaveSuccess = key;
+                StateHasChanged();
+                _ = ClearPromptSaveSuccess(key);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Failed to reset prompt template {Key}", key);
+        }
+    }
+
+    private async Task ClearPromptSaveSuccess(string key)
+    {
+        await Task.Delay(2000);
+        if (_promptSaveSuccess == key)
+        {
+            _promptSaveSuccess = null;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    private static string FormatRoleName(string role) =>
+        string.Join(' ', role.Split('-').Select(w =>
+            char.ToUpper(w[0]) + w[1..]));
 }

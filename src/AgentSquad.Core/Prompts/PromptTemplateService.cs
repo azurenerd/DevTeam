@@ -55,6 +55,19 @@ public partial class PromptTemplateService : IPromptTemplateService
         return template?.Metadata;
     }
 
+    public IReadOnlyList<string> ListRoles()
+    {
+        if (!Directory.Exists(_basePath))
+            return [];
+
+        return Directory.GetDirectories(_basePath)
+            .Select(Path.GetFileName)
+            .Where(d => d is not null)
+            .Select(d => d!)
+            .OrderBy(x => x)
+            .ToList();
+    }
+
     public IReadOnlyList<string> ListTemplates(string role)
     {
         ArgumentNullException.ThrowIfNull(role);
