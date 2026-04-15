@@ -3,6 +3,7 @@ using AgentSquad.Core.Messaging;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Notifications;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using AgentSquad.Agents;
@@ -94,6 +95,7 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentSquad.Core.AI
 
 // Prompt template system
 builder.Services.AddSingleton<AgentSquad.Core.Prompts.IPromptTemplateService, AgentSquad.Core.Prompts.PromptTemplateService>();
+builder.Services.AddHostedService<AgentSquad.Core.Prompts.PromptFileWatcher>();
 
 // Agentic loop: self-assessment and reasoning observability
 builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog, AgentSquad.Core.Agents.Reasoning.AgentReasoningLog>();
@@ -252,6 +254,54 @@ configApi.MapPost("/cleanup/execute", async (HttpContext ctx, ConfigurationServi
     return Results.Ok(result);
 });
 
+// ── Prompt Template REST API (consumed by standalone Dashboard.Host) ──
+var promptApi = app.MapGroup("/api/prompts").WithTags("Prompts");
+
+promptApi.MapGet("/roles", (IPromptTemplateService svc) =>
+{
+    var basePath = app.Configuration.GetValue<string>("AgentSquad:Prompts:BasePath") ?? "prompts";
+    var fullPath = Path.GetFullPath(basePath);
+    if (!Directory.Exists(fullPath)) return Results.Ok(Array.Empty<string>());
+    var roles = Directory.GetDirectories(fullPath)
+        .Select(d => Path.GetFileName(d))
+        .OrderBy(n => n)
+        .ToArray();
+    return Results.Ok(roles);
+});
+
+promptApi.MapGet("/templates/{role}", (string role, IPromptTemplateService svc) =>
+    Results.Ok(svc.ListTemplates(role)));
+
+promptApi.MapGet("/content/{**templatePath}", async (string templatePath, IPromptTemplateService svc, CancellationToken ct) =>
+{
+    var content = await svc.GetRawContentAsync(templatePath, ct);
+    return content is not null ? Results.Ok(new { content }) : Results.NotFound();
+});
+
+promptApi.MapPut("/content/{**templatePath}", async (string templatePath, HttpContext ctx, IPromptTemplateService svc, CancellationToken ct) =>
+{
+    var body = await ctx.Request.ReadFromJsonAsync<PromptSaveRequest>(ct);
+    if (body?.Content is null) return Results.BadRequest();
+    await svc.SaveRawContentAsync(templatePath, body.Content, ct);
+    return Results.Ok();
+});
+
+promptApi.MapGet("/metadata/{**templatePath}", async (string templatePath, IPromptTemplateService svc, CancellationToken ct) =>
+{
+    var metadata = await svc.GetMetadataAsync(templatePath, ct);
+    return metadata is not null ? Results.Ok(metadata) : Results.NotFound();
+});
+
+promptApi.MapPost("/reset/{**templatePath}", async (string templatePath, IPromptTemplateService svc, CancellationToken ct) =>
+{
+    var defaultsPath = Path.GetFullPath("prompts-defaults");
+    var defaultFile = Path.Combine(defaultsPath, templatePath + ".md");
+    if (!File.Exists(defaultFile)) return Results.NotFound();
+    var defaultContent = await File.ReadAllTextAsync(defaultFile, ct);
+    await svc.SaveRawContentAsync(templatePath, defaultContent, ct);
+    return Results.Ok();
+});
+
 // ── Reasoning Log REST API (consumed by standalone Dashboard.Host) ──
 var reasoningApi = app.MapGroup("/api/reasoning").WithTags("Reasoning");
 
@@ -338,3 +388,4 @@ record SetModelRequest(string ModelName);
 record ChatRequest(string Message);
 record ValidatePatRequest(string? Token, string? RepoFullName);
 record CleanupExecuteRequest(string? Caveats);
+record PromptSaveRequest(string? Content);
