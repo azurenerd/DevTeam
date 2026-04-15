@@ -4,6 +4,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Metrics;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Prompts;
 using AgentSquad.Dashboard.Services;
 using AgentSquad.Orchestrator;
 
@@ -27,7 +28,14 @@ public static class StandaloneServiceRegistration
             new BuildTestMetrics(sp.GetRequiredService<AgentStateStore>()));
 
         // AgentSquadConfig needed by various services
-        services.Configure<AgentSquadConfig>(_ => { });
+        // Configure prompts path — resolve relative to solution root
+        services.Configure<AgentSquadConfig>(config =>
+        {
+            config.Prompts.BasePath = "../../prompts";
+        });
+
+        // PromptTemplateService — reads/writes prompt .md files on disk
+        services.AddSingleton<IPromptTemplateService, PromptTemplateService>();
 
         return services;
     }
