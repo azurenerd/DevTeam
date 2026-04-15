@@ -53,6 +53,9 @@ builder.Services.AddSingleton<IAgentFactory>(new NoOpAgentFactory());
 // Gate service
 builder.Services.AddSingleton<IGateCheckService, GateCheckService>();
 
+// Prompt template service (needed by Configuration page)
+builder.Services.AddSingleton<AgentSquad.Core.Prompts.IPromptTemplateService, AgentSquad.Core.Prompts.PromptTemplateService>();
+
 // Add services to the container.
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
