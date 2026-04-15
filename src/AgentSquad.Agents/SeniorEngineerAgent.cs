@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
@@ -30,13 +31,14 @@ public class SeniorEngineerAgent : EngineerAgentBase
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
         ILogger<SeniorEngineerAgent> logger,
+        RoleContextProvider? roleContextProvider = null,
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         Core.Metrics.BuildTestMetrics? metrics = null,
         PlaywrightRunner? playwrightRunner = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               buildRunner, testRunner, metrics, playwrightRunner)
+               roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner)
     {
     }
 

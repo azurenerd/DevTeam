@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Reasoning;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -48,8 +49,9 @@ public class ArchitectAgent : AgentBase
         IGateCheckService gateCheck,
         SelfAssessmentService selfAssessment,
         IAgentReasoningLog reasoningLog,
-        ILogger<ArchitectAgent> logger)
-        : base(identity, logger, memoryStore)
+        ILogger<ArchitectAgent> logger,
+        RoleContextProvider? roleContextProvider = null)
+        : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -214,7 +216,7 @@ public class ArchitectAgent : AgentBase
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a senior software architect revising Architecture.md based on human reviewer feedback. " +
                 "Make the specific changes requested while preserving the overall structure.");
@@ -301,7 +303,7 @@ public class ArchitectAgent : AgentBase
 
             var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var qChat = qKernel.GetRequiredService<IChatCompletionService>();
-            var qHistory = new ChatHistory();
+            var qHistory = CreateChatHistory();
             qHistory.AddSystemMessage("You are a software architect. Write a brief architecture document.");
             qHistory.AddUserMessage(
                 $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
@@ -383,7 +385,7 @@ public class ArchitectAgent : AgentBase
         var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
 
         var systemPrompt = "You are a senior software architect on a development team. " +
@@ -874,7 +876,7 @@ public class ArchitectAgent : AgentBase
 
             var hasScreenshots = screenshotImages.Count > 0 || !string.IsNullOrEmpty(screenshotContext);
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             var screenshotInstructions = hasScreenshots
                 ? "ALSO CHECK: Screenshots are provided — you can SEE them embedded in this message. " +
                   "Verify the app renders correctly without errors.\n" +

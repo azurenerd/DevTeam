@@ -23,11 +23,12 @@ public abstract class AgentBase : IAgent, IDisposable
     /// </summary>
     private string _cliSessionId = Guid.NewGuid().ToString();
 
-    protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger, AgentMemoryStore? memoryStore = null)
+    protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger, AgentMemoryStore? memoryStore = null, RoleContextProvider? roleContextProvider = null)
     {
         Identity = identity ?? throw new ArgumentNullException(nameof(identity));
         Logger = logger ?? throw new ArgumentNullException(nameof(logger));
         MemoryStore = memoryStore;
+        RoleContext = roleContextProvider;
         LifetimeCts = new CancellationTokenSource();
     }
 
@@ -89,6 +90,47 @@ public abstract class AgentBase : IAgent, IDisposable
     /// <summary>Persistent memory store, available to all agents.</summary>
     protected AgentMemoryStore? MemoryStore { get; }
 
+    /// <summary>Provider for custom role context from configuration (role descriptions, knowledge links).</summary>
+    protected RoleContextProvider? RoleContext { get; }
+
+    /// <summary>
+    /// Builds a system prompt by prepending any custom role context (role description,
+    /// knowledge links) from configuration. If no customization is configured, returns
+    /// the default prompt unchanged.
+    /// </summary>
+    protected string BuildSystemPrompt(string defaultPrompt)
+    {
+        if (RoleContext is null)
+            return defaultPrompt;
+
+        var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role);
+        if (string.IsNullOrWhiteSpace(roleCtx))
+            return defaultPrompt;
+
+        return $"{roleCtx}\n\n{defaultPrompt}";
+    }
+
+    /// <summary>
+    /// Creates a new ChatHistory with role context automatically injected as the first
+    /// system message (if custom role description or knowledge links are configured).
+    /// Use this instead of <c>new ChatHistory()</c> to ensure role customization is applied.
+    /// </summary>
+    protected Microsoft.SemanticKernel.ChatCompletion.ChatHistory CreateChatHistory()
+    {
+        var history = new Microsoft.SemanticKernel.ChatCompletion.ChatHistory();
+
+        if (RoleContext is not null)
+        {
+            var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role);
+            if (!string.IsNullOrWhiteSpace(roleCtx))
+            {
+                history.AddSystemMessage(roleCtx);
+            }
+        }
+
+        return history;
+    }
+
     /// <summary>
     /// Record a memory entry that persists across AI calls and process restarts.
     /// This builds the agent's long-term context so each AI call can include
@@ -135,6 +177,27 @@ public abstract class AgentBase : IAgent, IDisposable
         AgentCallContext.CurrentSessionId = _cliSessionId;
         UpdateStatus(AgentStatus.Initializing, "Agent initialization started");
         LogActivity("system", "Agent initialization started");
+
+        // Initialize role customization context (knowledge links, MCP servers)
+        if (RoleContext is not null)
+        {
+            try
+            {
+                await RoleContext.InitializeForAgentAsync(Identity.Role, ct);
+                var mcpServers = RoleContext.GetMcpServers(Identity.Role);
+                if (mcpServers.Count > 0)
+                {
+                    AgentCallContext.McpServers = mcpServers;
+                    Logger.LogInformation("Agent {AgentId} configured with {McpCount} MCP servers: {Servers}",
+                        Identity.Id, mcpServers.Count, string.Join(", ", mcpServers));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to initialize role context for {AgentId}, continuing with defaults", Identity.Id);
+            }
+        }
+
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LifetimeCts.Token);
         await OnInitializeAsync(linked.Token);
         UpdateStatus(AgentStatus.Online, "Agent initialized successfully");
@@ -145,6 +208,15 @@ public abstract class AgentBase : IAgent, IDisposable
     {
         AgentCallContext.CurrentAgentId = Identity.Id;
         AgentCallContext.CurrentSessionId = _cliSessionId;
+
+        // Re-set MCP servers for this async context (AsyncLocal doesn't flow across tasks)
+        if (RoleContext is not null)
+        {
+            var mcpServers = RoleContext.GetMcpServers(Identity.Role);
+            if (mcpServers.Count > 0)
+                AgentCallContext.McpServers = mcpServers;
+        }
+
         UpdateStatus(AgentStatus.Working, "Agent starting main loop");
         LogActivity("system", "Agent starting main loop");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LifetimeCts.Token);

@@ -266,27 +266,94 @@ else if (_config is not null)
             @if (_agentsExpanded)
             {
                 <div class="config-card-body">
-                    <p class="config-hint" style="margin-bottom: 12px;" title="Each agent can be assigned a model tier (premium=best quality, budget=cheapest) and enabled/disabled independently.">
-                        Assign AI model tiers and enable/disable each agent role. Hover over agent names for details.
+                    <p class="config-hint" style="margin-bottom: 12px;" title="Each agent can be assigned a model tier, role customization, MCP servers, and knowledge links. Click an agent to expand its configuration.">
+                        Configure each agent's model tier, role behavior, MCP tools, and knowledge sources. Click an agent to expand.
                     </p>
                     <div class="config-agent-grid">
                         @foreach (var agent in GetAgentEntries())
                         {
-                            <div class="config-agent-row" title="@GetAgentTooltip(agent.Name)">
-                                <div class="config-agent-name">@agent.Name</div>
-                                <div class="config-agent-controls">
-                                    <select @bind="agent.Config.ModelTier" class="config-select config-select-sm"
-                                        title="AI model quality tier. Premium: best quality (Opus-class). Standard: good balance (Sonnet-class). Budget: cheapest (GPT-mini). Local: Ollama self-hosted.">
-                                        <option value="premium">Premium</option>
-                                        <option value="standard">Standard</option>
-                                        <option value="budget">Budget</option>
-                                        <option value="local">Local</option>
-                                    </select>
-                                    <label class="config-toggle config-toggle-sm" title="Enable or disable this agent. Disabled agents won't be spawned at startup.">
-                                        <input type="checkbox" @bind="agent.Config.Enabled" />
-                                        <span class="config-toggle-slider"></span>
-                                    </label>
+                            var agentName = agent.Name;
+                            var isExpanded = IsAgentPanelExpanded(agentName);
+                            <div class="config-agent-accordion">
+                                <div class="config-agent-row" title="@GetAgentTooltip(agentName)" @onclick="() => ToggleAgentPanel(agentName)" style="cursor: pointer;">
+                                    <div class="config-agent-name">
+                                        <span class="config-agent-chevron @(isExpanded ? "expanded" : "")">▶</span>
+                                        @agentName
+                                        @if (!string.IsNullOrWhiteSpace(agent.Config.RoleDescription) || agent.Config.McpServers.Count > 0 || agent.Config.KnowledgeLinks.Count > 0)
+                                        {
+                                            <span class="config-agent-customized" title="This agent has custom role configuration">✦</span>
+                                        }
+                                    </div>
+                                    <div class="config-agent-controls" @onclick:stopPropagation="true">
+                                        <select @bind="agent.Config.ModelTier" class="config-select config-select-sm"
+                                            title="AI model quality tier. Premium: best quality (Opus-class). Standard: good balance (Sonnet-class). Budget: cheapest (GPT-mini). Local: Ollama self-hosted.">
+                                            <option value="premium">Premium</option>
+                                            <option value="standard">Standard</option>
+                                            <option value="budget">Budget</option>
+                                            <option value="local">Local</option>
+                                        </select>
+                                        <label class="config-toggle config-toggle-sm" title="Enable or disable this agent. Disabled agents won't be spawned at startup.">
+                                            <input type="checkbox" @bind="agent.Config.Enabled" />
+                                            <span class="config-toggle-slider"></span>
+                                        </label>
+                                    </div>
                                 </div>
+                                @if (isExpanded)
+                                {
+                                    <div class="config-agent-details" @onclick:stopPropagation="true">
+                                        @* Role Description *@
+                                        <div class="config-field">
+                                            <label title="Custom role description that augments the agent's default persona. This is prepended to every AI system prompt, giving the agent a specialized identity and behavioral guidelines. Leave empty to use the default role.">
+                                                Role Description <span class="config-hint">(augments default persona)</span>
+                                            </label>
+                                            <textarea @bind="agent.Config.RoleDescription" class="config-textarea" rows="3"
+                                                placeholder="e.g., 'You specialize in security-first architecture. Always consider OWASP top 10 in your designs...'"
+                                                title="Custom instructions prepended to every AI prompt for this agent. Defines specialized behavior, domain expertise, or organizational standards."></textarea>
+                                        </div>
+
+                                        @* MCP Servers *@
+                                        <div class="config-field">
+                                            <label title="MCP (Model Context Protocol) servers extend the agent's capabilities with external tools. Each server name is passed as --mcp-server to the Copilot CLI.">
+                                                MCP Servers <span class="config-hint">(tool integrations)</span>
+                                            </label>
+                                            @for (var i = 0; i < agent.Config.McpServers.Count; i++)
+                                            {
+                                                var idx = i;
+                                                <div class="config-list-item">
+                                                    <input type="text" value="@agent.Config.McpServers[idx]"
+                                                        @onchange="e => UpdateMcpServer(agent.Config, idx, e.Value?.ToString() ?? string.Empty)"
+                                                        class="config-input" placeholder="server-name"
+                                                        title="MCP server name (e.g., 'filesystem', 'github', 'database')" />
+                                                    <button class="config-btn-remove" @onclick="() => RemoveMcpServer(agent.Config, idx)" title="Remove this MCP server">✕</button>
+                                                </div>
+                                            }
+                                            <button class="config-btn-add" @onclick="() => AddMcpServer(agent.Config)" title="Add an MCP server for this agent">
+                                                + Add MCP Server
+                                            </button>
+                                        </div>
+
+                                        @* Knowledge Links *@
+                                        <div class="config-field">
+                                            <label title="URLs to documentation, wikis, or reference pages. Content is fetched once at agent startup and summarized into compact context that informs the agent's decisions.">
+                                                Knowledge Links <span class="config-hint">(reference documentation)</span>
+                                            </label>
+                                            @for (var i = 0; i < agent.Config.KnowledgeLinks.Count; i++)
+                                            {
+                                                var idx = i;
+                                                <div class="config-list-item">
+                                                    <input type="text" value="@agent.Config.KnowledgeLinks[idx]"
+                                                        @onchange="e => UpdateKnowledgeLink(agent.Config, idx, e.Value?.ToString() ?? string.Empty)"
+                                                        class="config-input" placeholder="https://docs.example.com/standards"
+                                                        title="URL to a documentation page. Content is fetched and summarized at agent startup." />
+                                                    <button class="config-btn-remove" @onclick="() => RemoveKnowledgeLink(agent.Config, idx)" title="Remove this knowledge link">✕</button>
+                                                </div>
+                                            }
+                                            <button class="config-btn-add" @onclick="() => AddKnowledgeLink(agent.Config)" title="Add a knowledge link for this agent">
+                                                + Add Knowledge Link
+                                            </button>
+                                        </div>
+                                    </div>
+                                }
                             </div>
                         }
                     </div>
@@ -862,6 +929,9 @@ else if (_config is not null)
     private bool _workspaceExpanded;
     private bool _humanInteractionExpanded;
 
+    // Per-agent accordion expansion tracking
+    private readonly HashSet<string> _expandedAgentPanels = new();
+
     // Secret visibility
     private bool _showToken;
 
@@ -1036,6 +1106,48 @@ else if (_config is not null)
     };
 
     private sealed record AgentEntry(string Name, AgentConfig Config);
+
+    private void ToggleAgentPanel(string agentName)
+    {
+        if (!_expandedAgentPanels.Remove(agentName))
+            _expandedAgentPanels.Add(agentName);
+    }
+
+    private bool IsAgentPanelExpanded(string agentName) => _expandedAgentPanels.Contains(agentName);
+
+    private void AddMcpServer(AgentConfig config)
+    {
+        config.McpServers.Add("");
+    }
+
+    private void RemoveMcpServer(AgentConfig config, int index)
+    {
+        if (index >= 0 && index < config.McpServers.Count)
+            config.McpServers.RemoveAt(index);
+    }
+
+    private void AddKnowledgeLink(AgentConfig config)
+    {
+        config.KnowledgeLinks.Add("");
+    }
+
+    private void RemoveKnowledgeLink(AgentConfig config, int index)
+    {
+        if (index >= 0 && index < config.KnowledgeLinks.Count)
+            config.KnowledgeLinks.RemoveAt(index);
+    }
+
+    private void UpdateMcpServer(AgentConfig config, int index, string value)
+    {
+        if (index >= 0 && index < config.McpServers.Count)
+            config.McpServers[index] = value;
+    }
+
+    private void UpdateKnowledgeLink(AgentConfig config, int index, string value)
+    {
+        if (index >= 0 && index < config.KnowledgeLinks.Count)
+            config.KnowledgeLinks[index] = value;
+    }
 
     private async Task ValidatePat()
     {

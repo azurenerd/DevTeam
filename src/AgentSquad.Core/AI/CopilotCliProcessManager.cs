@@ -289,6 +289,17 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         if (!string.IsNullOrEmpty(_config.AdditionalArgs))
             args.Append(_config.AdditionalArgs);
 
+        // MCP servers from the current agent's role configuration
+        var mcpServers = AgentCallContext.McpServers;
+        if (mcpServers is { Count: > 0 })
+        {
+            foreach (var server in mcpServers)
+            {
+                if (!string.IsNullOrWhiteSpace(server))
+                    args.Append($" --mcp-server {server}");
+            }
+        }
+
         return args.ToString().Trim();
     }
 

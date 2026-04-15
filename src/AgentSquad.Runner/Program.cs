@@ -81,6 +81,9 @@ builder.Services.AddSingleton<INotificationChannel, AgentSquad.Core.Notification
 builder.Services.AddSingleton<INotificationChannel, AgentSquad.Core.Notifications.SlackNotificationChannel>();
 builder.Services.AddSingleton<IGateCheckService, GateCheckService>();
 
+// Role context customization: per-agent role descriptions, MCP servers, knowledge links
+builder.Services.AddSingleton<AgentSquad.Core.AI.RoleContextProvider>();
+
 // Agentic loop: self-assessment and reasoning observability
 builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog, AgentSquad.Core.Agents.Reasoning.AgentReasoningLog>();
 builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.SelfAssessmentService>();

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -71,11 +72,12 @@ public abstract class EngineerAgentBase : AgentBase
         AgentMemoryStore memoryStore,
         IGateCheckService gateCheck,
         ILogger<AgentBase> logger,
+        RoleContextProvider? roleContextProvider = null,
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         Core.Metrics.BuildTestMetrics? metrics = null,
         PlaywrightRunner? playwrightRunner = null)
-        : base(identity, logger, memoryStore)
+        : base(identity, logger, memoryStore, roleContextProvider)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         GitHub = github ?? throw new ArgumentNullException(nameof(github));
@@ -484,7 +486,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             // Use AI to understand the Issue and plan approach
             var memoryContext = await GetMemoryContextAsync(ct: ct);
-            var planHistory = new ChatHistory();
+            var planHistory = CreateChatHistory();
             planHistory.AddSystemMessage(
                 $"You are a {GetRoleDisplayName()} analyzing a GitHub Issue (User Story) before starting work. " +
                 $"The project uses {techStack}. " +
@@ -618,7 +620,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Identity.Role, Identity.DisplayName, stepNumber, steps.Count, pr.Number,
                 Truncate(step, 100));
 
-            var stepHistory = new ChatHistory();
+            var stepHistory = CreateChatHistory();
             stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
 
             var contextBuilder = new System.Text.StringBuilder();
@@ -837,7 +839,7 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 $"You are a {GetRoleDisplayName()} planning implementation steps for a coding task. " +
                 $"The project uses {techStack}. " +
@@ -884,7 +886,7 @@ public abstract class EngineerAgentBase : AgentBase
         string pmSpec, string archDoc, string techStack,
         IChatCompletionService chat, CancellationToken ct)
     {
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
 
         var promptBuilder = new System.Text.StringBuilder();
@@ -1246,7 +1248,7 @@ public abstract class EngineerAgentBase : AgentBase
             var currentFilesContext = await PrWorkflow.GetPRCodeContextAsync(
                 rework.PrNumber, pr.HeadBranch, ct: ct);
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(GetReworkSystemPrompt(techStack) +
                 (string.IsNullOrEmpty(reworkMemory) ? "" : $"\n\n{reworkMemory}"));
 
@@ -1595,7 +1597,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogWarning("{Role} {Name} no steps generated for legacy PR #{Number}, using single-pass",
                     Identity.Role, Identity.DisplayName, pr.Number);
 
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
                 history.AddUserMessage(
                     $"## PM Specification\n{pmSpecDoc}\n\n" +
@@ -1650,7 +1652,7 @@ public abstract class EngineerAgentBase : AgentBase
                     UpdateStatus(AgentStatus.Working,
                         $"PR #{pr.Number} step {stepNumber}/{steps.Count}: {Truncate(step, 60)}");
 
-                    var stepHistory = new ChatHistory();
+                    var stepHistory = CreateChatHistory();
                     stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
 
                     var contextBuilder = new System.Text.StringBuilder();
@@ -2308,7 +2310,7 @@ public abstract class EngineerAgentBase : AgentBase
                 fixPrompt += fileContext.ToString();
             }
 
-            var fixHistory = new ChatHistory();
+            var fixHistory = CreateChatHistory();
             fixHistory.AddUserMessage(fixPrompt);
             var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
             var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
@@ -2482,7 +2484,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Do NOT modify the test files unless the tests themselves are wrong.
                 """;
 
-            var fixHistory = new ChatHistory();
+            var fixHistory = CreateChatHistory();
             fixHistory.AddUserMessage(fixPrompt);
             var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
             var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
@@ -2555,7 +2557,7 @@ public abstract class EngineerAgentBase : AgentBase
             Ensure the remaining code still compiles after removal.
             """;
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddUserMessage(removePrompt);
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
         var updatedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(response.Content ?? "");
@@ -2652,7 +2654,7 @@ public abstract class EngineerAgentBase : AgentBase
                 ```
                 """;
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddUserMessage(regenPrompt);
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
             var regeneratedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(response.Content ?? "");

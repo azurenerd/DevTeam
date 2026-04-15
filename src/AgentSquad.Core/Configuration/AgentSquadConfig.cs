@@ -87,6 +87,25 @@ public class AgentConfig
     public string ModelTier { get; set; } = "standard";
     public bool Enabled { get; set; } = true;
     public int? MaxDailyTokens { get; set; }
+
+    /// <summary>
+    /// Custom role description that augments the agent's default system prompt.
+    /// When set, this is prepended to every system message to define the agent's persona.
+    /// Leave empty to use the default hardcoded role behavior.
+    /// </summary>
+    public string RoleDescription { get; set; } = "";
+
+    /// <summary>
+    /// MCP server names this agent can use for tool calls via the Copilot CLI.
+    /// Each name is passed as a <c>--mcp-server</c> flag to the CLI process.
+    /// </summary>
+    public List<string> McpServers { get; set; } = new();
+
+    /// <summary>
+    /// URLs to documentation or knowledge pages that provide additional context for this agent.
+    /// Content is fetched and summarized at agent initialization and cached for the session.
+    /// </summary>
+    public List<string> KnowledgeLinks { get; set; } = new();
 }
 
 public class LimitsConfig

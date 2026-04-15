@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Reasoning;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -95,13 +96,14 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         SelfAssessmentService selfAssessment,
         IAgentReasoningLog reasoningLog,
         ILogger<PrincipalEngineerAgent> logger,
+        RoleContextProvider? roleContextProvider = null,
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         Core.Metrics.BuildTestMetrics? metrics = null,
         PlaywrightRunner? playwrightRunner = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               buildRunner, testRunner, metrics, playwrightRunner)
+               roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
@@ -448,7 +450,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddSystemMessage(
             "You are a Principal Engineer creating an engineering plan from GitHub Issues (User Stories), " +
             "an architecture document, and a PM specification. " +
@@ -778,7 +780,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
 
             foreach (var enhancement in uncoveredEnhancements)
             {
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(
                     "You are a Principal Engineer validating engineering plan coverage. " +
                     "An enhancement (user story) has no dedicated engineering task. " +
@@ -1275,7 +1277,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                             "PE implementing step {Step}/{Total} for task {TaskId}: {Desc}",
                             stepNumber, steps.Count, task.Id, Truncate(step, 100));
 
-                        var stepHistory = new ChatHistory();
+                        var stepHistory = CreateChatHistory();
                         stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
 
                         var ctx = new System.Text.StringBuilder();
@@ -1353,7 +1355,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating code (single-pass)");
                 Logger.LogInformation("PE using single-pass implementation for task {TaskId}", task.Id);
 
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
                 var issueContext = sourceIssue is not null
                     ? $"\n\n## GitHub Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}"
@@ -2088,7 +2090,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 Logger.LogInformation("PE using single-pass for continued implementation on PR #{PrNumber}", pr.Number);
                 UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} step 1/1: {Truncate(pr.Title, 60)}");
 
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(GetImplementationSystemPrompt(techStack));
 
                 var ctx = new System.Text.StringBuilder();
@@ -2181,7 +2183,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     "PE implementing step {Step}/{Total} for PR #{PrNumber}: {Desc}",
                     stepNumber, steps.Count, pr.Number, Truncate(step, 100));
 
-                var stepHistory = new ChatHistory();
+                var stepHistory = CreateChatHistory();
                 stepHistory.AddSystemMessage(GetStepImplementationSystemPrompt(techStack, stepNumber, steps.Count));
 
                 var ctx = new System.Text.StringBuilder();
@@ -2706,7 +2708,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a Principal Engineer performing final integration review. " +
                 $"The project uses {techStack}. " +
@@ -3045,7 +3047,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             // Tier 4: Get repo structure for duplicate detection during review
             var repoStructure = await GetRepoStructureForContextAsync(ct);
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a Principal Engineer doing a technical code review.\n\n" +
                 "SCOPE: This PR is ONE task. Review the ACTUAL CODE against its stated scope.\n\n" +
@@ -3438,7 +3440,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     issueContext = $"\n\n## Source Issue #{issue.Number}\n{issue.Body}";
             }
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a Principal Engineer writing a detailed PR description for an engineering task. " +
                 "The description should be clear enough for another engineer to implement the task. " +

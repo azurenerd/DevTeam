@@ -95,12 +95,13 @@ public class TestEngineerAgent : AgentBase
         IOptions<AgentSquadConfig> config,
         IGateCheckService gateCheck,
         ILogger<AgentBase> logger,
+        RoleContextProvider? roleContextProvider = null,
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         PlaywrightRunner? playwrightRunner = null,
         TestStrategyAnalyzer? testStrategyAnalyzer = null,
         Core.Metrics.BuildTestMetrics? metrics = null)
-        : base(identity, logger, memoryStore)
+        : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -590,7 +591,7 @@ public class TestEngineerAgent : AgentBase
 
         try
         {
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddUserMessage(prompt);
             var response = await chat.GetChatMessageContentsAsync(history, cancellationToken: ct);
             var responseText = string.Join("", response.Select(r => r.Content ?? ""));
@@ -1141,7 +1142,7 @@ public class TestEngineerAgent : AgentBase
             }
             catch { /* non-critical */ }
 
-            var fixHistory = new ChatHistory();
+            var fixHistory = CreateChatHistory();
             fixHistory.AddSystemMessage(
                 "You are a test engineer fixing build errors in test files. " +
                 "The test files were added to an existing PR branch and won't compile. " +
@@ -1928,7 +1929,7 @@ public class TestEngineerAgent : AgentBase
             Logger.LogInformation("TE single-pass: generating {Tiers} tests in one prompt for PR #{Number}",
                 string.Join(", ", tiers), pr.Number);
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
 
             // Combined system prompt with all tier guidance
             var combinedSystem = new System.Text.StringBuilder();
@@ -2100,7 +2101,7 @@ public class TestEngineerAgent : AgentBase
         CancellationToken ct,
         IReadOnlyList<string>? uiScenarios = null)
     {
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddSystemMessage(GetTierSystemPrompt(tier, techStack, memoryContext));
 
         var userPrompt = new System.Text.StringBuilder();
@@ -3006,7 +3007,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     : buildResult.Errors.Length > 2000 ? buildResult.Errors[..2000] : buildResult.Errors;
 
                 // Include project context so AI can properly fix structural issues
-                var fixHistory = new ChatHistory();
+                var fixHistory = CreateChatHistory();
                 fixHistory.AddSystemMessage(
                     "You are a test engineer fixing build errors in test files. " +
                     "You have full context about the project structure.\n" +
@@ -3177,7 +3178,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     ? string.Join("\n", testResult.FailureDetails.Take(10))
                     : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
 
-                var fixHistory = new ChatHistory();
+                var fixHistory = CreateChatHistory();
                 fixHistory.AddUserMessage(
                     $"{tier} tests failed ({testResult.Failed} of {testResult.Total}):\n\n{failureSummary}\n\n" +
                     "Fix the test code. Output ONLY corrected files using:\n" +
@@ -3274,7 +3275,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         var sourceContext = string.Join("\n\n", sourceFiles.Take(5).Select(kv =>
             $"### {kv.Key}\n```\n{(kv.Value.Length > 2000 ? kv.Value[..2000] : kv.Value)}\n```"));
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddSystemMessage(
             "You are an expert test engineer classifying test failures. " +
             "For each failing test, determine if the failure is caused by:\n" +
@@ -3414,7 +3415,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             Ensure the remaining code still compiles after removal.
             """;
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddUserMessage(removePrompt);
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
         var updatedFiles = CodeFileParser.ParseFiles(response.Content ?? "");
@@ -3596,7 +3597,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 var currentFilesContext = await _prWorkflow.GetPRCodeContextAsync(
                     rework.PrNumber, pr.HeadBranch, ct: ct);
 
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(
                     $"You are an expert test engineer maintaining tests for a {techStack} project.\n" +
                     "A reviewer requested changes on your test PR. Update the test files to address all feedback.\n\n" +

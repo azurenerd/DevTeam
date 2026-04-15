@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Reasoning;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -58,8 +59,9 @@ public class ProgramManagerAgent : AgentBase
         IGateCheckService gateCheck,
         SelfAssessmentService selfAssessment,
         IAgentReasoningLog reasoningLog,
-        ILogger<ProgramManagerAgent> logger)
-        : base(identity, logger, memoryStore)
+        ILogger<ProgramManagerAgent> logger,
+        RoleContextProvider? roleContextProvider = null)
+        : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -1059,7 +1061,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
                 var chat = kernel.GetRequiredService<IChatCompletionService>();
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
 
                 history.AddSystemMessage(
                     "You are a Program Manager reviewing whether a user story has been fully delivered. " +
@@ -1316,7 +1318,7 @@ public class ProgramManagerAgent : AgentBase
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 $"You are a Program Manager revising {docName} based on human reviewer feedback. " +
                 "Make the specific changes requested while preserving the overall structure.");
@@ -1408,7 +1410,7 @@ public class ProgramManagerAgent : AgentBase
                 {
                     var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                     var qChat = qKernel.GetRequiredService<IChatCompletionService>();
-                    var qHistory = new ChatHistory();
+                    var qHistory = CreateChatHistory();
                     qHistory.AddSystemMessage("You are a Program Manager. Write a brief product specification.");
                     qHistory.AddUserMessage(
                         $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
@@ -1547,7 +1549,7 @@ public class ProgramManagerAgent : AgentBase
                     designContext;
             }
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(systemPrompt);
 
             // Turn 1: Analyze and identify business goals, user stories, success criteria
@@ -1813,7 +1815,7 @@ public class ProgramManagerAgent : AgentBase
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a Program Manager extracting User Stories from a PM Specification document. " +
                 "For each User Story, produce a structured output that can be parsed into individual GitHub Issues.\n\n" +
@@ -1943,7 +1945,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
 
-                var history = new ChatHistory();
+                var history = CreateChatHistory();
                 history.AddSystemMessage(
                     "You are a Program Manager answering a clarification question from an engineer " +
                     "about a GitHub Issue (User Story). Use the PM Specification as your primary " +
@@ -2026,7 +2028,7 @@ public class ProgramManagerAgent : AgentBase
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             history.AddSystemMessage(
                 "You are a Program Manager triaging a blocker issue in a software project. " +
                 "Analyze the blocker and provide actionable guidance. " +
@@ -2100,7 +2102,7 @@ public class ProgramManagerAgent : AgentBase
 
             var hasScreenshots = screenshotImages.Count > 0 || !string.IsNullOrEmpty(screenshotContext);
 
-            var history = new ChatHistory();
+            var history = CreateChatHistory();
             var systemPrompt =
                 "You are a PM performing the FINAL review of a PR (Phase 3: after Architect approval and Test Engineer testing).\n\n" +
                 "SCOPE: This PR is ONE task. Check it against its linked user story/issue and " +

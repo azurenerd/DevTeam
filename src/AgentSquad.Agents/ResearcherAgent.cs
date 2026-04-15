@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Reasoning;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
@@ -42,8 +43,9 @@ public class ResearcherAgent : AgentBase
         SelfAssessmentService selfAssessment,
         IAgentReasoningLog reasoningLog,
         ILogger<ResearcherAgent> logger,
+        RoleContextProvider? roleContextProvider = null,
         PlaywrightRunner? playwrightRunner = null)
-        : base(identity, logger, memoryStore)
+        : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
@@ -338,7 +340,7 @@ public class ResearcherAgent : AgentBase
             Logger.LogInformation("QuickDocumentCreation: producing minimal Research.md for '{Topic}'", directive.Topic);
             var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var qChat = qKernel.GetRequiredService<IChatCompletionService>();
-            var qHistory = new ChatHistory();
+            var qHistory = CreateChatHistory();
             qHistory.AddSystemMessage("You are a technical researcher. Produce a brief, 1-paragraph research summary.");
             qHistory.AddUserMessage(
                 $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n" +
@@ -362,7 +364,7 @@ public class ResearcherAgent : AgentBase
         var designContext = await ScanForDesignReferencesAsync(ct);
         _lastDesignSection = designContext; // Cache for appending to Research.md later
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
 
         var systemPrompt = "You are a senior technical researcher on a software development team. " +
@@ -719,7 +721,7 @@ public class ResearcherAgent : AgentBase
             return null;
         }
 
-        var history = new ChatHistory();
+        var history = CreateChatHistory();
         history.AddSystemMessage(
             "You are a senior technical researcher revising a research document based on human reviewer feedback. " +
             "Read the existing document and the reviewer's feedback carefully. " +

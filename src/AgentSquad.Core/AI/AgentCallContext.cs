@@ -35,4 +35,16 @@ public static class AgentCallContext
         get => _currentSessionId.Value;
         set => _currentSessionId.Value = value;
     }
+
+    private static readonly AsyncLocal<IReadOnlyList<string>?> _mcpServers = new();
+
+    /// <summary>
+    /// MCP server names configured for the current agent's async context.
+    /// When set, each server name is passed as <c>--mcp-server name</c> to the CLI process.
+    /// </summary>
+    public static IReadOnlyList<string>? McpServers
+    {
+        get => _mcpServers.Value;
+        set => _mcpServers.Value = value;
+    }
 }
