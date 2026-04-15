@@ -947,7 +947,64 @@ public partial class PullRequestWorkflow
         if (pr is not null && !string.IsNullOrEmpty(pr.HeadBranch))
             await _github.DeleteBranchAsync(pr.HeadBranch, ct);
 
+        // Proactively sync other open PRs with main to prevent merge conflicts from accumulating.
+        // This runs after every successful merge so other PRs stay up-to-date.
+        await SyncOpenPullRequestBranchesAsync(prNumber, ct);
+
         return MergeAttemptResult.Merged;
+    }
+
+    /// <summary>
+    /// After a PR merge, proactively update other open PR branches with the latest main.
+    /// Uses the GitHub "update branch" API (merges main into the PR branch).
+    /// Only syncs branches that are behind main; failures are logged but don't block.
+    /// </summary>
+    private async Task SyncOpenPullRequestBranchesAsync(int justMergedPrNumber, CancellationToken ct)
+    {
+        try
+        {
+            var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+            var behindPRs = openPRs
+                .Where(pr => pr.Number != justMergedPrNumber)
+                .ToList();
+
+            if (behindPRs.Count == 0)
+                return;
+
+            _logger.LogInformation(
+                "Post-merge sync: updating {Count} open PR branches after merging #{MergedPR}",
+                behindPRs.Count, justMergedPrNumber);
+
+            foreach (var pr in behindPRs)
+            {
+                try
+                {
+                    var isBehind = await _github.IsBranchBehindMainAsync(pr.Number, ct);
+                    if (!isBehind)
+                        continue;
+
+                    var updated = await _github.UpdatePullRequestBranchAsync(pr.Number, ct);
+                    if (updated)
+                    {
+                        _logger.LogInformation("Synced PR #{PrNumber} branch with main", pr.Number);
+                    }
+                    else
+                    {
+                        _logger.LogDebug(
+                            "Could not auto-sync PR #{PrNumber} — may need manual conflict resolution",
+                            pr.Number);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Failed to sync PR #{PrNumber} branch — will retry at merge time", pr.Number);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Post-merge branch sync failed — non-critical, will retry at next merge");
+        }
     }
 
     /// <summary>
