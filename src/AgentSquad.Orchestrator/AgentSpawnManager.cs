@@ -234,6 +234,117 @@ public class AgentSpawnManager
     }
 
     /// <summary>
+    /// Spawns an SME agent from an <see cref="SMEAgentDefinition"/>.
+    /// Enforces MaxInstances per definition and MaxTotalSmeAgents globally.
+    /// Subject to human gate approval via <see cref="GateIds.SmeAgentSpawn"/>.
+    /// </summary>
+    public async Task<AgentIdentity?> SpawnSmeAgentAsync(
+        SMEAgentDefinition definition, int? assignToIssue = null, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        // Check per-definition instance limit
+        var existingCount = _registry.GetAllAgents()
+            .Count(a => a.Identity.Role == AgentRole.Custom
+                     && a.Identity.CustomAgentName != null
+                     && a.Identity.CustomAgentName.StartsWith($"sme:{definition.DefinitionId}", StringComparison.OrdinalIgnoreCase));
+
+        if (existingCount >= definition.MaxInstances)
+        {
+            _logger.LogWarning("SME agent '{RoleName}' at max instances ({Max})",
+                definition.RoleName, definition.MaxInstances);
+            return null;
+        }
+
+        // Check global SME agent cap
+        var smeConfig = _config.SmeAgents;
+        var totalSmeCount = _registry.GetAllAgents()
+            .Count(a => a.Identity.Role == AgentRole.Custom
+                     && a.Identity.CustomAgentName?.StartsWith("sme:", StringComparison.OrdinalIgnoreCase) == true);
+
+        if (totalSmeCount >= smeConfig.MaxTotalSmeAgents)
+        {
+            _logger.LogWarning("Total SME agent cap reached ({Max}). Cannot spawn '{RoleName}'.",
+                smeConfig.MaxTotalSmeAgents, definition.RoleName);
+            return null;
+        }
+
+        var identity = new AgentIdentity
+        {
+            Id = $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}"[..Math.Min(48, $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}".Length)],
+            DisplayName = definition.RoleName,
+            Role = AgentRole.Custom,
+            ModelTier = definition.ModelTier,
+            CustomAgentName = $"sme:{definition.DefinitionId}",
+            Rank = existingCount
+        };
+
+        try
+        {
+            // === Gate: SmeAgentSpawn — human approves SME agent creation ===
+            await _gateCheck.WaitForGateAsync(
+                GateIds.SmeAgentSpawn,
+                $"Ready to spawn SME agent: {definition.RoleName} ({definition.DefinitionId})\n" +
+                $"Capabilities: {string.Join(", ", definition.Capabilities)}\n" +
+                $"MCP Servers: {string.Join(", ", definition.McpServers)}",
+                ct: ct);
+
+            _logger.LogInformation(
+                "Spawning SME agent '{RoleName}' (def: {DefId}) with tier '{Tier}'.",
+                definition.RoleName, definition.DefinitionId, definition.ModelTier);
+
+            var agent = _agentFactory.CreateSme(identity, definition);
+            await _registry.RegisterAsync(agent, ct);
+            await agent.InitializeAsync(ct);
+
+            // Start the agent's main loop as a background task
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await agent.StartAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (Exception loopEx)
+                {
+                    _logger.LogError(loopEx, "SME agent '{AgentId}' loop crashed.", identity.Id);
+                }
+            }, ct);
+
+            _logger.LogInformation(
+                "SME agent '{AgentId}' ({RoleName}) spawned and initialized.",
+                identity.Id, definition.RoleName);
+
+            // Optionally assign to a task
+            if (assignToIssue.HasValue)
+            {
+                var messageBus = _registry.GetAgent(identity.Id) is not null
+                    ? GetMessageBus()
+                    : null;
+
+                // Assignment will be handled by the caller via message bus
+                _logger.LogInformation("SME agent '{AgentId}' should be assigned to issue #{Issue}",
+                    identity.Id, assignToIssue.Value);
+            }
+
+            return identity;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to spawn SME agent '{RoleName}' (def: {DefId}).",
+                definition.RoleName, definition.DefinitionId);
+
+            try { await _registry.UnregisterAsync(identity.Id, ct); }
+            catch { /* best-effort cleanup */ }
+
+            throw;
+        }
+    }
+
+    // Helper to get message bus from DI - lazy approach to avoid circular dependency
+    private Core.Messaging.IMessageBus? GetMessageBus() => null; // Will be wired in Phase 6
+
+    /// <summary>
     /// Returns true if a new agent of the given role may be spawned
     /// without exceeding configured limits.
     /// </summary>

@@ -8,6 +8,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Services;
 using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
@@ -32,6 +33,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
     private readonly EngineeringTaskIssueManager _taskManager;
     private readonly SelfAssessmentService _selfAssessment;
     private readonly IAgentReasoningLog _reasoningLog;
+    private readonly SmeDefinitionGenerator? _smeGenerator;
+    private readonly AgentSpawnManager? _spawnManager;
 
     private bool _planningComplete;
     private bool _planningSignalReceived;
@@ -100,7 +103,9 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         BuildRunner? buildRunner = null,
         TestRunner? testRunner = null,
         Core.Metrics.BuildTestMetrics? metrics = null,
-        PlaywrightRunner? playwrightRunner = null)
+        PlaywrightRunner? playwrightRunner = null,
+        SmeDefinitionGenerator? smeGenerator = null,
+        AgentSpawnManager? spawnManager = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner)
@@ -110,6 +115,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
         _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
         _taskManager = new EngineeringTaskIssueManager(github, logger);
+        _smeGenerator = smeGenerator;
+        _spawnManager = spawnManager;
     }
 
     protected override string GetRoleDisplayName() => "Principal Engineer";
@@ -3664,6 +3671,100 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to read design reference files for engineering plan");
+            return null;
+        }
+    }
+
+    #endregion
+
+    #region SME Reactive Spawning
+
+    /// <summary>
+    /// Evaluates whether a task requires specialist expertise and, if so,
+    /// generates an SME agent definition and requests spawning (human-gated).
+    /// Returns the spawned agent's identity, or null if no SME was needed.
+    /// </summary>
+    protected async Task<AgentIdentity?> RequestSmeIfNeededAsync(
+        string taskDescription, string? additionalContext, CancellationToken ct)
+    {
+        if (_smeGenerator is null || _spawnManager is null)
+            return null;
+
+        if (!Config.SmeAgents.Enabled || !Config.SmeAgents.AllowAgentCreatedDefinitions)
+            return null;
+
+        try
+        {
+            // Ask AI if this task needs specialist expertise
+            var kernel = Models.GetKernel(Identity.ModelTier);
+            var chatService = kernel.GetRequiredService<IChatCompletionService>();
+
+            var assessPrompt = $"""
+                Evaluate whether this engineering task requires specialist expertise beyond
+                what a general Principal/Senior Engineer can handle. Consider: security, databases,
+                ML/AI, compliance, specific cloud services, accessibility, etc.
+
+                Task: {taskDescription}
+
+                Respond with ONLY "YES" or "NO" on the first line.
+                If YES, on the second line list 2-3 required capability keywords (comma-separated).
+                """;
+
+            var history = CreateChatHistory();
+            history.AddUserMessage(assessPrompt);
+
+            var assessResponse = await chatService.GetChatMessageContentsAsync(history, cancellationToken: ct);
+            var assessment = assessResponse.LastOrDefault()?.Content?.Trim() ?? "NO";
+
+            if (!assessment.StartsWith("YES", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            Logger.LogInformation("Task identified as needing SME expertise: {Task}",
+                taskDescription[..Math.Min(100, taskDescription.Length)]);
+
+            // Check for existing template match
+            var capLines = assessment.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var capabilities = capLines.Length > 1
+                ? capLines[1].Split(',', StringSplitOptions.TrimEntries).ToList()
+                : new List<string>();
+
+            var existingTemplate = await _smeGenerator.FindMatchingTemplateAsync(capabilities, ct);
+            if (existingTemplate is not null)
+            {
+                Logger.LogInformation("Found existing SME template '{RoleName}' matching task",
+                    existingTemplate.RoleName);
+                return await _spawnManager.SpawnSmeAgentAsync(existingTemplate, ct: ct);
+            }
+
+            // Generate a new definition
+            var genPrompt = _smeGenerator.BuildDefinitionGenerationPrompt(taskDescription, additionalContext);
+            history = CreateChatHistory();
+            history.AddUserMessage(genPrompt);
+
+            var genResponse = await chatService.GetChatMessageContentsAsync(history, cancellationToken: ct);
+            var genContent = genResponse.LastOrDefault()?.Content;
+
+            if (string.IsNullOrWhiteSpace(genContent))
+                return null;
+
+            var definition = _smeGenerator.ParseDefinition(genContent, Identity.Id);
+            if (definition is null)
+            {
+                Logger.LogWarning("Failed to parse AI-generated SME definition");
+                return null;
+            }
+
+            Logger.LogInformation("Generated SME definition: {RoleName} for task",
+                definition.RoleName);
+            LogActivity("task", $"🧠 Requesting SME agent: {definition.RoleName}");
+
+            // Spawn (human-gated via SmeAgentSpawn gate)
+            return await _spawnManager.SpawnSmeAgentAsync(definition, ct: ct);
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "SME assessment/spawn failed for task — proceeding without specialist");
             return null;
         }
     }

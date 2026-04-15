@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Configuration;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -32,6 +33,18 @@ public class AgentFactory : IAgentFactory
             AgentRole.Custom => CreateWithDI<CustomAgent>(identity),
             _ => throw new ArgumentException($"Unknown agent role: {role}", nameof(role))
         };
+    }
+
+    /// <summary>
+    /// Creates an SME agent from a definition. The definition is passed alongside the identity
+    /// to the DI container for constructor injection.
+    /// </summary>
+    public IAgent CreateSme(AgentIdentity identity, SMEAgentDefinition definition)
+    {
+        ArgumentNullException.ThrowIfNull(identity);
+        ArgumentNullException.ThrowIfNull(definition);
+
+        return ActivatorUtilities.CreateInstance<SmeAgent>(_serviceProvider, identity, definition);
     }
 
     private T CreateWithDI<T>(AgentIdentity identity) where T : AgentBase

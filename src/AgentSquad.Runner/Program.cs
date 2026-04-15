@@ -84,6 +84,16 @@ builder.Services.AddSingleton<IGateCheckService, GateCheckService>();
 // Role context customization: per-agent role descriptions, MCP servers, knowledge links
 builder.Services.AddSingleton<AgentSquad.Core.AI.RoleContextProvider>();
 
+// SME Agent infrastructure: MCP registry, definition service, CLI MCP config management
+builder.Services.AddSingleton<AgentSquad.Core.Services.McpServerRegistry>();
+builder.Services.AddSingleton<AgentSquad.Core.Services.McpServerAvailabilityChecker>();
+builder.Services.AddSingleton<AgentSquad.Core.Services.McpServerSecurityPolicy>();
+builder.Services.AddSingleton<AgentSquad.Core.Services.SMEAgentDefinitionService>();
+builder.Services.AddSingleton<AgentSquad.Core.Services.AgentTeamComposer>();
+builder.Services.AddSingleton<AgentSquad.Core.Services.SmeDefinitionGenerator>();
+builder.Services.AddSingleton<AgentSquad.Core.AI.CopilotCliMcpConfigManager>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<AgentSquad.Core.AI.CopilotCliMcpConfigManager>());
+
 // Agentic loop: self-assessment and reasoning observability
 builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog, AgentSquad.Core.Agents.Reasoning.AgentReasoningLog>();
 builder.Services.AddSingleton<AgentSquad.Core.Agents.Reasoning.SelfAssessmentService>();

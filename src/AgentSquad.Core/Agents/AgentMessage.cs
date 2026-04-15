@@ -110,3 +110,87 @@ public record WorkspaceCleanupMessage : AgentMessage
 {
     public required string Reason { get; init; }
 }
+
+// === SME Agent Messages ===
+
+/// <summary>
+/// Sent by PM or PE to request spawning an SME agent.
+/// Triggers human gate approval before the agent is created.
+/// </summary>
+public record SpawnSmeAgentMessage : AgentMessage
+{
+    /// <summary>Template ID from the SME catalog, or null for AI-generated definitions.</summary>
+    public string? DefinitionId { get; init; }
+
+    /// <summary>Full definition for AI-generated or custom SME agents.</summary>
+    public Configuration.SMEAgentDefinition? CustomDefinition { get; init; }
+
+    /// <summary>Optional issue number to assign to the new agent upon spawn.</summary>
+    public int? AssignToIssue { get; init; }
+
+    /// <summary>Why this SME agent is needed.</summary>
+    public string Justification { get; init; } = "";
+}
+
+/// <summary>
+/// Sent by an SME agent to report its findings after completing a task.
+/// PM or PE can use these results to inform project decisions.
+/// </summary>
+public record SmeResultMessage : AgentMessage
+{
+    /// <summary>The SME definition ID that produced this result.</summary>
+    public required string DefinitionId { get; init; }
+
+    /// <summary>Brief summary of the task that was performed.</summary>
+    public required string TaskSummary { get; init; }
+
+    /// <summary>Detailed findings from the SME analysis.</summary>
+    public required string Findings { get; init; }
+
+    /// <summary>Actionable recommendations based on findings.</summary>
+    public List<string> Recommendations { get; init; } = [];
+
+    /// <summary>Related GitHub issue number, if applicable.</summary>
+    public int? RelatedIssueNumber { get; init; }
+}
+
+/// <summary>
+/// Sent by the PM after analyzing project documents to propose the full team composition.
+/// Contains built-in agent counts, SME template activations, and new SME definitions.
+/// </summary>
+public record TeamCompositionProposalMessage : AgentMessage
+{
+    public required TeamCompositionProposal Proposal { get; init; }
+}
+
+/// <summary>
+/// Sent by the human director (via dashboard) to approve/modify the PM's team composition.
+/// </summary>
+public record TeamCompositionApprovalMessage : AgentMessage
+{
+    public required TeamCompositionProposal ApprovedProposal { get; init; }
+    public List<string> RejectedAgentIds { get; init; } = [];
+    public string? DirectorNotes { get; init; }
+}
+
+/// <summary>
+/// The PM's proposal for the optimal agent team for a project.
+/// </summary>
+public record TeamCompositionProposal
+{
+    public required string ProjectSummary { get; init; }
+    public required List<BuiltInAgentRequest> BuiltInAgents { get; init; }
+    public required List<string> ExistingTemplateIds { get; init; }
+    public required List<Configuration.SMEAgentDefinition> NewSmeAgents { get; init; }
+    public required string Rationale { get; init; }
+}
+
+/// <summary>
+/// A request for a specific built-in agent role as part of team composition.
+/// </summary>
+public record BuiltInAgentRequest
+{
+    public required AgentRole Role { get; init; }
+    public required int Count { get; init; }
+    public string? Justification { get; init; }
+}

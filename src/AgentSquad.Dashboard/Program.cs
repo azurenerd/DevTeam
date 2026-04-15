@@ -90,4 +90,7 @@ internal sealed class NoOpAgentFactory : IAgentFactory
 {
     public IAgent Create(AgentRole role, AgentIdentity identity) =>
         throw new NotSupportedException("Standalone dashboard does not spawn agents");
+
+    public IAgent CreateSme(AgentIdentity identity, SMEAgentDefinition definition) =>
+        throw new NotSupportedException("Standalone dashboard does not spawn agents");
 }

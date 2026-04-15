@@ -7,6 +7,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
+using AgentSquad.Core.Services;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -29,6 +30,8 @@ public class ProgramManagerAgent : AgentBase
     private readonly IGateCheckService _gateCheck;
     private readonly SelfAssessmentService _selfAssessment;
     private readonly IAgentReasoningLog _reasoningLog;
+    private readonly AgentTeamComposer? _teamComposer;
+    private readonly SMEAgentDefinitionService? _definitionService;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
@@ -40,6 +43,7 @@ public class ProgramManagerAgent : AgentBase
     private string? _currentPhase;
     private bool _pmSpecCreated;
     private bool _userStoryIssuesCreated;
+    private bool _teamCompositionComplete;
     private readonly HashSet<int> _reviewedEnhancementIssues = new();
 
     private readonly List<IDisposable> _subscriptions = new();
@@ -60,7 +64,9 @@ public class ProgramManagerAgent : AgentBase
         SelfAssessmentService selfAssessment,
         IAgentReasoningLog reasoningLog,
         ILogger<ProgramManagerAgent> logger,
-        RoleContextProvider? roleContextProvider = null)
+        RoleContextProvider? roleContextProvider = null,
+        AgentTeamComposer? teamComposer = null,
+        SMEAgentDefinitionService? definitionService = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -75,6 +81,8 @@ public class ProgramManagerAgent : AgentBase
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
         _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
         _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
+        _teamComposer = teamComposer;
+        _definitionService = definitionService;
     }
 
     protected override Task OnInitializeAsync(CancellationToken ct)
@@ -1756,6 +1764,12 @@ public class ProgramManagerAgent : AgentBase
 
             Logger.LogInformation("Triggered Architect to begin architecture design");
 
+            // Team composition: evaluate catalog and propose optimal team (if SME system enabled)
+            if (_teamComposer is not null && _config.SmeAgents.Enabled && !_teamCompositionComplete)
+            {
+                await ComposeTeamAsync(ct);
+            }
+
             // After PMSpec is merged, create User Story Issues
             await CreateUserStoryIssuesAsync(ct);
 
@@ -1766,6 +1780,144 @@ public class ProgramManagerAgent : AgentBase
             Logger.LogError(ex, "Failed to create PM Specification — will retry on next loop");
             RecordError($"PMSpec creation failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
             _pmSpecCreated = false; // Allow retry on next loop iteration
+        }
+    }
+
+    /// <summary>
+    /// Evaluates the project and proposes an optimal team composition, including
+    /// which built-in agents to use and whether any SME agents should be spawned.
+    /// Subject to human-gated approval via AgentTeamComposition gate.
+    /// </summary>
+    private async Task ComposeTeamAsync(CancellationToken ct)
+    {
+        if (_teamComposer is null || _teamCompositionComplete) return;
+
+        try
+        {
+            UpdateStatus(AgentStatus.Working, "Composing optimal team");
+            LogActivity("task", "🏗️ Analyzing project to determine optimal team composition");
+
+            // Gather project docs
+            var projectDesc = _config.Project.Description ?? "No project description";
+            var research = await _projectFiles.GetResearchDocAsync(ct);
+            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+
+            // Build the team composition prompt
+            var compositionPrompt = await _teamComposer.BuildTeamCompositionPromptAsync(
+                projectDesc, research, pmSpec, ct);
+
+            // Call AI to analyze and propose team
+            var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+            var chatService = kernel.GetRequiredService<IChatCompletionService>();
+
+            var history = CreateChatHistory();
+            history.AddUserMessage(compositionPrompt);
+
+            var response = await chatService.GetChatMessageContentsAsync(history, cancellationToken: ct);
+            var aiResponse = response.LastOrDefault()?.Content;
+
+            if (string.IsNullOrWhiteSpace(aiResponse))
+            {
+                Logger.LogWarning("AI returned empty response for team composition. Using default team.");
+                _teamCompositionComplete = true;
+                return;
+            }
+
+            // Parse the proposal
+            var proposal = _teamComposer.ParseProposal(aiResponse, Identity.Id);
+            if (proposal is null)
+            {
+                Logger.LogWarning("Failed to parse team composition proposal. Using default team.");
+                _teamCompositionComplete = true;
+                return;
+            }
+
+            Logger.LogInformation(
+                "Team composition proposed: {BuiltInCount} built-in, {TemplateCount} templates, {NewSmeCount} new SME agents",
+                proposal.BuiltInAgents.Count, proposal.ExistingTemplateIds.Count, proposal.NewSmeAgents.Count);
+
+            // === Gate: AgentTeamComposition — human approves team composition ===
+            var gateResult = await _gateCheck.WaitForGateAsync(
+                GateIds.AgentTeamComposition,
+                $"PM proposes team composition:\n" +
+                $"Built-in: {string.Join(", ", proposal.BuiltInAgents.Select(a => $"{a.Role}x{a.Count}"))}\n" +
+                $"SME Templates: {string.Join(", ", proposal.ExistingTemplateIds)}\n" +
+                $"New SME Agents: {string.Join(", ", proposal.NewSmeAgents.Select(s => s.RoleName))}\n\n" +
+                $"Rationale: {proposal.Rationale}",
+                ct: ct);
+
+            // Generate and save TeamComposition.md
+            var teamDoc = _teamComposer.GenerateTeamCompositionDoc(proposal);
+            await _projectFiles.SaveFileAsync("TeamComposition.md", teamDoc,
+                "PM: Add team composition document", ct);
+            Logger.LogInformation("TeamComposition.md saved");
+
+            // Spawn any new SME agents from the approved proposal
+            foreach (var smeDef in proposal.NewSmeAgents)
+            {
+                try
+                {
+                    var spawned = await _spawnManager.SpawnSmeAgentAsync(smeDef, ct: ct);
+                    if (spawned is not null)
+                    {
+                        Logger.LogInformation("Spawned SME agent '{RoleName}' ({AgentId})",
+                            smeDef.RoleName, spawned.Id);
+                        LogActivity("task", $"🤖 Spawned SME agent: {smeDef.RoleName}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Failed to spawn SME agent '{RoleName}'", smeDef.RoleName);
+                }
+            }
+
+            // Spawn existing templates
+            foreach (var templateId in proposal.ExistingTemplateIds)
+            {
+                try
+                {
+                    var template = _definitionService is not null
+                        ? await _definitionService.GetAsync(templateId, ct)
+                        : null;
+
+                    if (template is not null)
+                    {
+                        var spawned = await _spawnManager.SpawnSmeAgentAsync(template, ct: ct);
+                        if (spawned is not null)
+                        {
+                            Logger.LogInformation("Spawned template SME agent '{RoleName}' ({AgentId})",
+                                template.RoleName, spawned.Id);
+                        }
+                    }
+                    else
+                    {
+                        Logger.LogWarning("Template '{TemplateId}' not found in definition service", templateId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(ex, "Failed to spawn template SME agent '{TemplateId}'", templateId);
+                }
+            }
+
+            // Signal team composition complete
+            await _messageBus.PublishAsync(new StatusUpdateMessage
+            {
+                FromAgentId = Identity.Id,
+                ToAgentId = "*",
+                MessageType = "TeamCompositionComplete",
+                NewStatus = AgentStatus.Working,
+                Details = $"Team composition approved: {proposal.BuiltInAgents.Count} built-in + {proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count} SME agents"
+            }, ct);
+
+            _teamCompositionComplete = true;
+            LogActivity("task", "✅ Team composition complete");
+        }
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex, "Team composition failed — proceeding with default team");
+            _teamCompositionComplete = true; // Don't block workflow
         }
     }
 

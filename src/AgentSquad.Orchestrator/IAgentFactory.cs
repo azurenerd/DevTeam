@@ -1,6 +1,7 @@
 namespace AgentSquad.Orchestrator;
 
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Configuration;
 
 /// <summary>
 /// Factory for creating agent instances by role.
@@ -9,4 +10,9 @@ using AgentSquad.Core.Agents;
 public interface IAgentFactory
 {
     IAgent Create(AgentRole role, AgentIdentity identity);
+
+    /// <summary>
+    /// Creates an SME agent from a definition. Used for dynamically-created specialist agents.
+    /// </summary>
+    IAgent CreateSme(AgentIdentity identity, SMEAgentDefinition definition);
 }

@@ -14,6 +14,8 @@ public class AgentSquadConfig
     public WorkspaceConfig Workspace { get; set; } = new();
     public HumanInteractionConfig HumanInteraction { get; set; } = new();
     public AgenticLoopConfig AgenticLoop { get; set; } = new();
+    public Dictionary<string, McpServerDefinition> McpServers { get; set; } = new();
+    public SmeAgentsConfig SmeAgents { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -344,6 +346,7 @@ public class HumanInteractionConfig
     {
         [GateIds.ProjectKickoff] = new(),
         [GateIds.AgentTeamComposition] = new(),
+        [GateIds.SmeAgentSpawn] = new(),
         [GateIds.ResearchFindings] = new(),
         [GateIds.ResearchCompleteness] = new(),
         [GateIds.PMSpecification] = new(),
@@ -431,6 +434,7 @@ public static class GateIds
     // Phase: Initialization
     public const string ProjectKickoff = "ProjectKickoff";
     public const string AgentTeamComposition = "AgentTeamComposition";
+    public const string SmeAgentSpawn = "SmeAgentSpawn";
 
     // Phase: Research
     public const string ResearchFindings = "ResearchFindings";
@@ -466,6 +470,8 @@ public static class GateIds
             "Pause before agents begin work. When enabled: you review the project description, goals, and constraints — agents wait for your go-ahead. When auto: agents start immediately after launch."),
         ("Initialization", AgentTeamComposition, "Agent Team",
             "Pause after PM proposes the agent team. When enabled: you review which agents spawn, their model tiers, and role assignments — you can adjust before resources are allocated. When auto: PM's team composition is accepted and agents spawn immediately."),
+        ("Initialization", SmeAgentSpawn, "SME Agent Spawn",
+            "Pause when PM or PE requests spawning an SME agent during workflow. When enabled: you review the SME definition, MCP servers, and justification before the agent is created. When auto: SME agents spawn immediately when requested."),
         ("Research", ResearchFindings, "Research Findings",
             "Pause after Researcher produces Research.md. When enabled: you review competitive analysis, technology landscape, and key findings before the PM writes the spec. When auto: PM proceeds to write the spec from research as-is."),
         ("Research", ResearchCompleteness, "Research Complete",

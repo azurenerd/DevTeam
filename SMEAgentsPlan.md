@@ -39,6 +39,24 @@ Enable AgentSquad agents (primarily the PM and PE) to **dynamically define and s
 3. **External knowledge sources** — URLs, documents, and APIs that the agent digests to become a subject matter expert in a specific domain
 4. **Composable capabilities** — agents can mix and match MCP servers + knowledge to create specialists like "Security Auditor" (GitHub MCP + OWASP knowledge), "UI Tester" (Playwright MCP + design spec knowledge), or "Database Architect" (PostgreSQL MCP + schema docs)
 
+### The Director's Vision: PM-Driven Agent Team Composition
+
+The core vision is that the **PM agent acts as the team director** — it doesn't just manage tasks, it **designs the team** needed for each project. The flow:
+
+1. **PM reads the project description** (the feature change / project scope for the GitHub project)
+2. **PM reads Research.md** (produced by the Researcher agent during the Research phase)
+3. **PM writes and reads PMSpec.md** (its own business specification synthesizing the above)
+4. **PM reviews the catalog of available agents and their capabilities** — both the 7 built-in roles and any previously-defined SME agent templates
+5. **PM decides the optimal team composition:**
+   - Which built-in agents are needed (and how many of each — e.g., 2 Senior Engineers, 1 Junior)
+   - Which existing SME templates match the project needs (e.g., "Database Architect" for a data-heavy feature)
+   - Whether a **new SME agent role needs to be created** for capabilities not covered by any existing agent
+6. **For new SME agents, the PM defines the role** — provides a role description, selects MCP servers from the registry, and specifies websites/documents/APIs for the agent to digest and build domain expertise from
+7. **Human gate approval** — before any new SME agent is actually spawned, the human director can review and approve/modify/reject the PM's team composition proposal
+8. **PM tracks SME agents** as part of the team — assigns them to tasks, includes their output in the team's workflow, and coordinates their work alongside the built-in agents
+
+This makes agent team composition a **strategic, project-aware decision** rather than a reactive response to individual task complexity. The PM thinks holistically: "What kind of team do I need to deliver this project?" — just like a real PM staffing a team.
+
 ### Goals
 
 - **G1**: Agents can create other agents with defined roles and MCP toolsets without human pre-configuration
@@ -47,6 +65,9 @@ Enable AgentSquad agents (primarily the PM and PE) to **dynamically define and s
 - **G4**: The existing 7-agent workflow continues to work unchanged; SME agents are additive
 - **G5**: MCP servers that aren't available on the host machine degrade gracefully (warn, skip, not crash)
 - **G6**: SME agent definitions can be saved/reused across runs (not just ephemeral)
+- **G7**: The PM reads the full document pipeline (project description → Research.md → PMSpec.md) before making agent team composition decisions
+- **G8**: The PM evaluates the full catalog of available agents (built-in + SME templates) before deciding to create new ones
+- **G9**: Agent team composition decisions are human-gated — the PM proposes, the human director approves
 
 ### Non-Goals (for v1)
 
@@ -888,21 +909,128 @@ public class SmeAgentsConfig
 
 ## 10. Agent-Creates-Agent Workflow
 
-### How PE/PM Decides to Create an SME Agent
+### PM as Team Director — The Agent Composition Pipeline
 
-The PE (or PM) evaluates tasks and can decide that a task requires specialized expertise:
+The PM is the **primary agent composition decision-maker**. It follows the existing document pipeline to inform team staffing decisions:
+
+```
+Phase 1: Information Gathering (already exists in current workflow)
+─────────────────────────────────────────────────────────────────
+  Project.Description (from appsettings)
+    → Researcher produces Research.md
+    → PM produces PMSpec.md (synthesizing project desc + research)
+
+Phase 2: Agent Team Composition (NEW — added after PMSpec is written)
+─────────────────────────────────────────────────────────────────
+  PM reads PMSpec.md + Research.md + Project.Description
+    → PM queries the SME Agent Catalog (built-in roles + saved templates)
+    → PM evaluates: "What capabilities does this project need?"
+    → PM produces TeamComposition proposal:
+       ├── Built-in agents needed (with counts: e.g., 2× SE, 1× JE)
+       ├── Existing SME templates to activate (e.g., "database-architect")
+       └── New SME agents to create (with role def, MCP servers, knowledge links)
+    → Human gate: Director reviews & approves/modifies the proposal
+    → Approved agents are spawned by AgentSpawnManager
+    → PM updates TeamMembers.md with the full team roster
+```
+
+### PM's Agent Composition AI Prompt
+
+When the PM decides team composition, it uses an AI call with this context:
+
+```csharp
+public class AgentTeamComposer
+{
+    public async Task<TeamCompositionProposal> ComposeTeamAsync(
+        string projectDescription,
+        string researchMd,
+        string pmSpecMd,
+        IReadOnlyList<AgentCapabilitySummary> builtInAgents,
+        IReadOnlyList<SMEAgentDefinition> availableTemplates,
+        IReadOnlyList<McpServerDefinition> availableMcpServers,
+        CancellationToken ct)
+    {
+        var prompt = $"""
+            You are a Project Manager designing the optimal team for a software project.
+            
+            ## Project Description
+            {projectDescription}
+            
+            ## Research Findings
+            {researchMd}
+            
+            ## Business Specification (PMSpec)
+            {pmSpecMd}
+            
+            ## Available Built-in Agents
+            {FormatBuiltInAgents(builtInAgents)}
+            
+            ## Available SME Agent Templates
+            {FormatTemplates(availableTemplates)}
+            
+            ## Available MCP Servers (tools that can be given to new agents)
+            {FormatMcpServers(availableMcpServers)}
+            
+            Based on the project requirements, propose the optimal team:
+            
+            1. **Built-in agents**: Which standard roles are needed and how many of each?
+               (PM is always included. Researcher has already completed.)
+            2. **Existing SME templates**: Which saved templates match this project's needs?
+               Only include templates whose capabilities are actually needed.
+            3. **New SME agents to create**: For capabilities not covered by any existing agent,
+               define new agent roles. For each:
+               - RoleName: concise specialist title
+               - SystemPrompt: detailed expertise and behavioral instructions (200-500 words)
+               - McpServers: which available MCP servers this agent needs
+               - KnowledgeLinks: up to 5 URLs with authoritative reference material
+               - Capabilities: 3-5 keyword capabilities
+               - ModelTier: "premium" for complex reasoning, "standard" for implementation
+               - Justification: why this agent is needed and what gap it fills
+            
+            Output as JSON matching TeamCompositionProposal schema.
+            """;
+        
+        // ... execute AI call, parse JSON, validate
+    }
+}
+```
+
+### TeamCompositionProposal Model
+
+```csharp
+public record TeamCompositionProposal
+{
+    public required string ProjectSummary { get; init; }
+    public required List<BuiltInAgentRequest> BuiltInAgents { get; init; }
+    public required List<string> ExistingTemplateIds { get; init; }
+    public required List<SMEAgentDefinition> NewSmeAgents { get; init; }
+    public required string Rationale { get; init; }
+}
+
+public record BuiltInAgentRequest
+{
+    public required AgentRole Role { get; init; }
+    public required int Count { get; init; }
+    public string? Justification { get; init; }
+}
+```
+
+### PE as Reactive Spawner (Complementary Role)
+
+While the PM handles **proactive team design** at the start, the PE retains the ability to **reactively spawn SME agents** during the engineering phases when unexpected needs arise:
 
 ```
 PE analyzes engineering-task Issue #55: "Implement RBAC with OAuth2 + JWT"
   → AI evaluates: "This task requires deep security expertise beyond standard engineering"
   → PE checks SmeTemplates for matching capabilities: finds "security-auditor"
   → PE sends SpawnSmeAgentMessage { DefinitionId="security-auditor", AssignToIssue=55 }
+  → Human gate approval
   → Security Auditor SME agent spawns → reviews the task → provides security-focused guidance
 ```
 
-### AI-Generated Agent Definitions
+### AI-Generated Agent Definitions (Used by Both PM and PE)
 
-For tasks where no template matches, the PE can ask AI to design a new agent:
+For tasks where no template matches, either the PM (during composition) or PE (reactively) can ask AI to design a new agent:
 
 ```csharp
 public class SmeDefinitionGenerator
@@ -936,10 +1064,43 @@ public class SmeDefinitionGenerator
 }
 ```
 
+### Workflow Integration: When Does Team Composition Happen?
+
+The PM's team composition step fits naturally into the existing workflow state machine:
+
+```
+Initialization → Research → Architecture → EngineeringPlanning → ...
+                    ↓
+              PM reads Research.md
+              PM writes PMSpec.md
+              ──── NEW: PM composes team ────
+              PM evaluates agent catalog
+              PM proposes team composition
+              Human approves composition
+              SME agents spawn
+              ──── Continue to Architecture ────
+```
+
+This happens **after PMSpec.md is written but before Architecture phase begins**, so the Architect has the full team (including SME agents) available when designing the system.
+
 ### Message Types
 
 ```csharp
-/// PE/PM requests an SME agent spawn
+/// PM proposes a full team composition
+public record TeamCompositionProposalMessage : AgentMessage
+{
+    public required TeamCompositionProposal Proposal { get; init; }
+}
+
+/// Human director approves/modifies the composition
+public record TeamCompositionApprovalMessage : AgentMessage
+{
+    public required TeamCompositionProposal ApprovedProposal { get; init; }
+    public List<string> RejectedAgentIds { get; init; } = [];
+    public string? DirectorNotes { get; init; }
+}
+
+/// PE/PM requests an individual SME agent spawn (reactive)
 public record SpawnSmeAgentMessage : AgentMessage
 {
     public required string DefinitionId { get; init; }    // Template ID or custom
@@ -1150,27 +1311,40 @@ GET  /api/dashboard/mcp/servers/{name}/status — Check server availability
 - Upgrade `RoleContextProvider` to use new extractors
 - Tests for each extractor type
 
-### Phase 6: Agent-Creates-Agent Flow (Agents/Orchestrator)
+### Phase 6: PM Team Composition Pipeline (Agents/Orchestrator)
 
-**Goal:** PE and PM can request SME agent creation at runtime.
+**Goal:** PM proactively designs the full agent team after reading project documents.
+
+- Add `AgentTeamComposer` service — takes project desc, Research.md, PMSpec.md, catalog → outputs `TeamCompositionProposal`
+- Add `AgentCapabilitySummary` model for representing built-in agent capabilities
+- Add `TeamCompositionProposal` and `TeamCompositionApprovalMessage` message types
+- Add PM workflow step: after writing PMSpec.md, PM evaluates agent catalog and proposes team
+- Add human gate: team composition proposal displayed in dashboard for director approval
+- Add `TeamComposition.md` output document listing the approved team with rationale
+- Wire into `WorkflowStateMachine`: team composition gate between Research/PMSpec and Architecture phases
+- PM tracks SME agents in TeamMembers.md alongside built-in agents
+
+### Phase 7: PE Reactive Agent Spawning (Agents/Orchestrator)
+
+**Goal:** PE can reactively spawn SME agents during engineering phases when unexpected needs arise.
 
 - Add `SpawnSmeAgentMessage` and `SmeResultMessage` message types
 - Add `SmeDefinitionGenerator` for AI-generated definitions
-- PE integration: evaluate tasks for SME needs, request spawns
-- PM integration: handle spawn approval, track SME agents in TeamMembers.md
+- PE integration: evaluate tasks for SME needs, request spawns (with human gate)
 - Wire into existing workflow (SME agents can participate in review pipeline)
 
-### Phase 7: Dashboard Integration (Dashboard)
+### Phase 8: Dashboard Integration (Dashboard)
 
 **Goal:** UI for managing and monitoring SME agents.
 
 - Add SME badge/indicator to agent cards on Overview page
 - Create `/sme-agents` page (template browser, active agents, definition editor)
 - Add MCP server status to Configuration page
+- Add team composition proposal review UI (director approves/rejects PM's proposal)
 - REST API endpoints for SME management
 - Wire into both embedded and standalone dashboard modes
 
-### Phase 8: Polish & Hardening
+### Phase 9: Polish & Hardening
 
 **Goal:** Production readiness.
 

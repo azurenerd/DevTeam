@@ -12,30 +12,35 @@ namespace AgentSquad.Core.AI;
 /// Provides per-agent role context built from configuration: custom role descriptions,
 /// knowledge link summaries, and MCP server names. Context is initialized once per agent
 /// and cached for the session to avoid repeated fetches and summarization.
+/// Uses content-type-aware extraction and optional AI-powered summarization.
 /// </summary>
 public class RoleContextProvider
 {
     private readonly IOptionsMonitor<AgentSquadConfig> _configMonitor;
     private readonly ILogger<RoleContextProvider> _logger;
     private readonly HttpClient _httpClient;
+    private readonly IReadOnlyList<IContentExtractor> _extractors;
+    private readonly AiKnowledgeSummarizer? _summarizer;
 
     // Cache knowledge summaries per agent key (role name or custom agent name)
     private readonly ConcurrentDictionary<string, string> _knowledgeCache = new();
     private readonly ConcurrentDictionary<string, bool> _initialized = new();
 
-    private const int MaxRoleDescriptionChars = 1500;
-    private const int MaxKnowledgeChars = 2500;
     private const int MaxPerLinkBytes = 50_000;
     private const int FetchTimeoutSeconds = 10;
 
     public RoleContextProvider(
         IOptionsMonitor<AgentSquadConfig> configMonitor,
         ILogger<RoleContextProvider> logger,
-        HttpClient? httpClient = null)
+        HttpClient? httpClient = null,
+        AiKnowledgeSummarizer? summarizer = null,
+        IEnumerable<IContentExtractor>? extractors = null)
     {
         _configMonitor = configMonitor ?? throw new ArgumentNullException(nameof(configMonitor));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _httpClient = httpClient ?? CreateDefaultHttpClient();
+        _summarizer = summarizer;
+        _extractors = extractors?.ToList() ?? CreateDefaultExtractors();
     }
 
     /// <summary>
@@ -61,7 +66,7 @@ public class RoleContextProvider
         var config = GetAgentConfig(role, customAgentName);
         if (config.KnowledgeLinks.Count > 0)
         {
-            var knowledge = await FetchAndSummarizeLinksAsync(cacheKey, config.KnowledgeLinks, ct);
+            var knowledge = await FetchAndSummarizeLinksAsync(cacheKey, config.KnowledgeLinks, config, ct);
             _knowledgeCache[cacheKey] = knowledge;
             _logger.LogInformation("Initialized knowledge context for {CacheKey}: {CharCount} chars from {LinkCount} links",
                 cacheKey, knowledge.Length, config.KnowledgeLinks.Count);
@@ -82,21 +87,24 @@ public class RoleContextProvider
 
     /// <summary>
     /// Returns the composite role context string for a specific agent (built-in or custom).
+    /// Uses tier-based knowledge budgets when model tier is available.
     /// </summary>
-    public string GetRoleSystemContext(AgentRole role, string? customAgentName)
+    public string GetRoleSystemContext(AgentRole role, string? customAgentName, string? modelTier = null)
     {
         var cacheKey = GetCacheKey(role, customAgentName);
         var config = GetAgentConfig(role, customAgentName);
         var sb = new StringBuilder();
 
+        var maxRoleDescChars = KnowledgeBudget.GetMaxRoleDescriptionChars(modelTier ?? config.ModelTier);
+
         // Inject custom role description
         var roleDesc = config.RoleDescription?.Trim();
         if (!string.IsNullOrEmpty(roleDesc))
         {
-            if (roleDesc.Length > MaxRoleDescriptionChars)
+            if (roleDesc.Length > maxRoleDescChars)
             {
-                roleDesc = roleDesc[..MaxRoleDescriptionChars] + "...";
-                _logger.LogWarning("Role description for {CacheKey} truncated to {MaxChars} chars", cacheKey, MaxRoleDescriptionChars);
+                roleDesc = roleDesc[..maxRoleDescChars] + "...";
+                _logger.LogWarning("Role description for {CacheKey} truncated to {MaxChars} chars", cacheKey, maxRoleDescChars);
             }
             sb.AppendLine("[ROLE CUSTOMIZATION]");
             sb.AppendLine(roleDesc);
@@ -185,14 +193,16 @@ public class RoleContextProvider
     }
 
     private async Task<string> FetchAndSummarizeLinksAsync(
-        string cacheKey, List<string> links, CancellationToken ct)
+        string cacheKey, List<string> links, AgentConfig config, CancellationToken ct)
     {
         var summaries = new List<string>();
+        var maxKnowledgeChars = KnowledgeBudget.GetMaxKnowledgeChars(config.ModelTier);
+        var maxPerLinkChars = KnowledgeBudget.GetMaxPerLinkChars(config.ModelTier);
         var totalChars = 0;
 
         foreach (var url in links)
         {
-            if (totalChars >= MaxKnowledgeChars)
+            if (totalChars >= maxKnowledgeChars)
             {
                 _logger.LogWarning("Knowledge budget exhausted for {CacheKey} after {Count} links", cacheKey, summaries.Count);
                 break;
@@ -200,13 +210,32 @@ public class RoleContextProvider
 
             try
             {
-                var content = await FetchUrlContentAsync(url, ct);
+                var (content, contentType) = await FetchUrlContentAsync(url, ct);
                 if (string.IsNullOrWhiteSpace(content))
                     continue;
 
-                // Truncate long content to a reasonable summary size
-                var summary = TruncateToSummary(content, url);
-                var remaining = MaxKnowledgeChars - totalChars;
+                // Use content-type-aware extraction
+                var extracted = ExtractContent(content, url, contentType);
+                if (string.IsNullOrWhiteSpace(extracted))
+                    continue;
+
+                // AI-powered summarization for long content, with fallback to truncation
+                string summary;
+                if (_summarizer is not null && extracted.Length > maxPerLinkChars * 2)
+                {
+                    summary = await _summarizer.SummarizeForRoleAsync(
+                        extracted,
+                        cacheKey,
+                        config.RoleDescription,
+                        maxPerLinkChars,
+                        ct);
+                }
+                else
+                {
+                    summary = TruncateToSummary(extracted, url, maxPerLinkChars);
+                }
+
+                var remaining = maxKnowledgeChars - totalChars;
                 if (summary.Length > remaining)
                     summary = summary[..remaining] + "...";
 
@@ -222,12 +251,34 @@ public class RoleContextProvider
         return string.Join("\n\n", summaries);
     }
 
-    private async Task<string> FetchUrlContentAsync(string url, CancellationToken ct)
+    private string ExtractContent(string rawContent, string url, string? contentType)
+    {
+        // Find a suitable extractor
+        foreach (var extractor in _extractors)
+        {
+            if (extractor.CanHandle(url, contentType))
+            {
+                try
+                {
+                    return extractor.Extract(rawContent, url);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Extractor {Type} failed for {Url}, trying next", extractor.GetType().Name, url);
+                }
+            }
+        }
+
+        // Fallback: basic HTML strip
+        return System.Text.RegularExpressions.Regex.Replace(rawContent, @"<[^>]+>", " ");
+    }
+
+    private async Task<(string Content, string? ContentType)> FetchUrlContentAsync(string url, CancellationToken ct)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
             _logger.LogWarning("Invalid knowledge link URL: {Url}", url);
-            return "";
+            return ("", null);
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -238,34 +289,33 @@ public class RoleContextProvider
             using var response = await _httpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cts.Token);
             response.EnsureSuccessStatusCode();
 
+            var contentType = response.Content.Headers.ContentType?.MediaType;
+
             // Read with size limit
             var stream = await response.Content.ReadAsStreamAsync(cts.Token);
             var buffer = new byte[MaxPerLinkBytes];
             var bytesRead = await stream.ReadAsync(buffer.AsMemory(0, MaxPerLinkBytes), cts.Token);
             var content = Encoding.UTF8.GetString(buffer, 0, bytesRead);
 
-            return content;
+            return (content, contentType);
         }
         catch (OperationCanceledException)
         {
             _logger.LogWarning("Timed out fetching knowledge link: {Url}", url);
-            return "";
+            return ("", null);
         }
     }
 
     /// <summary>
-    /// Produces a compact summary from fetched content.
-    /// Strips HTML tags and takes the first ~800 chars as a representative excerpt.
+    /// Produces a compact summary from extracted content.
+    /// Takes the first N chars as a representative excerpt.
     /// </summary>
-    private static string TruncateToSummary(string content, string url)
+    private static string TruncateToSummary(string content, string url, int maxChars = 800)
     {
-        // Strip common HTML tags for cleaner text
-        var text = System.Text.RegularExpressions.Regex.Replace(content, @"<[^>]+>", " ");
-        text = System.Text.RegularExpressions.Regex.Replace(text, @"\s+", " ").Trim();
+        var text = content;
 
-        const int excerptLength = 800;
-        if (text.Length > excerptLength)
-            text = text[..excerptLength] + "...";
+        if (text.Length > maxChars)
+            text = text[..maxChars] + "...";
 
         return $"[Source: {url}]\n{text}";
     }
@@ -277,4 +327,10 @@ public class RoleContextProvider
         client.Timeout = TimeSpan.FromSeconds(FetchTimeoutSeconds * 2);
         return client;
     }
+
+    private static List<IContentExtractor> CreateDefaultExtractors() =>
+    [
+        new MarkdownContentExtractor(),
+        new HtmlContentExtractor()
+    ];
 }
