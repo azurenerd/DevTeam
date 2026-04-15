@@ -1905,8 +1905,14 @@ public class TestEngineerAgent : AgentBase
             {
                 NeedsUnitTests = true,
                 NeedsIntegrationTests = false,
-                NeedsUITests = false,
-                Rationale = "Fallback: no strategy analyzer available"
+                NeedsUITests = sourceFiles.Keys.Any(f =>
+                    f.EndsWith(".razor", StringComparison.OrdinalIgnoreCase) ||
+                    f.EndsWith(".cshtml", StringComparison.OrdinalIgnoreCase) ||
+                    f.EndsWith(".tsx", StringComparison.OrdinalIgnoreCase) ||
+                    f.EndsWith(".jsx", StringComparison.OrdinalIgnoreCase) ||
+                    f.EndsWith(".vue", StringComparison.OrdinalIgnoreCase) ||
+                    f.EndsWith(".svelte", StringComparison.OrdinalIgnoreCase)),
+                Rationale = "Fallback: no strategy analyzer available, UI detected from file extensions"
             };
 
         // Build source file context (shared across all tiers)

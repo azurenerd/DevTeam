@@ -1427,9 +1427,19 @@ public class PlaywrightRunner
 
         foreach (var appDir in appDirs)
         {
-            var dataJsonPath = Path.Combine(appDir, "data.json");
-            if (File.Exists(dataJsonPath))
-                continue; // Already has data
+            // Check multiple candidate locations where data.json might be expected:
+            // - appDir/data.json (project root)
+            // - appDir/wwwroot/data.json (Blazor static files)
+            // - appDir/wwwroot/data/data.json (nested data folder)
+            var candidatePaths = new[]
+            {
+                Path.Combine(appDir, "data.json"),
+                Path.Combine(appDir, "wwwroot", "data.json"),
+                Path.Combine(appDir, "wwwroot", "data", "data.json"),
+            };
+
+            if (candidatePaths.Any(File.Exists))
+                continue; // Already has data somewhere
 
             // Strategy 1: Copy data.template.json from anywhere in the workspace
             var templateCandidates = new[]
@@ -1441,10 +1451,14 @@ public class PlaywrightRunner
             var template = templateCandidates.FirstOrDefault(File.Exists);
             if (template is not null)
             {
-                File.Copy(template, dataJsonPath);
-                _logger.LogInformation("Copied {Template} → {DataJson} for app preview",
-                    Path.GetRelativePath(workspacePath, template),
-                    Path.GetRelativePath(workspacePath, dataJsonPath));
+                // Place in all candidate locations to cover however the app resolves the path
+                foreach (var dest in candidatePaths)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                    File.Copy(template, dest, overwrite: false);
+                }
+                _logger.LogInformation("Copied {Template} → data.json ({Count} locations) for app preview",
+                    Path.GetRelativePath(workspacePath, template), candidatePaths.Length);
                 continue;
             }
 
@@ -1457,11 +1471,55 @@ public class PlaywrightRunner
 
             if (testDataFiles.Count > 0)
             {
-                File.Copy(testDataFiles[0], dataJsonPath);
-                _logger.LogInformation("Copied test data {Source} → {DataJson} for app preview",
-                    Path.GetRelativePath(workspacePath, testDataFiles[0]),
-                    Path.GetRelativePath(workspacePath, dataJsonPath));
+                foreach (var dest in candidatePaths)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                    File.Copy(testDataFiles[0], dest, overwrite: false);
+                }
+                _logger.LogInformation("Copied test data {Source} → data.json ({Count} locations) for app preview",
+                    Path.GetRelativePath(workspacePath, testDataFiles[0]), candidatePaths.Length);
+                continue;
             }
+
+            // Strategy 3: Generate a minimal valid data.json when no source exists.
+            // This happens when PR branches are created before the task that adds data.json
+            // gets merged — the branch simply doesn't have the file.
+            var minimalData = """
+                {
+                  "project": {
+                    "name": "Sample Project",
+                    "lead": "Project Lead",
+                    "status": "On Track",
+                    "lastUpdated": "2026-01-01",
+                    "summary": "Sample project dashboard for preview."
+                  },
+                  "title": "Executive Reporting Dashboard",
+                  "subtitle": "Project Status Overview",
+                  "backlogLink": "",
+                  "currentMonth": "January",
+                  "months": ["January", "February", "March"],
+                  "milestones": [
+                    { "title": "Phase 1", "targetDate": "2026-02-01", "status": "Completed" },
+                    { "title": "Phase 2", "targetDate": "2026-04-01", "status": "In Progress" }
+                  ],
+                  "shipped": [
+                    { "title": "Foundation", "description": "Project scaffolding", "category": "Infrastructure", "percentComplete": 100 }
+                  ],
+                  "inProgress": [
+                    { "title": "Dashboard UI", "description": "Building components", "category": "Frontend", "percentComplete": 60 }
+                  ],
+                  "timeline": { "startMonth": "Jan 2026", "endMonth": "Jun 2026", "tracks": [] },
+                  "heatmap": { "months": ["Jan", "Feb", "Mar"], "categories": [], "items": [] }
+                }
+                """;
+
+            foreach (var dest in candidatePaths)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.WriteAllText(dest, minimalData);
+            }
+            _logger.LogInformation("Generated minimal data.json ({Count} locations) for app preview in {AppDir}",
+                candidatePaths.Length, Path.GetRelativePath(workspacePath, appDir));
         }
     }
 }
