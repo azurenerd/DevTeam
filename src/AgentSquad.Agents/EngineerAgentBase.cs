@@ -48,6 +48,8 @@ public abstract class EngineerAgentBase : AgentBase
     private readonly HashSet<int> _forceApprovalSentPrs = new();
     // Per-PR CLI session IDs — resumes the session used to create the PR during rework
     private readonly Dictionary<int, string> _prSessionIds = new();
+    // Current task's file scope prompt text (set before each task, used by build-fix)
+    private string _currentFileScopeBlock = "";
     // Cached repo tree for giving agents visibility into existing code (Tier 1: repo structure awareness)
     private IReadOnlyList<string>? _repoTreeCache;
     private DateTime _repoTreeCacheExpiry = DateTime.MinValue;
@@ -726,6 +728,12 @@ public abstract class EngineerAgentBase : AgentBase
             contextBuilder.AppendLine("IMPORTANT: File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
                 "Do NOT put code, directives, brackets, or instructions in the file path. " +
                 "Do NOT use (APPEND) or similar suffixes — always output the complete file content.");
+
+            // Inject file scope rules from the task's File Plan
+            var scopeBlock = BuildFileScopePromptBlock(pr.Body, issue.Body);
+            _currentFileScopeBlock = scopeBlock; // Cache for build-fix prompts
+            if (!string.IsNullOrEmpty(scopeBlock))
+                contextBuilder.AppendLine(scopeBlock);
             if (completedSteps.Count > 0)
                 contextBuilder.AppendLine("If you need to update a file from a previous step, include the COMPLETE updated file content.");
 
@@ -1139,6 +1147,7 @@ public abstract class EngineerAgentBase : AgentBase
     protected async Task CommitAndNotifyAsync(
         AgentPullRequest pr, AgentIssue issue, string finalOutput, string fallbackImpl, CancellationToken ct)
     {
+        _currentFileScopeBlock = BuildFileScopePromptBlock(pr.Body, issue.Body);
         var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(finalOutput);
         if (codeFiles.Count == 0)
             codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fallbackImpl);
@@ -1330,6 +1339,9 @@ public abstract class EngineerAgentBase : AgentBase
         {
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            // Set file scope for rework (used by build-fix prompts)
+            _currentFileScopeBlock = BuildFileScopePromptBlock(pr.Body, null);
 
             var architectureDoc = await GetArchitectureForContextAsync(ct);
             var pmSpecDoc = await GetPMSpecForContextAsync(ct);
@@ -1693,6 +1705,9 @@ public abstract class EngineerAgentBase : AgentBase
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+            // Set file scope for this task (used by build-fix prompts)
+            _currentFileScopeBlock = BuildFileScopePromptBlock(pr.Body, null);
+
             // Build a synthetic issue from the PR body for the incremental implementation
             var syntheticIssue = new AgentIssue
             {
@@ -1940,6 +1955,11 @@ public abstract class EngineerAgentBase : AgentBase
             "mentioned in the feedback. Preserve existing CSS classes, variable names, HTML structure, " +
             "and functionality that works correctly. Your changes should be surgical — " +
             "a reviewer should see a minimal, focused diff.\n\n" +
+            "SCOPE RULE: Only modify files that are part of YOUR task's File Plan. " +
+            "Do NOT modify, rewrite, or delete test files, shared infrastructure files (App.razor, " +
+            "_Host.cshtml, Program.cs), or any files outside your task scope. " +
+            "If review feedback asks you to revert a file you shouldn't have changed, " +
+            "simply omit that file from your output — do not try to reconstruct it.\n\n" +
             "DEPENDENCY RULE: Before using ANY external library/package/framework, check the project's " +
             "dependency manifest. If a dependency is not already listed, add it and include the updated manifest.\n\n" +
             "CRITICAL: Your response MUST start with a CHANGES SUMMARY that addresses EACH numbered " +
@@ -2432,6 +2452,11 @@ public abstract class EngineerAgentBase : AgentBase
                 ```
                 
                 Include the COMPLETE file content for each file that needs changes.
+                IMPORTANT: Only fix files that YOU created or modified in this task.
+                Do NOT create new files or modify files outside the task scope to fix errors.
+                If an error is in a file you did not create, adjust YOUR files to work with
+                the existing code instead.
+                {_currentFileScopeBlock}
                 """;
 
             // Include the current content of failing files so the AI can see what to fix
@@ -2470,6 +2495,26 @@ public abstract class EngineerAgentBase : AgentBase
             fixHistory.AddUserMessage(fixPrompt);
             var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
             var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
+
+            // Apply scope filter to build-fix output — prevents scope creep during error recovery
+            if (fixedFiles.Count > 0 && !string.IsNullOrEmpty(_currentFileScopeBlock))
+            {
+                var beforeCount = fixedFiles.Count;
+                var filtered = new List<AgentSquad.Core.AI.CodeFileParser.CodeFile>();
+                foreach (var f in fixedFiles)
+                {
+                    var norm = NormalizePath(f.Path);
+                    if (IsInfrastructureFile(norm) || originalFiles.Any(o =>
+                            NormalizePath(o.Path).Equals(norm, StringComparison.OrdinalIgnoreCase)))
+                        filtered.Add(f);
+                    else
+                        Logger.LogWarning("{Role} {Name} build-fix blocked out-of-scope file: {Path}",
+                            Identity.Role, Identity.DisplayName, f.Path);
+                }
+                fixedFiles = filtered;
+                if (fixedFiles.Count < beforeCount)
+                    LogActivity("scope", $"🚫 Build-fix: blocked {beforeCount - fixedFiles.Count} out-of-scope files");
+            }
 
             foreach (var file in fixedFiles)
                 await Workspace.WriteFileAsync(file.Path, file.Content, ct);
@@ -2830,6 +2875,8 @@ public abstract class EngineerAgentBase : AgentBase
                 - Ensure all referenced types, namespaces, and dependencies exist
                 - Double-check method signatures match across interface/class boundaries
                 - Include ALL necessary using statements
+                - Only regenerate the files listed above — do NOT add new files outside the task scope
+                {_currentFileScopeBlock}
 
                 Output each file using this format:
                 FILE: path/to/file.ext
@@ -3015,6 +3062,35 @@ public abstract class EngineerAgentBase : AgentBase
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Generates a prompt instruction block that tells the AI which files are in scope.
+    /// Returns empty string if no file plan is found (so prompts degrade gracefully).
+    /// </summary>
+    internal static string BuildFileScopePromptBlock(string? prDescription, string? issueDescription)
+    {
+        var allowed = ExtractAllowedFilesFromDescription(prDescription);
+        if (allowed.Count == 0)
+            allowed = ExtractAllowedFilesFromDescription(issueDescription);
+
+        if (allowed.Count == 0)
+            return "";
+
+        var fileList = string.Join("\n", allowed.Select(f => $"  - `{f}`"));
+        return $"""
+
+            FILE SCOPE RULE — STRICTLY ENFORCED:
+            You may ONLY create or modify the following files (from the task's File Plan):
+            {fileList}
+
+            Do NOT create, modify, or output any files outside this list.
+            Do NOT modify test files, shared infrastructure (App.razor, _Host.cshtml, Program.cs),
+            or any other files not explicitly listed above.
+            If a build error references a file outside this list, fix the error by adjusting
+            YOUR in-scope files only — do NOT modify the out-of-scope file.
+            Project files (.csproj, .sln) are the only exception and may be created if needed.
+            """;
     }
 
     #endregion

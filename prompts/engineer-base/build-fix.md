@@ -23,3 +23,6 @@ FILE: path/to/file.ext
 ```
 
 Include the COMPLETE file content for each file that needs changes.
+IMPORTANT: Only fix files that YOU created or modified in this task.
+Do NOT create new files or modify files outside the task scope to fix errors.
+If an error is in a file you did not create, adjust YOUR files to work with the existing code.

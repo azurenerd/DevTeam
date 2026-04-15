@@ -18,6 +18,7 @@ public record AgentPullRequest
     public List<string> ReviewComments { get; init; } = new();
     public List<IssueComment> Comments { get; init; } = new();
     public List<string> ChangedFiles { get; init; } = new();
+    public string? MergeableState { get; init; }
 }
 
 public record AgentIssue

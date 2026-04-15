@@ -979,6 +979,17 @@ public partial class PullRequestWorkflow
             {
                 try
                 {
+                    // Skip PRs that are still mergeable — only sync those with actual conflicts
+                    // or that are significantly behind. GitHub shows "clean" for PRs that can
+                    // merge without conflicts even if behind by a few commits.
+                    if (string.Equals(pr.MergeableState, "clean", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(pr.MergeableState, "unstable", StringComparison.OrdinalIgnoreCase))
+                    {
+                        _logger.LogDebug("Skipping sync for PR #{PrNumber} — mergeable state is {State}",
+                            pr.Number, pr.MergeableState);
+                        continue;
+                    }
+
                     var isBehind = await _github.IsBranchBehindMainAsync(pr.Number, ct);
                     if (!isBehind)
                         continue;

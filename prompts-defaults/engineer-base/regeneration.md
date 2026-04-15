@@ -21,6 +21,8 @@ IMPORTANT:
 - Ensure all referenced types, namespaces, and dependencies exist
 - Double-check method signatures match across interface/class boundaries
 - Include ALL necessary using statements
+- Only regenerate the files listed above — do NOT add new files outside the task scope
+- Do NOT create or modify test files, shared infrastructure (App.razor, _Host.cshtml, Program.cs), or any other files not in the task's File Plan
 
 Output each file using this format:
 FILE: path/to/file.ext

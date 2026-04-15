@@ -1663,6 +1663,7 @@ public class GitHubService : IGitHubService
             CreatedAt = pr.CreatedAt.UtcDateTime,
             UpdatedAt = pr.UpdatedAt.UtcDateTime,
             MergedAt = pr.MergedAt?.UtcDateTime,
+            MergeableState = pr.MergeableState?.StringValue,
             Labels = labels ?? pr.Labels.Select(l => l.Name).ToList(),
             ReviewComments = reviewComments ?? new List<string>(),
             Comments = comments ?? new List<Models.IssueComment>()

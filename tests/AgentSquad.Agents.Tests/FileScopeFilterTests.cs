@@ -61,4 +61,32 @@ public class FileScopeFilterTests
         // Should be normalized to forward slashes
         Assert.Contains("src/Components/Header.razor", allowed);
     }
+
+    [Fact]
+    public void BuildFileScopePromptBlock_WithFilePlan_ContainsFileList()
+    {
+        var description = "- ➕ **Create:** `ReportingDashboard.Web/data.json`";
+        var block = EngineerAgentBase.BuildFileScopePromptBlock(description, null);
+
+        Assert.Contains("FILE SCOPE RULE", block);
+        Assert.Contains("ReportingDashboard.Web/data.json", block);
+        Assert.Contains("STRICTLY ENFORCED", block);
+    }
+
+    [Fact]
+    public void BuildFileScopePromptBlock_NoFilePlan_ReturnsEmpty()
+    {
+        var block = EngineerAgentBase.BuildFileScopePromptBlock("No file plan here", null);
+        Assert.Equal("", block);
+    }
+
+    [Fact]
+    public void BuildFileScopePromptBlock_FallsBackToIssueDescription()
+    {
+        var issueDesc = "CREATE:src/Models/Data.cs\nMODIFY:src/Services/DataService.cs";
+        var block = EngineerAgentBase.BuildFileScopePromptBlock("No plan in PR", issueDesc);
+
+        Assert.Contains("src/Models/Data.cs", block);
+        Assert.Contains("src/Services/DataService.cs", block);
+    }
 }
