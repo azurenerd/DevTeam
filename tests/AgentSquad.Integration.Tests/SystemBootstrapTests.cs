@@ -86,6 +86,10 @@ public class SystemBootstrapTests : IDisposable
         services.AddSingleton<ConflictResolver>();
         services.AddSingleton<IGateCheckService, GateCheckService>();
 
+        // Reasoning services (needed by PM, Architect, PE, Researcher)
+        services.AddSingleton<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog, AgentSquad.Core.Agents.Reasoning.AgentReasoningLog>();
+        services.AddSingleton<AgentSquad.Core.Agents.Reasoning.SelfAssessmentService>();
+
         // Orchestrator
         services.AddOrchestrator();
 
