@@ -179,6 +179,8 @@ CREATE TABLE IF NOT EXISTS run_monitor (
 - `RateLimitExceededException` — all API calls pause until reset
 - `OperationCanceledException` outside of shutdown — possible deadlock
 - TE in "API-only mode" — tests committed without building/running
+- TE UI test failure "App did not respond at http://localhost:XXXX within 90s" — likely hardcoded port in AI-generated Program.cs (see Lesson #20 in LessonsLearned.md)
+- Agent card flashing "⏳ Awaiting human approval..." when gates are in auto mode — pre-gate status update not guarded (see Lesson #22)
 
 ---
 

@@ -27,6 +27,10 @@
 17. [Port Conflicts When Multiple Agents Run Apps Simultaneously](#17-port-conflicts-when-multiple-agents-run-apps-simultaneously)
 18. [Standalone Dashboard Data Hydration from SQLite](#18-standalone-dashboard-data-hydration-from-sqlite)
 19. [GitHub API Pagination Is Mandatory During Reset](#19-github-api-pagination-is-mandatory-during-reset)
+20. [Hardcoded Port Bindings Break Automated UI Testing](#20-hardcoded-port-bindings-break-automated-ui-testing)
+21. [Blazor Server SynchronizationContext Kills HTTP Calls](#21-blazor-server-synchronizationcontext-kills-http-calls)
+22. [Transient Status Flash from Pre-Gate Status Updates](#22-transient-status-flash-from-pre-gate-status-updates)
+23. [AI Agents Rewrite Components from Scratch During Incremental PRs](#23-ai-agents-rewrite-components-from-scratch-during-incremental-prs)
 
 ---
 
@@ -416,6 +420,96 @@ The agents will not "figure out" what you want from a high-level description. Th
 
 ### Takeaway:
 **Separate the monitoring UI from the agent runtime from the start.** The embedded-dashboard shortcut saves 30 minutes of initial setup and costs hours of lost productivity during UI iteration. Architecture pattern: Runner exposes a REST API, Dashboard.Host consumes it via `HttpDashboardDataService`, shared Razor components use `IDashboardDataService` abstraction so they work in both modes.
+
+---
+
+## 20. Hardcoded Port Bindings Break Automated UI Testing
+
+**Lesson:** AI-generated ASP.NET apps frequently include `app.Urls.Clear(); app.Urls.Add("http://localhost:5050")` which is a **programmatic override** that defeats ALL external configuration — `ASPNETCORE_URLS` env var, `--urls` CLI args, `launchSettings.json`, everything. This silently breaks any test infrastructure that starts apps on unique ports.
+
+### What happened:
+- The Test Engineer derives a unique port per workspace (hash-based, range 5100-5899) and sets `ASPNETCORE_URLS` env var.
+- AI-generated `Program.cs` files contain `app.Urls.Add("http://localhost:5050")` because that's what the agent learned from examples.
+- The `app.Urls.Add()` call sets `PreferHostingUrls = true` on `IServerAddressesFeature`, overriding everything in Kestrel's config hierarchy.
+- The TE's app health check waited 90 seconds then timed out — the app was listening on 5050 (hardcoded), not the unique port.
+
+### Three iterations of fixes (each built on the previous failure):
+1. **Replace with env-var-reading code** — Replaced `app.Urls.Add("url")` with `app.Urls.Add(Environment.GetEnvironmentVariable("ASPNETCORE_URLS") ?? "url")`. Worked locally, failed in production. Hypothesis: `dotnet run` skipped recompilation and used cached build output.
+2. **Delete bin/ to force rebuild** — Added bin/ deletion after patching. Still failed. `dotnet run` may use obj/ artifacts to skip compilation.
+3. **Comment out entirely + delete bin/ AND obj/** — Instead of replacing the line with new code, comment it out entirely: `// [PlaywrightRunner] app.Urls.Add(...)`. Delete both `bin/` and `obj/` directories. This way there's zero programmatic URL override — Kestrel falls back to `ASPNETCORE_URLS` env var naturally. ✅ **This approach worked.**
+
+### Key Kestrel URL priority (highest to lowest):
+1. `app.Urls.Add()` / `UseUrls()` (programmatic — **overrides everything**)
+2. `ASPNETCORE_URLS` environment variable
+3. `--urls` command line argument
+4. `appsettings.json` Kestrel section
+5. Default (`http://localhost:5000`)
+
+### Takeaway:
+**When patching AI-generated source code, commenting out is more reliable than replacing.** Replacement introduces compilation dependencies, cache invalidation issues, and subtle failures. Commenting preserves the original intent (as documentation) while cleanly removing the behavior. Always delete both `bin/` and `obj/` to guarantee recompilation after source patching.
+
+---
+
+## 21. Blazor Server SynchronizationContext Kills HTTP Calls
+
+**Lesson:** Blazor Server's `DispatcherSynchronizationContext` interferes with `SocketsHttpHandler` I/O. HTTP calls made from Razor component event handlers or SignalR hub contexts get their socket reads aborted with `ERROR_OPERATION_ABORTED` (Win32 error 995), causing mysterious timeouts.
+
+### What happened:
+- The standalone dashboard's Configuration page makes HTTP POST to save settings to the Runner API.
+- Save button handler calls `HttpClient.PostAsJsonAsync()` directly from the Blazor component.
+- The call consistently timed out after exactly 100 seconds (HttpClient default timeout).
+- Root cause: Blazor Server marshals continuations back to its sync context. The `SocketsHttpHandler` async I/O completion posts to this context, which can deadlock or abort.
+
+### Fix:
+Wrap all HTTP calls in `Task.Run(async () => ...)` to escape the sync context:
+```csharp
+var response = await Task.Run(async () => 
+    await _httpClient.PostAsJsonAsync("/api/config", settings));
+```
+
+### Takeaway:
+**In Blazor Server, always use `Task.Run` for HTTP calls to external services.** This is a known .NET pattern — `ConfigureAwait(false)` is insufficient because `SocketsHttpHandler` itself uses the sync context for I/O completion callbacks.
+
+---
+
+## 22. Transient Status Flash from Pre-Gate Status Updates
+
+**Lesson:** Agents that call `UpdateStatus("⏳ Awaiting human approval...")` BEFORE checking whether the gate actually requires human approval create a misleading status flash on the dashboard. Even if the gate is in auto mode and returns `Proceed` in <1ms, the dashboard's 10-second poll interval can capture the transient status.
+
+### What happened:
+- All agents with gates (PM, Architect, Principal Engineer, Researcher) updated their status to "Awaiting human approval" before calling `WaitForGateAsync`.
+- When gates are in auto mode, `CheckGateAsync` returns `Proceed` instantly — but the status update was already published.
+- The dashboard polling at 10s intervals would randomly show "⏳ Awaiting human approval" on agent cards, then switch back to the real status on the next poll.
+
+### Fix:
+Guard status updates with `_gateCheck.RequiresHuman(gateId)`:
+```csharp
+if (_gateCheck.RequiresHuman("pm_spec_review"))
+    UpdateStatus("⏳ Awaiting human approval for PM Spec...");
+```
+
+### Takeaway:
+**Never publish user-visible status updates for conditional operations before checking the condition.** The general pattern: check first, update status second. This applies to any UI where polling intervals create windows for stale state.
+
+---
+
+## 23. AI Agents Rewrite Components from Scratch During Incremental PRs
+
+**Lesson:** When agents implement incremental features (e.g., "add heatmap section to existing dashboard"), they frequently rewrite the entire component from scratch instead of surgically adding the new section. This causes visual regressions in previously-working UI elements.
+
+### What happened:
+- PR #1266 was tasked with adding a CSS Grid heatmap component as the third band in `Dashboard.razor`.
+- The agent rewrote the entire `Dashboard.razor` file (+199/-157 lines) and modified `dashboard.css` (+88/-49 lines), including changes to the existing header and timeline sections.
+- The rewrite changed CSS class names (`.tl-ws-label` → `.tl-ws`), removed `display: inline-block` from icon elements, reformatted styles, and restructured the Razor code-behind pattern.
+- The resulting UI rendered correctly (tests passed) but looked visually different from the original design — likely due to cascading CSS changes affecting the header/timeline colors and layout.
+
+### Why this happens:
+- AI agents have limited context about which parts of a file "work" and which are being modified.
+- Regenerating from scratch (with the full spec) often produces cleaner code than surgical insertion.
+- The agent's acceptance criteria focused on the heatmap section — it didn't have explicit "do not change existing sections" constraints beyond file-level restrictions.
+
+### Takeaway:
+**Include explicit preservation constraints in task acceptance criteria.** For incremental features, specify: "Existing header and timeline sections MUST NOT be modified — diff should show additions only in the heatmap region." Consider PR review checks that flag unexpected changes to existing component sections.
 
 ---
 

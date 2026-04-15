@@ -509,6 +509,36 @@ Each phase has gate conditions that must be met before advancing:
 - **REQ-TEST-009e**: When UI tests are needed and no Playwright test project exists in the workspace, auto-scaffold one via `PlaywrightRunner.GeneratePlaywrightTestScaffold()` (creates `.csproj` with Playwright + xUnit packages, `PlaywrightFixture` base class with browser lifecycle management).
 - **REQ-TEST-009f**: `AppBaseUrl` is configurable (default `http://localhost:5000`) for the app-under-test address.
 
+### REQ-TEST-010: Port Isolation for UI Tests
+
+- **REQ-TEST-010a**: Each TE workspace gets a unique port via `DeriveUniquePort(workspacePath)` — hashes workspace path to a port in range 5100–5899 to prevent conflicts when multiple agents test simultaneously.
+- **REQ-TEST-010b**: `ASPNETCORE_URLS` environment variable is set to `http://localhost:{uniquePort}` on the app-under-test process.
+- **REQ-TEST-010c**: `PatchHardcodedPortBindings()` MUST scan all `Program.cs` files in the workspace before starting the app. AI-generated code frequently contains `app.Urls.Clear()` and `app.Urls.Add("http://localhost:XXXX")` which are **programmatic overrides** that defeat ALL external configuration (env vars, CLI args, appsettings).
+- **REQ-TEST-010d**: Patching strategy: **comment out** the `app.Urls.Add()` and `app.Urls.Clear()` lines entirely (do NOT replace with env-var-reading code — `dotnet run` may skip recompilation). Backup originals to `.playwright-bak` files. Restore after tests complete via `RestoreOriginalPortBindings()`.
+- **REQ-TEST-010e**: After patching, delete both `bin/` and `obj/` directories in the patched project to force full recompilation. Without this, `dotnet run` may use cached build output that still contains hardcoded ports.
+- **REQ-TEST-010f**: The `AppStartCommand` from config (e.g., `dotnet run --project ... --urls http://localhost:5100`) has its port rewritten via `RewritePort()` to match the derived unique port.
+
+**Scenario: UI Test Port Isolation**
+1. TE starts UI tests for PR #35 in workspace `/agents/senior-engineer-1/ws`
+2. `DeriveUniquePort` hashes workspace path → port 5490
+3. `PatchHardcodedPortBindings` scans `Program.cs` → finds `app.Urls.Add("http://localhost:5050")` → comments it out
+4. Deletes `bin/` and `obj/` → forces full recompilation
+5. Starts app with `ASPNETCORE_URLS=http://localhost:5490` → app listens on 5490 (not hardcoded 5050)
+6. Playwright tests navigate to `http://localhost:5490` → tests pass
+7. `RestoreOriginalPortBindings` restores `.playwright-bak` files → source code reverted
+
+### REQ-TEST-011: PR Number in Test Engineer Status Messages
+
+- **REQ-TEST-011a**: When the Test Engineer is running tests for a specific PR, status messages MUST include the PR number (e.g., `"Running unit tests for PR #35..."` not just `"Running unit tests..."`).
+- **REQ-TEST-011b**: The `prNumber` parameter is passed through the `RunTestTierWithRetryAsync` method to all status updates during test execution.
+
+**Scenario: TE Status Messages with PR Number**
+1. TE picks up PR #35 → status: `"Analyzing PR #35 test strategy..."`
+2. TE runs unit tests → status: `"Running unit tests for PR #35..."`
+3. TE runs integration tests → status: `"Running integration tests for PR #35..."`
+4. TE runs UI tests → status: `"Running UI tests for PR #35..."`
+5. Dashboard agent card shows PR number in the live status line
+
 **Scenario: Phase 2 — TE Tests on Same PR**
 1. Architect approves PR #35 → adds `architect-approved` label (Phase 1 complete)
 2. TE scans open PRs → finds PR #35 with `architect-approved` and 4 testable files
@@ -883,6 +913,8 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-DASH-002b**: Per-agent model selector dropdown with edit icon toggle.
 - **REQ-DASH-002c**: Error tracking badge showing error count; modal popup with details, timestamps, stack traces, reset button.
 - **REQ-DASH-002d**: Timer display that resets only when status enum changes (not on reason text changes).
+- **REQ-DASH-002e**: Agent detail card popup MUST show a link to the currently assigned PR (if any). The PR number is extracted via regex from the agent's `StatusReason` text (e.g., "PR #35") with fallback to `AssignedPullRequest` property. Link format: `https://github.com/{owner}/{repo}/pull/{prNumber}`.
+- **REQ-DASH-002f**: Agent status messages MUST NOT show "⏳ Awaiting human approval..." when the corresponding gate is in auto mode. Guard all pre-gate `UpdateStatus` calls with `_gateCheck.RequiresHuman(gateId)` to prevent false status flash on the dashboard.
 
 ### REQ-DASH-003: Model Override
 
