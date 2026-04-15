@@ -8,5 +8,6 @@ public enum AgentRole
     PrincipalEngineer,
     SeniorEngineer,
     JuniorEngineer,
-    TestEngineer
+    TestEngineer,
+    Custom
 }

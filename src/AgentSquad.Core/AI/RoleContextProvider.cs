@@ -19,9 +19,9 @@ public class RoleContextProvider
     private readonly ILogger<RoleContextProvider> _logger;
     private readonly HttpClient _httpClient;
 
-    // Cache knowledge summaries per role to avoid re-fetching
-    private readonly ConcurrentDictionary<AgentRole, string> _knowledgeCache = new();
-    private readonly ConcurrentDictionary<AgentRole, bool> _initialized = new();
+    // Cache knowledge summaries per agent key (role name or custom agent name)
+    private readonly ConcurrentDictionary<string, string> _knowledgeCache = new();
+    private readonly ConcurrentDictionary<string, bool> _initialized = new();
 
     private const int MaxRoleDescriptionChars = 1500;
     private const int MaxKnowledgeChars = 2500;
@@ -44,19 +44,30 @@ public class RoleContextProvider
     /// </summary>
     public async Task InitializeForAgentAsync(AgentRole role, CancellationToken ct = default)
     {
-        if (_initialized.TryGetValue(role, out var done) && done)
+        await InitializeForAgentAsync(role, customAgentName: null, ct);
+    }
+
+    /// <summary>
+    /// Initializes knowledge for an agent (built-in or custom) by fetching and summarizing knowledge links.
+    /// For custom agents, pass the custom agent name to locate the correct config entry.
+    /// </summary>
+    public async Task InitializeForAgentAsync(AgentRole role, string? customAgentName, CancellationToken ct = default)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
+
+        if (_initialized.TryGetValue(cacheKey, out var done) && done)
             return;
 
-        var config = GetAgentConfig(role);
+        var config = GetAgentConfig(role, customAgentName);
         if (config.KnowledgeLinks.Count > 0)
         {
-            var knowledge = await FetchAndSummarizeLinksAsync(role, config.KnowledgeLinks, ct);
-            _knowledgeCache[role] = knowledge;
-            _logger.LogInformation("Initialized knowledge context for {Role}: {CharCount} chars from {LinkCount} links",
-                role, knowledge.Length, config.KnowledgeLinks.Count);
+            var knowledge = await FetchAndSummarizeLinksAsync(cacheKey, config.KnowledgeLinks, ct);
+            _knowledgeCache[cacheKey] = knowledge;
+            _logger.LogInformation("Initialized knowledge context for {CacheKey}: {CharCount} chars from {LinkCount} links",
+                cacheKey, knowledge.Length, config.KnowledgeLinks.Count);
         }
 
-        _initialized[role] = true;
+        _initialized[cacheKey] = true;
     }
 
     /// <summary>
@@ -66,7 +77,16 @@ public class RoleContextProvider
     /// </summary>
     public string GetRoleSystemContext(AgentRole role)
     {
-        var config = GetAgentConfig(role);
+        return GetRoleSystemContext(role, customAgentName: null);
+    }
+
+    /// <summary>
+    /// Returns the composite role context string for a specific agent (built-in or custom).
+    /// </summary>
+    public string GetRoleSystemContext(AgentRole role, string? customAgentName)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
+        var config = GetAgentConfig(role, customAgentName);
         var sb = new StringBuilder();
 
         // Inject custom role description
@@ -76,7 +96,7 @@ public class RoleContextProvider
             if (roleDesc.Length > MaxRoleDescriptionChars)
             {
                 roleDesc = roleDesc[..MaxRoleDescriptionChars] + "...";
-                _logger.LogWarning("Role description for {Role} truncated to {MaxChars} chars", role, MaxRoleDescriptionChars);
+                _logger.LogWarning("Role description for {CacheKey} truncated to {MaxChars} chars", cacheKey, MaxRoleDescriptionChars);
             }
             sb.AppendLine("[ROLE CUSTOMIZATION]");
             sb.AppendLine(roleDesc);
@@ -84,7 +104,7 @@ public class RoleContextProvider
         }
 
         // Inject cached knowledge context
-        if (_knowledgeCache.TryGetValue(role, out var knowledge) && !string.IsNullOrWhiteSpace(knowledge))
+        if (_knowledgeCache.TryGetValue(cacheKey, out var knowledge) && !string.IsNullOrWhiteSpace(knowledge))
         {
             sb.AppendLine("[ROLE KNOWLEDGE]");
             sb.AppendLine(knowledge);
@@ -99,7 +119,15 @@ public class RoleContextProvider
     /// </summary>
     public IReadOnlyList<string> GetMcpServers(AgentRole role)
     {
-        var config = GetAgentConfig(role);
+        return GetMcpServers(role, customAgentName: null);
+    }
+
+    /// <summary>
+    /// Returns the MCP server names for a specific agent (built-in or custom).
+    /// </summary>
+    public IReadOnlyList<string> GetMcpServers(AgentRole role, string? customAgentName)
+    {
+        var config = GetAgentConfig(role, customAgentName);
         return config.McpServers
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .Select(s => s.Trim())
@@ -112,13 +140,37 @@ public class RoleContextProvider
     /// </summary>
     public void InvalidateCache(AgentRole role)
     {
-        _knowledgeCache.TryRemove(role, out _);
-        _initialized.TryRemove(role, out _);
+        InvalidateCache(role, customAgentName: null);
     }
 
-    private AgentConfig GetAgentConfig(AgentRole role)
+    /// <summary>
+    /// Clears cached knowledge for a specific agent.
+    /// </summary>
+    public void InvalidateCache(AgentRole role, string? customAgentName)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
+        _knowledgeCache.TryRemove(cacheKey, out _);
+        _initialized.TryRemove(cacheKey, out _);
+    }
+
+    private static string GetCacheKey(AgentRole role, string? customAgentName)
+    {
+        if (role == AgentRole.Custom && !string.IsNullOrWhiteSpace(customAgentName))
+            return $"custom:{customAgentName}";
+        return role.ToString();
+    }
+
+    private AgentConfig GetAgentConfig(AgentRole role, string? customAgentName = null)
     {
         var agents = _configMonitor.CurrentValue.Agents;
+
+        if (role == AgentRole.Custom && !string.IsNullOrWhiteSpace(customAgentName))
+        {
+            var custom = agents.CustomAgents.FirstOrDefault(c =>
+                string.Equals(c.Name, customAgentName, StringComparison.OrdinalIgnoreCase));
+            return custom ?? new AgentConfig();
+        }
+
         return role switch
         {
             AgentRole.ProgramManager => agents.ProgramManager,
@@ -133,7 +185,7 @@ public class RoleContextProvider
     }
 
     private async Task<string> FetchAndSummarizeLinksAsync(
-        AgentRole role, List<string> links, CancellationToken ct)
+        string cacheKey, List<string> links, CancellationToken ct)
     {
         var summaries = new List<string>();
         var totalChars = 0;
@@ -142,7 +194,7 @@ public class RoleContextProvider
         {
             if (totalChars >= MaxKnowledgeChars)
             {
-                _logger.LogWarning("Knowledge budget exhausted for {Role} after {Count} links", role, summaries.Count);
+                _logger.LogWarning("Knowledge budget exhausted for {CacheKey} after {Count} links", cacheKey, summaries.Count);
                 break;
             }
 
@@ -163,7 +215,7 @@ public class RoleContextProvider
             }
             catch (Exception ex)
             {
-                _logger.LogWarning(ex, "Failed to fetch knowledge link for {Role}: {Url}", role, url);
+                _logger.LogWarning(ex, "Failed to fetch knowledge link for {CacheKey}: {Url}", cacheKey, url);
             }
         }
 

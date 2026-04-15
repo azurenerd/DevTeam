@@ -357,6 +357,133 @@ else if (_config is not null)
                             </div>
                         }
                     </div>
+
+                    @* ── Custom Agents ── *@
+                    <div class="config-custom-agents-section">
+                        <div class="config-section-divider">
+                            <span>Custom Agents</span>
+                        </div>
+                        @if (_config!.Agents.CustomAgents.Count == 0)
+                        {
+                            <p class="config-hint" style="margin: 8px 0;">No custom agents configured. Add one to extend your team with specialized roles.</p>
+                        }
+                        else
+                        {
+                            <div class="config-agent-grid">
+                                @foreach (var customAgent in _config.Agents.CustomAgents)
+                                {
+                                    var agentKey = $"custom:{customAgent.Name}";
+                                    var isExpanded = IsAgentPanelExpanded(agentKey);
+                                    <div class="config-agent-accordion">
+                                        <div class="config-agent-row" @onclick="() => ToggleAgentPanel(agentKey)" style="cursor: pointer;">
+                                            <div class="config-agent-name">
+                                                <span class="config-agent-chevron @(isExpanded ? "expanded" : "")">▶</span>
+                                                <span class="config-custom-agent-badge">Custom</span>
+                                                @if (string.IsNullOrWhiteSpace(customAgent.Name))
+                                                {
+                                                    <em style="opacity: 0.5;">(unnamed)</em>
+                                                }
+                                                else
+                                                {
+                                                    @customAgent.Name
+                                                }
+                                                @if (!string.IsNullOrWhiteSpace(customAgent.RoleDescription) || customAgent.McpServers.Count > 0 || customAgent.KnowledgeLinks.Count > 0)
+                                                {
+                                                    <span class="config-agent-customized" title="This agent has custom role configuration">✦</span>
+                                                }
+                                            </div>
+                                            <div class="config-agent-controls" @onclick:stopPropagation="true">
+                                                <select @bind="customAgent.ModelTier" class="config-select config-select-sm"
+                                                    title="AI model quality tier for this custom agent.">
+                                                    <option value="premium">Premium</option>
+                                                    <option value="standard">Standard</option>
+                                                    <option value="budget">Budget</option>
+                                                    <option value="local">Local</option>
+                                                </select>
+                                                <label class="config-toggle config-toggle-sm" title="Enable or disable this custom agent.">
+                                                    <input type="checkbox" @bind="customAgent.Enabled" />
+                                                    <span class="config-toggle-slider"></span>
+                                                </label>
+                                                <button class="config-btn-remove" style="margin-left: 8px;"
+                                                    @onclick="() => RemoveCustomAgent(customAgent)"
+                                                    title="Remove this custom agent">✕</button>
+                                            </div>
+                                        </div>
+                                        @if (isExpanded)
+                                        {
+                                            <div class="config-agent-details" @onclick:stopPropagation="true">
+                                                @* Agent Name *@
+                                                <div class="config-field">
+                                                    <label title="Unique name for this custom agent. Used as its display name and for task assignment matching.">
+                                                        Agent Name <span class="config-hint">(required)</span>
+                                                    </label>
+                                                    <input type="text" @bind="customAgent.Name" class="config-input"
+                                                        placeholder="e.g., Security Reviewer, API Specialist, DevOps Engineer"
+                                                        title="The agent's display name. Must be unique across all custom agents." />
+                                                </div>
+
+                                                @* Role Description *@
+                                                <div class="config-field">
+                                                    <label title="Define this agent's persona, expertise, and behavioral guidelines. This is the primary way to shape what the custom agent does and how it thinks.">
+                                                        Role Description <span class="config-hint">(defines persona — highly recommended)</span>
+                                                    </label>
+                                                    <textarea @bind="customAgent.RoleDescription" class="config-textarea" rows="4"
+                                                        placeholder="e.g., 'You are a Security Reviewer specializing in OWASP top 10, dependency vulnerability scanning, and secure coding practices. Review all PRs for security concerns...'"
+                                                        title="The agent's core persona. This is prepended to every AI prompt and defines the agent's identity, expertise, and approach."></textarea>
+                                                </div>
+
+                                                @* MCP Servers *@
+                                                <div class="config-field">
+                                                    <label title="MCP servers extend this agent's tool capabilities.">
+                                                        MCP Servers <span class="config-hint">(tool integrations)</span>
+                                                    </label>
+                                                    @for (var i = 0; i < customAgent.McpServers.Count; i++)
+                                                    {
+                                                        var idx = i;
+                                                        <div class="config-list-item">
+                                                            <input type="text" value="@customAgent.McpServers[idx]"
+                                                                @onchange="e => UpdateMcpServer(customAgent, idx, e.Value?.ToString() ?? string.Empty)"
+                                                                class="config-input" placeholder="server-name"
+                                                                title="MCP server name" />
+                                                            <button class="config-btn-remove" @onclick="() => RemoveMcpServer(customAgent, idx)" title="Remove this MCP server">✕</button>
+                                                        </div>
+                                                    }
+                                                    <button class="config-btn-add" @onclick="() => AddMcpServer(customAgent)" title="Add an MCP server">
+                                                        + Add MCP Server
+                                                    </button>
+                                                </div>
+
+                                                @* Knowledge Links *@
+                                                <div class="config-field">
+                                                    <label title="URLs to documentation or reference pages for this agent's context.">
+                                                        Knowledge Links <span class="config-hint">(reference documentation)</span>
+                                                    </label>
+                                                    @for (var i = 0; i < customAgent.KnowledgeLinks.Count; i++)
+                                                    {
+                                                        var idx = i;
+                                                        <div class="config-list-item">
+                                                            <input type="text" value="@customAgent.KnowledgeLinks[idx]"
+                                                                @onchange="e => UpdateKnowledgeLink(customAgent, idx, e.Value?.ToString() ?? string.Empty)"
+                                                                class="config-input" placeholder="https://docs.example.com/standards"
+                                                                title="URL to a documentation page" />
+                                                            <button class="config-btn-remove" @onclick="() => RemoveKnowledgeLink(customAgent, idx)" title="Remove this knowledge link">✕</button>
+                                                        </div>
+                                                    }
+                                                    <button class="config-btn-add" @onclick="() => AddKnowledgeLink(customAgent)" title="Add a knowledge link">
+                                                        + Add Knowledge Link
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        }
+                                    </div>
+                                }
+                            </div>
+                        }
+                        <button class="config-btn-add config-btn-add-agent" @onclick="AddCustomAgent"
+                            title="Add a new custom agent with its own role, model tier, MCP servers, and knowledge links">
+                            + Add Custom Agent
+                        </button>
+                    </div>
                 </div>
             }
         </div>
@@ -1147,6 +1274,24 @@ else if (_config is not null)
     {
         if (index >= 0 && index < config.KnowledgeLinks.Count)
             config.KnowledgeLinks[index] = value;
+    }
+
+    private void AddCustomAgent()
+    {
+        _config?.Agents.CustomAgents.Add(new CustomAgentConfig
+        {
+            Name = "",
+            ModelTier = "standard",
+            Enabled = true
+        });
+    }
+
+    private void RemoveCustomAgent(CustomAgentConfig agent)
+    {
+        _config?.Agents.CustomAgents.Remove(agent);
+        // Clean up expanded panel state
+        var key = $"custom:{agent.Name}";
+        _expandedAgentPanels.Remove(key);
     }
 
     private async Task ValidatePat()

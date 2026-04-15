@@ -103,7 +103,7 @@ public abstract class AgentBase : IAgent, IDisposable
         if (RoleContext is null)
             return defaultPrompt;
 
-        var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role);
+        var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role, Identity.CustomAgentName);
         if (string.IsNullOrWhiteSpace(roleCtx))
             return defaultPrompt;
 
@@ -121,7 +121,7 @@ public abstract class AgentBase : IAgent, IDisposable
 
         if (RoleContext is not null)
         {
-            var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role);
+            var roleCtx = RoleContext.GetRoleSystemContext(Identity.Role, Identity.CustomAgentName);
             if (!string.IsNullOrWhiteSpace(roleCtx))
             {
                 history.AddSystemMessage(roleCtx);
@@ -183,8 +183,8 @@ public abstract class AgentBase : IAgent, IDisposable
         {
             try
             {
-                await RoleContext.InitializeForAgentAsync(Identity.Role, ct);
-                var mcpServers = RoleContext.GetMcpServers(Identity.Role);
+                await RoleContext.InitializeForAgentAsync(Identity.Role, Identity.CustomAgentName, ct);
+                var mcpServers = RoleContext.GetMcpServers(Identity.Role, Identity.CustomAgentName);
                 if (mcpServers.Count > 0)
                 {
                     AgentCallContext.McpServers = mcpServers;

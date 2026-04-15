@@ -80,6 +80,12 @@ public class AgentConfigs
     public AgentConfig TestEngineer { get; set; } = new() { ModelTier = "standard", Enabled = true };
     public AgentConfig SeniorEngineerTemplate { get; set; } = new() { ModelTier = "standard" };
     public AgentConfig JuniorEngineerTemplate { get; set; } = new() { ModelTier = "local" };
+
+    /// <summary>
+    /// User-defined custom agents beyond the 7 built-in roles.
+    /// Each custom agent gets a unique name and the same configuration options as built-in agents.
+    /// </summary>
+    public List<CustomAgentConfig> CustomAgents { get; set; } = new();
 }
 
 public class AgentConfig
@@ -106,6 +112,19 @@ public class AgentConfig
     /// Content is fetched and summarized at agent initialization and cached for the session.
     /// </summary>
     public List<string> KnowledgeLinks { get; set; } = new();
+}
+
+/// <summary>
+/// Configuration for a user-defined custom agent. Extends AgentConfig with a
+/// unique name that serves as the agent's identity and display name.
+/// </summary>
+public class CustomAgentConfig : AgentConfig
+{
+    /// <summary>
+    /// Unique display name for this custom agent (e.g., "Security Reviewer", "API Specialist").
+    /// Used as the agent's display name and for identification in the system.
+    /// </summary>
+    public string Name { get; set; } = "";
 }
 
 public class LimitsConfig

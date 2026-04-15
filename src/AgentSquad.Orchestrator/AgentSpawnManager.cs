@@ -155,6 +155,85 @@ public class AgentSpawnManager
     }
 
     /// <summary>
+    /// Spawn a custom agent by configuration name. Returns the agent identity,
+    /// or null if an agent with that name is already running.
+    /// </summary>
+    public async Task<AgentIdentity?> SpawnCustomAgentAsync(
+        string customAgentName, string modelTier, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(customAgentName);
+
+        // Check if already running
+        var existing = _registry.GetAllAgents()
+            .Where(a => a.Identity.Role == AgentRole.Custom
+                     && string.Equals(a.Identity.CustomAgentName, customAgentName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (existing.Count > 0)
+        {
+            _logger.LogWarning("Custom agent '{Name}' is already running, skipping spawn.", customAgentName);
+            return null;
+        }
+
+        var identity = new AgentIdentity
+        {
+            Id = $"custom-{customAgentName.ToLowerInvariant().Replace(' ', '-')}-{Guid.NewGuid():N}",
+            DisplayName = customAgentName,
+            Role = AgentRole.Custom,
+            ModelTier = modelTier,
+            CustomAgentName = customAgentName,
+            Rank = 0
+        };
+
+        try
+        {
+            // === Gate: AgentTeamComposition — human approves agent spawn ===
+            await _gateCheck.WaitForGateAsync(
+                GateIds.AgentTeamComposition,
+                $"Ready to spawn custom agent: {identity.DisplayName}",
+                ct: ct);
+
+            _logger.LogInformation(
+                "Spawning custom agent '{DisplayName}' with model tier '{ModelTier}'.",
+                identity.DisplayName, modelTier);
+
+            var agent = _agentFactory.Create(AgentRole.Custom, identity);
+            await _registry.RegisterAsync(agent, ct);
+            await agent.InitializeAsync(ct);
+
+            // Start the agent's main loop as a background task
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await agent.StartAsync(ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
+                catch (Exception loopEx)
+                {
+                    _logger.LogError(loopEx, "Custom agent '{AgentId}' loop crashed.", identity.Id);
+                }
+            }, ct);
+
+            _logger.LogInformation(
+                "Custom agent '{AgentId}' ({DisplayName}) spawned and initialized.",
+                identity.Id, identity.DisplayName);
+
+            return identity;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to spawn custom agent '{Name}'.", customAgentName);
+
+            // Best-effort cleanup: unregister if it was registered
+            try { await _registry.UnregisterAsync(identity.Id, ct); }
+            catch { /* already logged upstream */ }
+
+            throw;
+        }
+    }
+
+    /// <summary>
     /// Returns true if a new agent of the given role may be spawned
     /// without exceeding configured limits.
     /// </summary>
@@ -275,6 +354,10 @@ public class AgentSpawnManager
 
     private bool CanSpawnInternal(AgentRole role)
     {
+        // Custom agents are handled by SpawnCustomAgentAsync with their own guard
+        if (role == AgentRole.Custom)
+            return true;
+
         // Core singleton roles (PM, Researcher, Architect, TE) — at most one
         if (CoreSingletonRoles.Contains(role))
         {
@@ -335,6 +418,7 @@ public class AgentSpawnManager
             AgentRole.TestEngineer => _config.Agents.TestEngineer.ModelTier,
             AgentRole.SeniorEngineer => _config.Agents.SeniorEngineerTemplate.ModelTier,
             AgentRole.JuniorEngineer => _config.Agents.JuniorEngineerTemplate.ModelTier,
+            AgentRole.Custom => "standard", // Custom agents use their own config; this is a fallback
             _ => "standard"
         };
     }

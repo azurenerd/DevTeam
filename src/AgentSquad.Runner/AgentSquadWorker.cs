@@ -106,6 +106,25 @@ public class AgentSquadWorker : BackgroundService
         // duplicate research kickoffs, and "Reference already exists" branch errors.
         _logger.LogInformation("All core agents spawned. Agent loops already started by SpawnAgentAsync.");
 
+        // Spawn custom agents from configuration
+        foreach (var customAgent in _config.Agents.CustomAgents)
+        {
+            if (!customAgent.Enabled || string.IsNullOrWhiteSpace(customAgent.Name))
+                continue;
+
+            try
+            {
+                var customIdentity = await _spawnManager.SpawnCustomAgentAsync(
+                    customAgent.Name, customAgent.ModelTier, ct);
+                if (customIdentity != null)
+                    _logger.LogInformation("Custom agent spawned: {Name}", customIdentity.DisplayName);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to spawn custom agent '{Name}'", customAgent.Name);
+            }
+        }
+
         // Keep alive until cancellation — agents run as background tasks started by SpawnAgentAsync
         try
         {
