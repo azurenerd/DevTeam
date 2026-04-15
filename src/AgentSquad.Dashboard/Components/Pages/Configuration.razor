@@ -847,25 +847,6 @@ else if (_config is not null)
             }
         </div>
 
-        @* ── Save Button ── *@
-        <div class="config-save-bar">
-            @if (_saveError is not null)
-            {
-                <div class="config-save-error">⚠️ @_saveError</div>
-            }
-            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving">
-                @if (_saving)
-                {
-                    <span class="config-spinner"></span>
-                    <span>Saving...</span>
-                }
-                else
-                {
-                    <span>💾 Save Configuration</span>
-                }
-            </button>
-        </div>
-
         @* ═══════════════════════════════════════════════════════════════════
            SME AGENTS — dynamic specialist agents
            ═══════════════════════════════════════════════════════════════════ *@
@@ -1015,6 +996,25 @@ else if (_config is not null)
                     }
                 </div>
             }
+        </div>
+
+        @* ── Save Button ── *@
+        <div class="config-save-bar">
+            @if (_saveError is not null)
+            {
+                <div class="config-save-error">⚠️ @_saveError</div>
+            }
+            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving">
+                @if (_saving)
+                {
+                    <span class="config-spinner"></span>
+                    <span>Saving...</span>
+                }
+                else
+                {
+                    <span>💾 Save Configuration</span>
+                }
+            </button>
         </div>
 
         @* ═══════════════════════════════════════════════════════════════════
