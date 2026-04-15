@@ -36,13 +36,16 @@
 24. [AI Conversation Mode Requirements](#24-ai-conversation-mode-requirements)
 25. [GitHub API Rate Limit Handling](#25-github-api-rate-limit-handling)
 26. [Human Gate Enforcement Requirements](#26-human-gate-enforcement-requirements)
-27. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+27. [MCP Server Infrastructure Requirements](#27-mcp-server-infrastructure-requirements)
+28. [SME Agent System Requirements](#28-sme-agent-system-requirements)
+29. [Knowledge Pipeline Requirements](#29-knowledge-pipeline-requirements)
+30. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
 ## 1. System Overview
 
-AgentSquad is a multi-agent AI system where 7 specialized agent roles collaborate through GitHub PRs/Issues and an in-process message bus to build software projects autonomously. A human Executive stakeholder (@azurenerd) provides high-level direction and resolves escalations.
+AgentSquad is a multi-agent AI system where specialized agent roles collaborate through GitHub PRs/Issues and an in-process message bus to build software projects autonomously. The system includes 7 core agent roles, user-defined custom agents, and dynamically-spawned SME (Subject Matter Expert) agents that provide specialist expertise on demand. Agents can be enhanced with per-role customization (custom system prompts, MCP tool servers, and external knowledge links). A human Executive stakeholder (@azurenerd) provides high-level direction and resolves escalations.
 
 ### Core Principles
 
@@ -57,7 +60,8 @@ AgentSquad is a multi-agent AI system where 7 specialized agent roles collaborat
 2. `AgentSquadWorker` spawns core agents in phase order: PM → Researcher → Architect → PE
 3. PM performs one-time kickoff: reads project description, seeds Researcher
 4. PM restores previously-spawned engineers from TeamMembers.md
-5. Each agent initializes, subscribes to relevant message types, enters its main loop
+5. `AgentSquadWorker` spawns enabled custom agents from configuration
+6. Each agent initializes, subscribes to relevant message types, enters its main loop
 
 ---
 
@@ -81,6 +85,27 @@ AgentSquad is a multi-agent AI system where 7 specialized agent roles collaborat
 - **REQ-ROLE-002b**: All three engineer types (Senior, Junior, PE) extend `EngineerAgentBase` which contains shared logic for issue-driven work, rework handling, clarification loops, and message subscriptions.
 - **REQ-ROLE-002c**: The PE has additional orchestration capabilities (planning, assignment, review, resource evaluation) on top of the base engineer functionality.
 - **REQ-ROLE-002d**: Multiple PE agents can run simultaneously via the engineer pool. The lowest-rank online PE is the "leader" (handles orchestration-only tasks); additional PEs are "workers" who pick up tasks and review PRs but do not plan, assign, or evaluate resources. See §7 for details.
+
+### REQ-ROLE-003: Custom Agents
+
+- **REQ-ROLE-003a**: Users can define custom agent roles via the dashboard Configuration page or appsettings.json. Custom agents have: Name, ModelTier, Enabled flag, RoleDescription, McpServers, and KnowledgeLinks.
+- **REQ-ROLE-003b**: `CustomAgentConfig` extends `AgentConfig` with `Name` and `Enabled` properties. Custom agents are listed under `AgentSquad:CustomAgents` in configuration.
+- **REQ-ROLE-003c**: `CustomAgent` class extends `AgentBase` with a persona-driven implementation. Custom agents receive work via the message bus or GitHub issues, using their RoleDescription as the AI system prompt.
+- **REQ-ROLE-003d**: `AgentFactory` can create custom agents. `AgentSquadWorker` spawns all enabled custom agents at startup after core agents are initialized.
+- **REQ-ROLE-003e**: `AgentRole.Custom` enum value is used for custom agents. `AgentIdentity.CustomAgentName` tracks the user-defined name for display and routing.
+
+### REQ-ROLE-004: SME (Subject Matter Expert) Agents
+
+- **REQ-ROLE-004a**: SME agents are dynamically created at runtime when specialist expertise is needed. They are spawned by the PM (team composition) or PE (reactive spawning) and are subject to human gate approval.
+- **REQ-ROLE-004b**: `SmeAgent` extends `CustomAgent` with SME-specific behavior: workflow modes (OnDemand, Continuous, OneShot), structured result reporting via `SmeResultMessage`, and graceful MCP degradation.
+- **REQ-ROLE-004c**: SME agents are defined by `SMEAgentDefinition` records with: DefinitionId, RoleName, SystemPrompt, McpServers, KnowledgeLinks, Capabilities, ModelTier, MaxInstances, WorkflowMode, SubscribeTo, and CreatedByAgentId.
+- **REQ-ROLE-004d**: Only PM and PE can spawn SME agents. SME agents cannot recursively spawn other SME agents.
+
+**Scenario: Custom Agent Startup**
+1. User configures a "SecurityAuditor" custom agent via dashboard with RoleDescription, standard tier, and an MCP server
+2. On startup, `AgentSquadWorker` reads custom agent configs → finds SecurityAuditor with Enabled=true
+3. `AgentFactory.CreateCustomAgent("SecurityAuditor", ...)` creates agent with Custom role
+4. SecurityAuditor initializes, subscribes to message bus, enters its main loop using its RoleDescription as AI persona
 
 **Scenario: Engineer Creates PR from Issue**
 1. PE assigns GitHub Issue #42 to "Senior Engineer 1" by updating issue title and sending `IssueAssignmentMessage`
@@ -222,6 +247,25 @@ Each phase has gate conditions that must be met before advancing:
 3. PM's enhancement review: #55 has 0 sub-issues → skipped (old behavior was silent)
 4. After engineering phase started: PM detects #55 has been orphaned → flags with comment: "⚠️ This enhancement has no linked engineering tasks. Notifying PE for resolution."
 5. PE receives notification → creates additional engineering tasks or comments with justification
+
+### REQ-PM-009: Team Composition Pipeline
+
+- **REQ-PM-009a**: After PMSpec creation, PM initiates the Team Composition Pipeline. PM gathers project description + Research.md + PMSpec.md as input context.
+- **REQ-PM-009b**: `AgentTeamComposer.BuildTeamCompositionPromptAsync()` builds an AI prompt that includes the project context, available agent catalog, MCP server definitions, and SME templates.
+- **REQ-PM-009c**: AI proposes the optimal team composition as structured JSON. `ParseProposal()` converts the AI response into a `TeamCompositionProposal` record.
+- **REQ-PM-009d**: The proposal is subject to the `AgentTeamComposition` human gate — the director reviews and approves/rejects the proposed team composition before any agents are spawned.
+- **REQ-PM-009e**: On approval, the PM spawns new SME agents from the proposal (using existing templates or new definitions) and saves the approved composition to `TeamComposition.md`.
+- **REQ-PM-009f**: After team composition is complete, PM signals `TeamCompositionComplete` via the message bus.
+- **REQ-PM-009g**: PM sends `TeamCompositionProposalMessage` (broadcast) when the proposal is ready for review, and processes `TeamCompositionApprovalMessage` when the gate decision is made.
+
+**Scenario: PM Team Composition Pipeline**
+1. PM creates PMSpec.md → gathers project description + Research.md + PMSpec.md
+2. `AgentTeamComposer.BuildTeamCompositionPromptAsync()` builds prompt with agent catalog + 3 MCP servers + 2 SME templates
+3. AI proposes: 2 Senior Engineers, 1 Junior Engineer, 1 SME "DatabaseExpert" (from template), 1 SME "UIAccessibilitySpecialist" (new definition)
+4. PM sends `TeamCompositionProposalMessage` → human gate `AgentTeamComposition` activated
+5. Director reviews proposal → approves with modification (removes Junior Engineer)
+6. PM spawns: 2 SEs, DatabaseExpert SME (from template), UIAccessibilitySpecialist SME (new definition)
+7. PM saves `TeamComposition.md` → signals `TeamCompositionComplete`
 
 ---
 
@@ -388,6 +432,27 @@ Each phase has gate conditions that must be met before advancing:
 4. AI analysis for #453: "This user story's requirements are fully addressed by T2 (data models) and T5 (service layer)" → PE posts justification comment on #453
 5. AI analysis for #455: "This user story was missed — needs a dedicated task for report theming" → PE creates new task T10 linked to #455
 6. Result: all enhancements have either engineering tasks or documented justification
+
+### REQ-PE-010: Reactive SME Spawning
+
+- **REQ-PE-010a**: During the development phase, the PE can reactively spawn SME agents when encountering tasks that require specialist expertise beyond the current team's capabilities.
+- **REQ-PE-010b**: `RequestSmeIfNeededAsync(taskDescription, additionalContext, ct)` uses AI assessment to determine whether an SME is needed for a given task. The AI evaluates the task description and context against the current team's capabilities.
+- **REQ-PE-010c**: If the AI determines an SME is needed: capability keywords are extracted from the task, and the system checks for existing matching templates via `SmeDefinitionGenerator.FindMatchingTemplateAsync`.
+- **REQ-PE-010d**: If no matching template exists, the AI generates a new SME definition via `BuildDefinitionGenerationPrompt` → `ParseDefinition`, creating a tailored specialist agent definition.
+- **REQ-PE-010e**: The SME agent is spawned via `AgentSpawnManager.SpawnSmeAgentAsync(definition, assignToIssue?, ct)`, which enforces `MaxInstances` per definition and `MaxTotalSmeAgents` globally. Spawning is subject to the `SmeAgentSpawn` human gate.
+- **REQ-PE-010f**: Only the PM and PE can trigger SME agent spawning. SME agents cannot recursively spawn other SME agents.
+- **REQ-PE-010g**: The PE sends `SpawnSmeAgentMessage` to request spawning, which is processed by the `AgentSpawnManager`.
+
+**Scenario: PE Reactively Spawns SME Agent**
+1. PE encounters engineering task T7 "Implement GraphQL federation gateway" — requires specialist knowledge
+2. PE calls `RequestSmeIfNeededAsync("Implement GraphQL federation gateway", taskContext, ct)`
+3. AI assessment: "YES — this task requires GraphQL federation expertise not present in the current team"
+4. PE extracts capabilities: ["graphql", "federation", "gateway", "api-gateway"]
+5. `FindMatchingTemplateAsync` → no matching template found
+6. AI generates new definition: RoleName="GraphQLFederationExpert", SystemPrompt="You are a GraphQL federation specialist...", ModelTier=standard
+7. PE calls `SpawnSmeAgentAsync(definition, issueNumber: 107, ct)` → human gate `SmeAgentSpawn` activated
+8. Director approves → SME agent "GraphQLFederationExpert" spawned → works on task → reports findings via `SmeResultMessage`
+9. PE incorporates SME findings into the implementation
 
 ---
 
@@ -848,6 +913,29 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-CFG-006c**: Agents that support multi-turn conversations: Researcher (3 turns), Architect (5 turns), PM, Principal Engineer (2 turns). Each checks `SinglePassMode` to decide whether to collapse turns.
 - **REQ-CFG-006d**: `SinglePassMode` decouples from `FastMode` so users can use premium models (high quality) with single-pass execution (lower cost/latency) — two independent axes.
 
+### REQ-CFG-007: Per-Agent Role Customization
+
+- **REQ-CFG-007a**: Each agent can be configured with a `RoleDescription` — custom text that overrides or augments the agent's default system prompt. The RoleDescription is injected as a `[ROLE CUSTOMIZATION]` section at the start of system prompts via `AgentBase.CreateChatHistory()`.
+- **REQ-CFG-007b**: Each agent can be configured with a list of `McpServers` — MCP server names assigned to that agent. These are passed as `--mcp-server` flags to the copilot CLI process for each AI call.
+- **REQ-CFG-007c**: Each agent can be configured with `KnowledgeLinks` — URLs to external documentation pages. These are fetched, content-extracted (HTML/Markdown-aware), optionally AI-summarized, and injected as a `[ROLE KNOWLEDGE]` section into system prompts.
+- **REQ-CFG-007d**: `AgentConfig` model has `RoleDescription`, `McpServers`, and `KnowledgeLinks` properties. These are configured per-agent under `AgentSquad:Agents:{Role}` in appsettings.json.
+- **REQ-CFG-007e**: `RoleContextProvider` service manages the full pipeline: fetching knowledge link content, extraction, summarization, caching, and budget enforcement.
+
+### REQ-CFG-008: MCP Server Configuration
+
+- **REQ-CFG-008a**: Global MCP server definitions are configured under `AgentSquad:McpServers` in appsettings.json. Each server is defined by `McpServerDefinition` record: Name, Description, Command, Args, Env, Transport (Stdio/Http/Sse), RequiredRuntimes, ProvidedCapabilities.
+- **REQ-CFG-008b**: `McpServerRegistry` provides lookup, enumeration, and capability-based search of registered MCP servers.
+- **REQ-CFG-008c**: `McpServerAvailabilityChecker` validates that required runtimes and commands are installed on the host machine before allowing agents to use an MCP server.
+- **REQ-CFG-008d**: `McpServerSecurityPolicy` blocks dangerous servers (names containing shell, exec, terminal, cmd, powershell, bash), validates HTTPS-only knowledge links, rejects private network URLs, and validates definition fields.
+- **REQ-CFG-008e**: `CopilotCliMcpConfigManager` (registered as `IHostedService`) synchronizes MCP server definitions to the copilot CLI's `mcp.json` configuration file at startup.
+
+### REQ-CFG-009: SME Agent Configuration
+
+- **REQ-CFG-009a**: SME system configuration lives under `AgentSquad:SmeAgents` section, bound to `SmeAgentsConfig`. Key properties: `Enabled` (default true), `MaxTotalSmeAgents` (default 5), `AllowAgentCreatedDefinitions` (default true), `PersistDefinitions` (default true), `DefinitionsPath` (default `sme-definitions.json`).
+- **REQ-CFG-009b**: SME templates are configured under `SmeAgentsConfig.Templates` as a list of `SMEAgentDefinition` records. Templates provide pre-built specialist roles that can be instantly spawned without AI generation.
+- **REQ-CFG-009c**: Custom SME definitions (created at runtime by PM or PE) are persisted to `sme-definitions.json` when `PersistDefinitions` is true. `SMEAgentDefinitionService` provides CRUD operations with JSON file persistence.
+- **REQ-CFG-009d**: `SMEAgentDefinitionService` supports template lookup by name and capability-based search across both templates and custom definitions.
+
 ---
 
 ## 16. Idempotency & Restart Recovery Requirements
@@ -1011,6 +1099,21 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 5. User clicks Force Refresh → caches invalidated → "Syncing work items" overlay appears → fresh data loads
 6. Subsequent 30s auto-refresh happens silently — no overlay, no flicker
 ```
+
+### REQ-DASH-011: SME & MCP Configuration UI
+
+- **REQ-DASH-011a**: The Dashboard Configuration page includes an "MCP Servers" section displaying registered MCP server definitions as cards. Each card shows: server name, description, transport badge (Stdio/Http/Sse), and capability tags.
+- **REQ-DASH-011b**: The Dashboard Configuration page includes an "SME Templates" section showing configured SME agent templates. Each template card displays: role name, system prompt preview, model tier, workflow mode, and associated capabilities.
+- **REQ-DASH-011c**: Toggle controls are provided for: SME system enable/disable (`SmeAgents.Enabled`), agent-created definitions (`AllowAgentCreatedDefinitions`), and definition persistence (`PersistDefinitions`).
+- **REQ-DASH-011d**: The Dashboard Configuration page has a "Custom Agents" section with add/remove functionality, name input field, and full per-agent accordion configuration (role description textarea, MCP server multi-select, knowledge link list with add/remove).
+- **REQ-DASH-011e**: Per-agent role customization is displayed in an accordion layout. Each core agent role (PM, Researcher, Architect, PE, SE, JE, TE) has a collapsible section with: RoleDescription textarea, MCP server assignment list, and KnowledgeLinks URL list with add/remove controls.
+
+**Scenario: Dashboard SME Configuration**
+1. User navigates to Configuration page → scrolls to "MCP Servers" section
+2. Sees 3 MCP server cards: "github-search" (Stdio, capabilities: code-search, repo-browse), "jira-sync" (Http, capabilities: issue-tracking), "docs-reader" (Sse, capabilities: documentation)
+3. Scrolls to "SME Templates" → sees 2 templates: "DatabaseExpert" (standard tier, OnDemand) and "SecurityAuditor" (premium tier, Continuous)
+4. Toggles "Allow agent-created definitions" OFF → PE can no longer generate new SME definitions at runtime
+5. Scrolls to "Custom Agents" → clicks "Add Custom Agent" → enters "APIDesigner" → configures role description and assigns "docs-reader" MCP server
 
 ---
 
@@ -1481,6 +1584,212 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 3. PE sends `ChangesRequestedMessage { ReviewerAgent="HumanReviewer", Feedback="..." }`
 4. Engineer receives rework → fixes colors → re-marks ready-for-review
 5. Full review pipeline repeats → eventually reaches human gate again → human approves → merge
+
+### REQ-GATE-003: SmeAgentSpawn Gate
+
+- **REQ-GATE-003a**: The `SmeAgentSpawn` gate MUST be checked before any SME agent is spawned. Both PM-initiated spawning (team composition) and PE-initiated spawning (reactive) are subject to this gate.
+- **REQ-GATE-003b**: When the gate is in human mode, the spawn request is posted as a gate comment on the relevant GitHub Issue or PR. The comment includes the SME definition details: role name, system prompt summary, capabilities, model tier, and workflow mode.
+- **REQ-GATE-003c**: The director can approve or reject the spawn. On rejection, the spawning agent (PM or PE) receives the rejection feedback and proceeds without the SME agent.
+- **REQ-GATE-003d**: When the gate is in auto mode, SME agents are spawned immediately without human review. Agent status messages MUST NOT show "⏳ Awaiting human approval..." when auto mode is active.
+
+### REQ-GATE-004: AgentTeamComposition Gate
+
+- **REQ-GATE-004a**: The `AgentTeamComposition` gate MUST be checked before the PM's team composition proposal is executed. The full `TeamCompositionProposal` is presented for human review.
+- **REQ-GATE-004b**: The gate comment includes: proposed agent roster (names, roles, tiers), proposed SME agents (definitions, capabilities), MCP server assignments, and estimated resource usage.
+- **REQ-GATE-004c**: The director can approve, reject, or modify the proposal. Modifications are communicated via the rejection feedback text and the PM re-generates the proposal incorporating the feedback.
+- **REQ-GATE-004d**: When the gate is in auto mode, the team composition proposal is executed immediately.
+
+**Scenario: Human Gate Blocks SME Spawn**
+1. PE encounters task requiring Kubernetes expertise → AI assessment says YES → generates SME definition
+2. PE calls `SpawnSmeAgentAsync(k8sExpert, issueNumber: 115, ct)`
+3. `AgentSpawnManager` checks `_gateCheck.RequiresHuman(GateIds.SmeAgentSpawn)` → returns true
+4. Gate comment posted on Issue #115: "🤖 SME Agent Spawn Request: KubernetesExpert (standard tier, OnDemand, capabilities: k8s, helm, container-orchestration)"
+5. Director reviews → approves → SME agent spawned
+6. Alternative: Director rejects "Use existing PE for this task" → PE proceeds without SME
+
+**Scenario: Team Composition Gate with Modification**
+1. PM proposes team: 3 SEs, 1 JE, 2 SMEs (DatabaseExpert, UIAccessibility)
+2. Gate activated → director reviews → rejects with feedback: "Remove JE, use only 2 SEs, approve both SMEs"
+3. PM re-generates proposal incorporating feedback → 2 SEs, 2 SMEs
+4. Gate re-activated → director approves → PM spawns agents
+
+---
+
+## 27. MCP Server Infrastructure Requirements
+
+### REQ-MCP-001: MCP Server Definition Model
+
+- **REQ-MCP-001a**: Each MCP server is defined by a `McpServerDefinition` record containing: `Name` (unique identifier), `Description` (human-readable purpose), `Command` (executable path), `Args` (command-line arguments), `Env` (environment variables dictionary), `Transport` (Stdio, Http, or Sse), `RequiredRuntimes` (list of runtime prerequisites), and `ProvidedCapabilities` (list of capability tags).
+- **REQ-MCP-001b**: MCP server definitions are configured globally under `AgentSquad:McpServers` in appsettings.json. All agents reference servers by name — definitions are shared, not duplicated per-agent.
+- **REQ-MCP-001c**: `McpServerRegistry` provides thread-safe lookup by name, full enumeration, and capability-based search (e.g., find all servers providing "code-search" capability). The registry is populated at startup from configuration.
+
+**Scenario: MCP Server Registration and Lookup**
+1. Config defines 3 MCP servers: "github-search" (Stdio, capabilities: code-search), "jira-sync" (Http, capabilities: issue-tracking), "docs-reader" (Sse, capabilities: documentation)
+2. `McpServerRegistry` loads all 3 definitions at startup → logs "Registered 3 MCP servers"
+3. PM agent config has `McpServers: ["github-search", "docs-reader"]`
+4. `McpServerRegistry.GetByName("github-search")` → returns full definition
+5. `McpServerRegistry.FindByCapability("documentation")` → returns ["docs-reader"]
+
+### REQ-MCP-002: MCP Server Security Policy
+
+- **REQ-MCP-002a**: `McpServerSecurityPolicy` blocks MCP servers with dangerous names or commands. Server names and commands containing any of: `shell`, `exec`, `terminal`, `cmd`, `powershell`, `bash` are rejected with a descriptive error.
+- **REQ-MCP-002b**: Knowledge link URLs MUST use HTTPS. HTTP URLs are rejected by the security policy. Exception: `localhost` URLs are allowed for local development.
+- **REQ-MCP-002c**: Private network URLs (10.x.x.x, 172.16-31.x.x, 192.168.x.x, and link-local addresses) are rejected to prevent SSRF-style attacks through knowledge link fetching.
+- **REQ-MCP-002d**: MCP server definition fields are validated: Name must be non-empty and alphanumeric with hyphens, Command must be non-empty, Transport must be a valid enum value.
+
+**Scenario: Security Policy Blocks Dangerous Server**
+1. User configures MCP server: Name="shell-executor", Command="bash", Args=["-c", "rm -rf /"]
+2. `McpServerSecurityPolicy.Validate(definition)` → REJECTED: "Server name 'shell-executor' contains blocked term 'shell'"
+3. Server is not added to registry → agents cannot reference it
+4. User configures knowledge link: "http://internal-wiki.corp.net/docs" → REJECTED: "Knowledge links must use HTTPS"
+5. User configures knowledge link: "https://192.168.1.100/api/docs" → REJECTED: "Private network URLs are not allowed"
+
+### REQ-MCP-003: MCP Server Availability Checking
+
+- **REQ-MCP-003a**: `McpServerAvailabilityChecker` validates that all required runtimes and commands specified in `RequiredRuntimes` are installed and accessible on the host machine.
+- **REQ-MCP-003b**: Availability checking runs at startup for all registered MCP servers. Servers that fail availability checks are logged as warnings but do not prevent system startup.
+- **REQ-MCP-003c**: Agents assigned unavailable MCP servers receive a warning at initialization. The agent continues without the MCP tools (graceful degradation, not hard failure).
+
+**Scenario: MCP Server Availability Check**
+1. Config defines MCP server "python-analyzer" with RequiredRuntimes: ["python3", "pip"]
+2. `McpServerAvailabilityChecker` runs at startup → checks `python3 --version` → success → checks `pip --version` → success
+3. Server marked available → agents can use it
+4. Alternative: `python3` not found → server marked unavailable → warning logged → agents assigned this server continue without it
+
+### REQ-MCP-004: Copilot CLI MCP Integration
+
+- **REQ-MCP-004a**: `CopilotCliMcpConfigManager` is registered as an `IHostedService` that synchronizes MCP server definitions to the copilot CLI's `mcp.json` configuration file on startup.
+- **REQ-MCP-004b**: When an agent has `McpServers` configured, the `CopilotCliChatCompletionService` passes each server name as a `--mcp-server {name}` flag to the copilot CLI process.
+- **REQ-MCP-004c**: MCP server names in agent config MUST match names in the global `McpServerRegistry`. Unrecognized names are logged as warnings and skipped.
+- **REQ-MCP-004d**: The `mcp.json` file is written to the copilot CLI configuration directory. Format follows the copilot CLI MCP configuration schema.
+
+**Scenario: Agent Uses MCP Server via Copilot CLI**
+1. PE agent config has `McpServers: ["github-search"]`
+2. PE makes AI call → `CopilotCliChatCompletionService` builds command: `copilot --allow-all --no-ask-user --mcp-server github-search --model claude-opus-4.6`
+3. Copilot CLI loads github-search MCP server → AI can use code search tools during generation
+4. AI response includes tool calls to github-search → results incorporated into code generation
+
+---
+
+## 28. SME Agent System Requirements
+
+### REQ-SME-001: SME Agent Definition Model
+
+- **REQ-SME-001a**: `SMEAgentDefinition` record contains: `DefinitionId` (GUID), `RoleName` (display name), `SystemPrompt` (full persona prompt), `McpServers` (list of MCP server names), `KnowledgeLinks` (list of URLs), `Capabilities` (list of capability keywords), `ModelTier` (premium/standard/budget/local), `MaxInstances` (max concurrent agents from this definition), `WorkflowMode` (OnDemand/Continuous/OneShot), `SubscribeTo` (list of message types to subscribe to), and `CreatedByAgentId` (tracking provenance).
+- **REQ-SME-001b**: `SMEAgentDefinitionService` provides CRUD operations for SME definitions. Definitions are stored as JSON and support template lookup by name and capability-based search.
+- **REQ-SME-001c**: Templates are configured statically in `SmeAgentsConfig.Templates`. Custom definitions (created at runtime) are persisted to `sme-definitions.json` when `PersistDefinitions` is true.
+
+### REQ-SME-002: SME Agent Implementation
+
+- **REQ-SME-002a**: `SmeAgent` extends `CustomAgent` with SME-specific behavior. The agent's persona and capabilities are driven entirely by its `SMEAgentDefinition`.
+- **REQ-SME-002b**: Three workflow modes control the agent's lifecycle:
+  - **OnDemand**: Agent is spawned for a specific task, works on it, then waits for more work or retires.
+  - **Continuous**: Agent runs a polling loop similar to core agents, continuously looking for work matching its capabilities.
+  - **OneShot**: Agent performs a single task and then retires automatically.
+- **REQ-SME-002c**: `ReportFindingsAsync` broadcasts structured `SmeResultMessage` containing the agent's analysis, recommendations, and any generated artifacts. The spawning agent (PM or PE) receives and incorporates these findings.
+- **REQ-SME-002d**: Graceful MCP degradation: if MCP server initialization fails (e.g., server unavailable, runtime missing), the SME agent continues without tools rather than failing entirely. The failure is logged and tracked in `SmeMetrics`.
+
+### REQ-SME-003: SME Metrics Tracking
+
+- **REQ-SME-003a**: `SmeMetrics` singleton tracks operational statistics: total spawns, total retirements, MCP initialization errors, knowledge link fetches, and per-definition spawn counts.
+- **REQ-SME-003b**: Metrics are available via the dashboard REST API for monitoring SME system health and usage patterns.
+
+### REQ-SME-004: PM Team Composition Pipeline
+
+- **REQ-SME-004a**: After PMSpec creation, PM executes the Team Composition Pipeline to determine the optimal team for the project.
+- **REQ-SME-004b**: Pipeline steps: (1) Gather context (project description + Research.md + PMSpec.md), (2) Build AI prompt via `AgentTeamComposer.BuildTeamCompositionPromptAsync()` including agent catalog + MCP servers + SME templates, (3) AI proposes team as JSON, (4) `ParseProposal()` converts to `TeamCompositionProposal`, (5) Human gate review, (6) Spawn approved agents, (7) Save `TeamComposition.md`, (8) Signal `TeamCompositionComplete`.
+- **REQ-SME-004c**: The AI prompt includes: available core agent roles and their capabilities, all registered MCP servers with descriptions, all SME templates with capabilities, project requirements summary, and guidance on team sizing.
+- **REQ-SME-004d**: `TeamCompositionProposal` record contains: proposed core agent counts per role, list of SME agents to spawn (each with definition or template reference), MCP server assignments per agent, and rationale text.
+
+**Scenario: Full Team Composition Pipeline**
+1. PM completes PMSpec.md for an e-commerce platform project
+2. PM gathers context → `BuildTeamCompositionPromptAsync()` includes: 7 core roles, 3 MCP servers, 2 SME templates (DatabaseExpert, SecurityAuditor)
+3. AI proposes: 2 PEs (for parallel high-complexity work), 2 SEs, 1 DatabaseExpert SME (from template), 1 PaymentIntegrationExpert SME (new definition)
+4. `ParseProposal()` converts JSON → `TeamCompositionProposal`
+5. Human gate `AgentTeamComposition` → director reviews → approves
+6. PM spawns: additional PE (rank 1), 2 SEs, DatabaseExpert SME, generates and spawns PaymentIntegrationExpert SME
+7. Saves `TeamComposition.md` → signals `TeamCompositionComplete` → PE begins engineering planning
+
+### REQ-SME-005: PE Reactive SME Spawning
+
+- **REQ-SME-005a**: During ParallelDevelopment phase, PE can reactively spawn SME agents when a task requires specialist knowledge not available in the current team.
+- **REQ-SME-005b**: `RequestSmeIfNeededAsync(taskDescription, additionalContext, ct)` uses AI assessment to evaluate whether an SME is needed. The AI considers: task complexity, required domain knowledge, current team capabilities, and available SME templates.
+- **REQ-SME-005c**: If an SME is needed: (1) Extract capability keywords from task, (2) Check existing templates via `SmeDefinitionGenerator.FindMatchingTemplateAsync`, (3) If no template matches, AI generates new definition via `BuildDefinitionGenerationPrompt` → `ParseDefinition`, (4) Spawn via `SpawnSmeAgentAsync`.
+- **REQ-SME-005d**: `SmeDefinitionGenerator` encapsulates the AI-powered definition generation: builds a prompt with task context + existing definitions + capability requirements, then parses the AI response into a valid `SMEAgentDefinition`.
+
+### REQ-SME-006: SME Agent Spawn & Retirement
+
+- **REQ-SME-006a**: `AgentSpawnManager.SpawnSmeAgentAsync(definition, assignToIssue?, ct)` enforces three limits: `MaxInstances` per definition (prevents over-spawning of the same specialist), `MaxTotalSmeAgents` globally (default 5), and the `SmeAgentSpawn` human gate.
+- **REQ-SME-006b**: `AgentSpawnManager.RetireSmeAgentAsync(agentId, ct)` performs graceful retirement: stops the agent's main loop, unregisters from `AgentRegistry`, decrements spawn counters, and disposes resources.
+- **REQ-SME-006c**: OneShot SME agents self-retire after completing their single task. OnDemand agents retire after a configurable idle timeout. Continuous agents run until explicitly retired or the system shuts down.
+- **REQ-SME-006d**: Only PM and PE can spawn SME agents. If an SME agent attempts to spawn another SME (detected by `CreatedByAgentId` chain), the request is rejected with a logged warning.
+
+**Scenario: SME Agent OneShot Lifecycle**
+1. PE spawns "CryptoExpert" SME (OneShot mode) to analyze encryption requirements for task T5
+2. CryptoExpert initializes → fetches knowledge links → subscribes to message bus
+3. CryptoExpert receives task context → AI analyzes encryption requirements → produces structured findings
+4. `ReportFindingsAsync` broadcasts `SmeResultMessage` with: recommended algorithms, key sizes, implementation patterns
+5. PE receives findings → incorporates into T5 implementation
+6. CryptoExpert self-retires: stops loop → unregisters → `SmeMetrics.RecordRetirement()`
+
+### REQ-SME-007: SME Message Types
+
+- **REQ-SME-007a**: `SpawnSmeAgentMessage` — sent by PM or PE to request SME agent spawning. Contains: `SMEAgentDefinition`, optional `AssignToIssueNumber`, and `RequestReason`.
+- **REQ-SME-007b**: `SmeResultMessage` — broadcast by SME agents when they complete work. Contains: `DefinitionId`, `AgentId`, `Findings` (structured text), `Recommendations` (list), `Artifacts` (generated file paths), and `Confidence` (High/Medium/Low).
+- **REQ-SME-007c**: `TeamCompositionProposalMessage` — broadcast by PM when a team composition proposal is ready for review. Contains the full `TeamCompositionProposal`.
+- **REQ-SME-007d**: `TeamCompositionApprovalMessage` — sent when the human gate decision is made. Contains: `Approved` (bool), `Feedback` (text), and the original proposal reference.
+
+### REQ-SME-008: SME System Safety
+
+- **REQ-SME-008a**: `MaxTotalSmeAgents` (default 5) is a hard cap on the total number of concurrent SME agents. This prevents runaway agent spawning from consuming excessive resources.
+- **REQ-SME-008b**: `AllowAgentCreatedDefinitions` (default true) controls whether PM and PE can generate new SME definitions at runtime. When false, only pre-configured templates can be spawned.
+- **REQ-SME-008c**: All SME spawn requests are audited: `SmeMetrics` records the spawning agent, definition used, timestamp, and eventual retirement time.
+- **REQ-SME-008d**: If an SME agent encounters a fatal error during its main loop, it logs the error, reports partial findings if available, and self-retires rather than crashing the system.
+
+---
+
+## 29. Knowledge Pipeline Requirements
+
+### REQ-KNOW-001: Knowledge Link Fetching & Extraction
+
+- **REQ-KNOW-001a**: `RoleContextProvider` manages the full knowledge pipeline: fetching URLs, extracting content, summarizing, caching, and injecting into system prompts.
+- **REQ-KNOW-001b**: Two content extractors are used based on content type: `HtmlContentExtractor` (strips HTML tags, scripts, styles; extracts main content areas) and `MarkdownContentExtractor` (parses and normalizes Markdown content).
+- **REQ-KNOW-001c**: Content type detection uses HTTP response headers (`Content-Type`). HTML pages use `HtmlContentExtractor`; Markdown files (`.md` extension or `text/markdown` content type) use `MarkdownContentExtractor`. Unknown types fall back to raw text extraction.
+- **REQ-KNOW-001d**: HTTP fetching uses configurable timeouts and respects robots.txt where possible. Failed fetches are logged as warnings and skipped (graceful degradation — agent continues without that knowledge source).
+
+**Scenario: Knowledge Link Processing**
+1. PE agent config has `KnowledgeLinks: ["https://docs.example.com/api-guide", "https://raw.github.com/org/repo/main/ARCHITECTURE.md"]`
+2. `RoleContextProvider` fetches first URL → response Content-Type: text/html → `HtmlContentExtractor` extracts 12,000 chars
+3. Content exceeds budget (standard tier = 4000 chars) → `AiKnowledgeSummarizer` summarizes to 3,800 chars
+4. Fetches second URL → Content-Type: text/markdown → `MarkdownContentExtractor` extracts 2,100 chars → within budget, no summarization needed
+5. Both knowledge chunks injected as `[ROLE KNOWLEDGE]` section in PE's system prompt
+
+### REQ-KNOW-002: Knowledge Budget Enforcement
+
+- **REQ-KNOW-002a**: `KnowledgeBudget` enforces per-tier character limits for knowledge content injected into system prompts: premium=8000 chars, standard=4000 chars, budget/local=2000 chars.
+- **REQ-KNOW-002b**: When extracted content exceeds the budget for the agent's model tier, `AiKnowledgeSummarizer` uses a budget-tier model to summarize the content down to the budget limit while preserving key information.
+- **REQ-KNOW-002c**: Budget is shared across all knowledge links for a single agent. If an agent has 3 knowledge links, the total extracted+summarized content for all 3 must fit within the tier budget.
+- **REQ-KNOW-002d**: Budget enforcement logs the original content size, summarized size, and savings percentage for monitoring.
+
+### REQ-KNOW-003: AI Knowledge Summarization
+
+- **REQ-KNOW-003a**: `AiKnowledgeSummarizer` uses a budget-tier AI model (not the agent's own tier) to summarize long knowledge content. This keeps summarization costs low regardless of the agent's assigned model tier.
+- **REQ-KNOW-003b**: The summarization prompt instructs the AI to: preserve technical details, API signatures, and configuration examples; remove boilerplate and marketing content; prioritize information relevant to the agent's role.
+- **REQ-KNOW-003c**: Summarization is only triggered when content exceeds the budget. Short content is passed through unchanged.
+
+### REQ-KNOW-004: Knowledge Caching
+
+- **REQ-KNOW-004a**: `RoleContextProvider` caches fetched and processed knowledge content to avoid re-fetching on every agent loop iteration. Cache TTL is configurable (default: 1 hour).
+- **REQ-KNOW-004b**: Cache is keyed by URL + agent model tier (different tiers may produce different summaries due to budget differences).
+- **REQ-KNOW-004c**: Cache is invalidated when: the TTL expires, the agent's model tier changes at runtime (via dashboard override), or the knowledge link URL list changes in configuration.
+- **REQ-KNOW-004d**: Cache is in-memory only — not persisted across restarts. First loop iteration after restart incurs the full fetch+extract+summarize cost.
+
+**Scenario: Knowledge Cache Lifecycle**
+1. PE initializes → `RoleContextProvider` fetches 2 knowledge links → extracts → summarizes → caches
+2. PE loop iteration 2 → cache hit → knowledge injected from cache (no HTTP fetch)
+3. 45 minutes later → cache still valid (TTL=1h) → cache hit
+4. 65 minutes later → cache expired → re-fetch → re-extract → re-summarize → update cache
+5. User changes PE model tier from standard to premium via dashboard → cache invalidated (budget changed from 4000 to 8000) → re-process with larger budget
 
 ---
 
