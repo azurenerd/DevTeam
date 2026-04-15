@@ -979,7 +979,51 @@ public class ProgramManagerAgent : AgentBase
                     }
                     else
                     {
+                        // Run rubber-duck critique if configured (different model tier, adversarial persona)
+                        string? critiqueFindings = null;
+                        if (!string.IsNullOrWhiteSpace(_config.Agents.CritiqueTier))
+                        {
+                            try
+                            {
+                                var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+                                var critiqueIssueContext = "";
+                                if (issueNumber.HasValue)
+                                {
+                                    var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                                    if (issue is not null)
+                                        critiqueIssueContext = $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}";
+                                }
+                                var critiqueCode = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+
+                                // Gather TE test results from PR comments
+                                string? testResults = null;
+                                var teComment = pr.Comments.FirstOrDefault(c =>
+                                    c.Body.Contains("[TestEngineer]", StringComparison.OrdinalIgnoreCase));
+                                if (teComment is not null)
+                                    testResults = teComment.Body;
+
+                                // Gather prior review comments (Architect, PE)
+                                var priorReviews = string.Join("\n\n",
+                                    pr.Comments
+                                        .Where(c => c.Body.Contains("[Architect]", StringComparison.OrdinalIgnoreCase)
+                                                 || c.Body.Contains("[PrincipalEngineer]", StringComparison.OrdinalIgnoreCase))
+                                        .Select(c => c.Body));
+
+                                critiqueFindings = await PerformCritiqueAsync(
+                                    pr, critiqueCode, critiqueIssueContext, testResults,
+                                    string.IsNullOrWhiteSpace(priorReviews) ? null : priorReviews, ct);
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.LogWarning(ex, "Failed to run critique for PR #{Number} — continuing without", pr.Number);
+                            }
+                        }
+
                         (approved, reviewBody) = await EvaluatePrAlignmentWithVerdictAsync(pr, ct);
+
+                        // Append critique section to review body
+                        if (reviewBody is not null)
+                            reviewBody += FormatCritiqueSection(critiqueFindings);
                     }
                 }
 
@@ -2434,6 +2478,82 @@ public class ProgramManagerAgent : AgentBase
             Logger.LogWarning(ex, "Failed to evaluate PR #{Number} alignment with AI", pr.Number);
             return (false, null);
         }
+    }
+
+    /// <summary>
+    /// Runs an independent "rubber-duck" critique pass using a different model tier.
+    /// Returns formatted critique text, or null if critique is disabled or fails.
+    /// </summary>
+    private async Task<string?> PerformCritiqueAsync(
+        AgentPullRequest pr,
+        string codeContext,
+        string issueContext,
+        string? testResults,
+        string? priorReviews,
+        CancellationToken ct)
+    {
+        var critiqueTier = _config.Agents.CritiqueTier;
+        if (string.IsNullOrWhiteSpace(critiqueTier))
+            return null;
+
+        try
+        {
+            Logger.LogInformation("Running rubber-duck critique on PR #{Number} using tier {Tier}", pr.Number, critiqueTier);
+
+            var kernel = _modelRegistry.GetKernel(critiqueTier, Identity.Id + "-critique");
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+            var systemPrompt = await _promptService.RenderAsync("pm/critique-system",
+                new Dictionary<string, string>(), ct)
+                ?? "You are an independent code critic. Find problems, challenge assumptions, identify risks.";
+
+            var userPrompt = await _promptService.RenderAsync("pm/critique-user",
+                new Dictionary<string, string>
+                {
+                    ["pr_number"] = pr.Number.ToString(),
+                    ["pr_title"] = pr.Title,
+                    ["head_branch"] = pr.HeadBranch,
+                    ["base_branch"] = pr.BaseBranch,
+                    ["issue_body"] = string.IsNullOrWhiteSpace(issueContext) ? "(No linked issue found)" : issueContext,
+                    ["code_context"] = string.IsNullOrWhiteSpace(codeContext) ? "(No code changes available)" : codeContext,
+                    ["test_results"] = string.IsNullOrWhiteSpace(testResults) ? "(No test results available)" : testResults,
+                    ["prior_reviews"] = string.IsNullOrWhiteSpace(priorReviews) ? "(No prior review comments)" : priorReviews
+                }, ct);
+
+            if (userPrompt is null)
+            {
+                userPrompt = $"Review PR #{pr.Number}: {pr.Title}\n\n{issueContext}\n\n{codeContext}";
+            }
+
+            var history = CreateChatHistory();
+            history.AddSystemMessage(systemPrompt);
+            history.AddUserMessage(userPrompt);
+
+            var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+            var result = response.Content?.Trim() ?? "";
+
+            if (string.IsNullOrWhiteSpace(result))
+                return null;
+
+            Logger.LogInformation("Rubber-duck critique completed for PR #{Number}: {Length} chars", pr.Number, result.Length);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Rubber-duck critique failed for PR #{Number} — continuing without critique", pr.Number);
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Formats the critique findings as a markdown section for the PM review comment.
+    /// </summary>
+    internal static string FormatCritiqueSection(string? critique)
+    {
+        if (string.IsNullOrWhiteSpace(critique))
+            return "\n\n### 🦆 Independent Critique\n- ✅ No significant concerns identified";
+
+        return $"\n\n### 🦆 Independent Critique\n{critique.Trim()}";
     }
 
     #endregion

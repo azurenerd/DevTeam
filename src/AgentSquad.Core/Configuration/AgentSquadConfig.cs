@@ -85,6 +85,14 @@ public class AgentConfigs
     public AgentConfig JuniorEngineerTemplate { get; set; } = new() { ModelTier = "local" };
 
     /// <summary>
+    /// Model tier for the independent critique ("rubber-duck") pass during PM review.
+    /// When non-null, the PM runs a second AI call with an adversarial persona before its
+    /// regular approval/rejection decision. Set to a tier name like "standard" or "premium".
+    /// Null (default) = critique disabled, zero additional cost.
+    /// </summary>
+    public string? CritiqueTier { get; set; }
+
+    /// <summary>
     /// User-defined custom agents beyond the 7 built-in roles.
     /// Each custom agent gets a unique name and the same configuration options as built-in agents.
     /// </summary>
