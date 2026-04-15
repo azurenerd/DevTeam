@@ -305,11 +305,9 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
 
     private async Task<bool> VerifyCopilotInstalledAsync(CancellationToken ct)
     {
+        Process? process = null;
         try
         {
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
-
             var psi = new ProcessStartInfo
             {
                 FileName = _config.ExecutablePath,
@@ -320,14 +318,23 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
                 CreateNoWindow = true
             };
 
-            using var process = new Process { StartInfo = psi };
+            process = new Process { StartInfo = psi };
             process.Start();
 
-            var output = await process.StandardOutput.ReadToEndAsync(timeoutCts.Token);
-            await process.WaitForExitAsync(timeoutCts.Token);
+            // Use WaitForExit with a timeout rather than async + CancellationToken,
+            // because cancelling ReadToEndAsync doesn't kill the process, and
+            // Process.Dispose() blocks waiting for exit — causing a deadlock.
+            var exited = process.WaitForExit(TimeSpan.FromSeconds(10));
+            if (!exited)
+            {
+                _logger.LogWarning("Copilot CLI verification timed out after 10s — treating as unavailable");
+                KillProcessSafely(process);
+                return false;
+            }
 
             if (process.ExitCode == 0)
             {
+                var output = process.StandardOutput.ReadToEnd();
                 _logger.LogDebug("Copilot CLI version: {Version}", output.Trim());
                 return true;
             }
@@ -335,15 +342,16 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
             _logger.LogDebug("copilot --version exited with code {Code}", process.ExitCode);
             return false;
         }
-        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
-        {
-            _logger.LogWarning("Copilot CLI verification timed out after 10s — treating as unavailable");
-            return false;
-        }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Copilot CLI not found at '{Path}'", _config.ExecutablePath);
+            if (process is { HasExited: false })
+                KillProcessSafely(process);
             return false;
+        }
+        finally
+        {
+            process?.Dispose();
         }
     }
 
