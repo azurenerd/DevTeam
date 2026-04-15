@@ -106,11 +106,7 @@ dotnet build
 
 ### 2. Configure
 
-Copy the template and edit with your settings:
-
-```bash
-cp src/AgentSquad.Runner/appsettings.template.json src/AgentSquad.Runner/appsettings.json
-```
+Edit `src/AgentSquad.Runner/appsettings.json` with your project settings (non-secret values like project name, description, repo, model tiers, etc. are committed to git):
 
 ```json
 {
@@ -119,7 +115,6 @@ cp src/AgentSquad.Runner/appsettings.template.json src/AgentSquad.Runner/appsett
       "Name": "my-project",
       "Description": "A brief description of what to build",
       "GitHubRepo": "owner/repo",
-      "GitHubToken": "ghp_...",
       "DefaultBranch": "main"
     },
     "CopilotCli": {
@@ -128,6 +123,23 @@ cp src/AgentSquad.Runner/appsettings.template.json src/AgentSquad.Runner/appsett
     }
   }
 }
+```
+
+**Store secrets using .NET User Secrets** (never committed to git):
+
+```bash
+cd src/AgentSquad.Runner
+
+# Required: GitHub PAT
+dotnet user-secrets set "AgentSquad:Project:GitHubToken" "github_pat_..."
+
+# Optional: API keys (only if not using Copilot CLI)
+dotnet user-secrets set "AgentSquad:Models:premium:ApiKey" "sk-ant-..."
+dotnet user-secrets set "AgentSquad:Models:standard:ApiKey" "sk-ant-..."
+dotnet user-secrets set "AgentSquad:Models:budget:ApiKey" "sk-..."
+```
+
+> **Note:** User secrets are stored locally at `%APPDATA%\Microsoft\UserSecrets\` (Windows) or `~/.microsoft/usersecrets/` (macOS/Linux). Run the `dotnet user-secrets set` commands on each machine. Alternatively, use environment variables with `__` as separator: `AGENTSQUAD__PROJECT__GITHUBTOKEN=github_pat_...`
 ```
 
 When `CopilotCli.Enabled` is `true` (default), all model tiers route through the `copilot` binary — no API keys needed. For direct API access, configure providers per tier:
@@ -239,7 +251,7 @@ See [docs/agent-behaviors.md](docs/agent-behaviors.md) for detailed behavior doc
 
 ## Configuration
 
-Configuration lives in `src/AgentSquad.Runner/appsettings.json` under the `AgentSquad` section. Use `appsettings.template.json` as a starting point.
+Configuration lives in `src/AgentSquad.Runner/appsettings.json` under the `AgentSquad` section (committed to git). Secrets (GitHub PAT, API keys) are stored separately via [.NET User Secrets](https://learn.microsoft.com/en-us/aspnet/core/security/app-secrets) and never committed.
 
 | Section | Description |
 |---------|-------------|

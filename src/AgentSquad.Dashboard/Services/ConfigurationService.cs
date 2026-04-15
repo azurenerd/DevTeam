@@ -135,7 +135,8 @@ public sealed class ConfigurationService : IConfigurationService
 
     /// <summary>
     /// Merges updated AgentSquad config values into appsettings.json, preserving
-    /// non-AgentSquad sections (e.g., Logging).
+    /// non-AgentSquad sections (e.g., Logging). Strips secrets (PAT, API keys)
+    /// so they are never written to the committed config file.
     /// </summary>
     public async Task SaveConfigAsync(AgentSquadConfig updatedConfig)
     {
@@ -143,6 +144,10 @@ public sealed class ConfigurationService : IConfigurationService
 
         // Serialize the updated config section
         var configJson = JsonSerializer.SerializeToNode(updatedConfig, JsonOptions);
+
+        // Strip secrets — these live in User Secrets / env vars, not appsettings.json
+        StripSecrets(configJson);
+
         root["AgentSquad"] = configJson;
 
         var output = root.ToJsonString(JsonOptions);
@@ -161,6 +166,49 @@ public sealed class ConfigurationService : IConfigurationService
             configRoot.Reload();
 
         _logger.LogInformation("Configuration saved to {Path}", _appSettingsPath);
+    }
+
+    /// <summary>
+    /// Removes secret values from a serialized config JSON node so they are not
+    /// persisted to appsettings.json. Secrets should be stored in User Secrets
+    /// or environment variables instead.
+    /// </summary>
+    private static void StripSecrets(JsonNode? configNode)
+    {
+        if (configNode is not JsonObject config) return;
+
+        // Strip GitHubToken from Project section
+        if (config["Project"] is JsonObject project && project.ContainsKey("GitHubToken"))
+            project["GitHubToken"] = "";
+
+        // Strip ApiKey from each model tier
+        if (config["Models"] is JsonObject models)
+        {
+            foreach (var (_, tierNode) in models)
+            {
+                if (tierNode is JsonObject tier && tier.ContainsKey("ApiKey"))
+                    tier["ApiKey"] = "";
+            }
+        }
+
+        // Strip Env secrets from MCP server configs
+        if (config["McpServers"] is JsonObject mcpServers)
+        {
+            foreach (var (_, serverNode) in mcpServers)
+            {
+                if (serverNode is not JsonObject server) continue;
+                if (server["Env"] is not JsonObject env) continue;
+                foreach (var (key, _) in env)
+                {
+                    if (key.Contains("TOKEN", StringComparison.OrdinalIgnoreCase) ||
+                        key.Contains("SECRET", StringComparison.OrdinalIgnoreCase) ||
+                        key.Contains("KEY", StringComparison.OrdinalIgnoreCase))
+                    {
+                        env[key] = "";
+                    }
+                }
+            }
+        }
     }
 
     /// <summary>

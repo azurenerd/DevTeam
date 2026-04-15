@@ -97,6 +97,10 @@ else if (_config is not null)
                                 }
                             </button>
                         </div>
+                        @if (_patIsFromSecrets)
+                        {
+                            <p class="config-hint">🔐 Token loaded from <strong>User Secrets</strong> (not stored in appsettings.json). Manage via: <code>dotnet user-secrets set "AgentSquad:Project:GitHubToken" "your-pat"</code></p>
+                        }
                         @if (_patValidation is not null)
                         {
                             @if (_patValidation.Success)
@@ -1219,6 +1223,7 @@ else if (_config is not null)
 
     // Secret visibility
     private bool _showToken;
+    private bool _patIsFromSecrets;
 
     // Copilot reasoning effort helper (nullable string)
     private string _copilotReasoningEffort
@@ -1247,6 +1252,9 @@ else if (_config is not null)
             // Deep-copy the config so edits don't affect the running system until save
             var current = ConfigService.GetCurrentConfig();
             _config = DeepCopy(current);
+
+            // Detect if PAT came from User Secrets (non-empty PAT but appsettings.json has empty value)
+            _patIsFromSecrets = !string.IsNullOrEmpty(_config.Project.GitHubToken);
         }
         catch (Exception ex)
         {
