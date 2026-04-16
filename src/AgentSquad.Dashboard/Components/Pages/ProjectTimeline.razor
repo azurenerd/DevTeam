@@ -198,6 +198,24 @@ else
                         </div>
                     }
                 }
+
+                @* Upcoming phase placeholders — show what's coming next *@
+                @foreach (var upcoming in GetUpcomingPhases())
+                {
+                    <div class="ntl-phase-column ntl-phase-upcoming @GetPhaseClass(upcoming.Name)">
+                        <div class="ntl-phase-label">
+                            <span class="ntl-phase-name">@upcoming.Name</span>
+                            <span class="ntl-phase-counter ntl-upcoming-badge">Upcoming</span>
+                        </div>
+                        <div class="ntl-spine-segment ntl-spine-upcoming"></div>
+                        <div class="ntl-phase-nodes ntl-upcoming-content">
+                            <div class="ntl-upcoming-pulse">
+                                <div class="ntl-upcoming-ring"></div>
+                                <span class="ntl-upcoming-text">Awaiting agents…</span>
+                            </div>
+                        </div>
+                    </div>
+                }
             </div>
         </div>
 
@@ -787,6 +805,35 @@ else
     }
 
     private void SetFilter(string f) { _statusFilter = f; StateHasChanged(); }
+
+    /// <summary>
+    /// Returns placeholder phases for pipeline stages that haven't started yet.
+    /// </summary>
+    private List<(string Name, string Icon)> GetUpcomingPhases()
+    {
+        var allExpected = _devViewMode == "engineering"
+            ? new[] { ("Research", "🔍"), ("PM Spec", "📝"), ("Architecture", "🏗️"), ("Eng Planning", "📋"), ("Development", "⚡"), ("Testing", "🧪"), ("Finalization", "✅") }
+            : new[] { ("Research", "🔍"), ("PM Spec", "📝"), ("Architecture", "🏗️"), ("Development", "⚡"), ("Finalization", "✅") };
+
+        var existingNames = _phases.Select(p => p.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // A Development W0/W1 etc. counts as "Development" existing
+        if (existingNames.Any(n => n.StartsWith("Development", StringComparison.OrdinalIgnoreCase)))
+            existingNames.Add("Development");
+
+        var upcoming = new List<(string Name, string Icon)>();
+        bool foundLastExisting = false;
+        foreach (var (name, icon) in allExpected)
+        {
+            if (existingNames.Contains(name))
+            {
+                foundLastExisting = true;
+                continue;
+            }
+            if (foundLastExisting)
+                upcoming.Add((name, icon));
+        }
+        return upcoming;
+    }
     private void SetTheme(string t) { _designTheme = t; StateHasChanged(); }
 
     private void ZoomIn() { _zoomPercent = Math.Min(200, _zoomPercent + 15); StateHasChanged(); }
@@ -857,6 +904,8 @@ else
         "PM Spec" => "phase-pmspec",
         "Architecture" => "phase-architecture",
         "Development" => "phase-development",
+        "Eng Planning" => "phase-development",
+        "Testing" => "phase-finalization",
         "Finalization" => "phase-finalization",
         _ when name.StartsWith("Development W") => "phase-development",
         _ => "phase-development"

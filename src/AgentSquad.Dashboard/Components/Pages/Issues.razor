@@ -104,12 +104,16 @@ else
         @foreach (var issue in _filteredIssues)
         {
             var stateClass = issue.State == "open" ? "open" : "closed";
-            <div class="issue-card">
-                <div class="issue-state-indicator issue-state-@stateClass"></div>
+            <div class="issue-card @(issue.Labels.Contains("blocker") ? "issue-blocked" : "")">
+                <div class="issue-state-indicator @(issue.Labels.Contains("blocker") ? "issue-state-blocked" : $"issue-state-{stateClass}")"></div>
                 <div class="issue-content">
                     <div class="issue-title-row">
-                        <span class="issue-state-badge issue-state-@stateClass">
-                            @if (issue.State == "open")
+                        <span class="issue-state-badge @(issue.Labels.Contains("blocker") ? "issue-state-blocked" : $"issue-state-{stateClass}")">
+                            @if (issue.Labels.Contains("blocker"))
+                            {
+                                <span title="Blocked">🚫</span>
+                            }
+                            else if (issue.State == "open")
                             {
                                 <span title="Open">◉</span>
                             }

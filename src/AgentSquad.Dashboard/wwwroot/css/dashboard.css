@@ -4503,6 +4503,18 @@ div[title] .config-agent-name {
     color: #a371f7;
 }
 
+.issue-state-badge.issue-state-blocked {
+    color: #f85149;
+}
+
+.issue-state-indicator.issue-state-blocked {
+    background: #f85149;
+}
+
+.issue-card.issue-blocked {
+    border-left: 3px solid #f85149;
+}
+
 .issue-title {
     color: var(--text-color);
     font-weight: 600;
@@ -5395,6 +5407,65 @@ a.ntl-child-node { text-decoration: none; color: inherit; }
     background: rgba(34, 197, 94, 0.1);
     color: #22c55e;
     border-color: rgba(34, 197, 94, 0.25);
+}
+
+/* ── Upcoming phase placeholders ── */
+.ntl-phase-upcoming {
+    opacity: 0.4;
+    position: relative;
+}
+
+.ntl-phase-upcoming .ntl-phase-label {
+    opacity: 0.7;
+}
+
+.ntl-upcoming-badge {
+    font-size: 0.7em !important;
+    color: #7d8590 !important;
+    font-style: italic;
+}
+
+.ntl-spine-upcoming {
+    opacity: 0.3;
+    background: repeating-linear-gradient(
+        90deg,
+        var(--phase, #6366f1) 0px,
+        var(--phase, #6366f1) 6px,
+        transparent 6px,
+        transparent 12px
+    ) !important;
+    height: 2px !important;
+    box-shadow: none !important;
+}
+
+.ntl-upcoming-content {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100px;
+}
+
+.ntl-upcoming-pulse {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+}
+
+.ntl-upcoming-ring {
+    width: 28px;
+    height: 28px;
+    border: 2px solid rgba(125, 133, 144, 0.3);
+    border-top-color: rgba(125, 133, 144, 0.6);
+    border-radius: 50%;
+    animation: ntl-spin 2s linear infinite;
+}
+
+.ntl-upcoming-text {
+    font-size: 0.75em;
+    color: #7d8590;
+    font-style: italic;
+    white-space: nowrap;
 }
 
 /* ═══════════════════════════════════════════════════════════════
