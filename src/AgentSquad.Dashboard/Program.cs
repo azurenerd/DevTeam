@@ -43,6 +43,7 @@ if (!File.Exists(dbPath))
     dbPath = $"agentsquad_{repoSlug}.db"; // fallback to local
 builder.Services.AddSingleton(new AgentStateStore(dbPath));
 builder.Services.AddSingleton(new AgentMemoryStore(dbPath));
+builder.Services.AddSingleton<AgentSquad.Core.Metrics.BuildTestMetrics>();
 
 // Orchestrator (AgentRegistry, HealthMonitor, DeadlockDetector, WorkflowStateMachine, AgentSpawnManager)
 builder.Services.AddOrchestrator();

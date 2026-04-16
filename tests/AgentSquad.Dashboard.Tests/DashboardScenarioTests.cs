@@ -213,19 +213,15 @@ public class DashboardScenarioTests : IAsyncLifetime
         await using var context = await CreateContextAsync("S09");
         var page = await context.NewPageAsync();
 
-        // Metrics page may return 500 in standalone mode if data service is unavailable
         var response = await page.GotoAsync($"{_baseUrl}/metrics", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
-        // Accept both 200 (working) and 500 (standalone mode limitation) — capture state either way
         Assert.NotNull(response);
+        Assert.True(response.Ok, $"Metrics page returned {response.Status} — expected 200");
         await CaptureScreenshotAsync(page, "S09_Metrics");
 
-        if (response.Ok)
-        {
-            var text = await page.InnerTextAsync("body");
-            Assert.False(string.IsNullOrWhiteSpace(text), "Metrics page should have content when available");
-        }
+        var text = await page.InnerTextAsync("body");
+        Assert.False(string.IsNullOrWhiteSpace(text), "Metrics page should have content");
     }
 
     [Fact]

@@ -91,7 +91,7 @@ Validates: Health status page renders with content.
 ### S09: Metrics (`/metrics`)
 **Status:** ✅ PASSED
 
-Validates: Metrics page loads (accepts 500 in standalone mode as known limitation). Screenshot captured regardless of status.
+Validates: Metrics page loads successfully with build/test metric cards.
 
 ![S09 Metrics](scenario-screenshots/S09_Metrics.png)
 
@@ -135,6 +135,6 @@ dotnet test tests/AgentSquad.Dashboard.Tests --filter "S01"
 
 ### Known Limitations
 
-- **Metrics page** (`/metrics`) returns 500 in standalone mode when certain data services are unavailable. Test accepts this gracefully.
+- **Metrics page** (`/metrics`) now properly registers `BuildTestMetrics` in standalone DI and returns 200.
 - **Engineering Plan page** does not exist yet (no `/engineering-plan` route). Replaced with Agent Reasoning test.
 - Tests require both Runner (API backend on 5050) and Dashboard (UI on 5051) to be running.
