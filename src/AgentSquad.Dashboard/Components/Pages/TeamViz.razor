@@ -59,7 +59,7 @@ else
             <circle cx="400" cy="400" r="@_orbitRadius" fill="none"
                     stroke="rgba(255,255,255,0.04)" stroke-width="1" stroke-dasharray="4,8" />
 
-            @* Connection lines from PM (center) to each outer agent *@
+            @* Connection lines: PM→leaders/non-engineers, SE leader→SE children *@
             @foreach (var conn in _connections)
             {
                 <path d="@conn.Path" fill="none"
@@ -140,11 +140,11 @@ else
         <div class="legend-items">
             <div class="legend-item">
                 <span class="legend-line connection-pm"></span>
-                <span>PM ↔ Agent</span>
+                <span>PM ↔ Lead / Non-SE</span>
             </div>
             <div class="legend-item">
                 <span class="legend-line connection-pe"></span>
-                <span>Principal ↔ Engineer</span>
+                <span>SE Lead ↔ SE / TE</span>
             </div>
         </div>
     </div>
@@ -212,10 +212,11 @@ else
         _connections = new List<ConnectionArc>();
         if (_pmAgent is null || _outerAgents.Count == 0) return;
 
-        var swe = _outerAgents.FirstOrDefault(a => a.Role == AgentRole.SoftwareEngineer);
-        int peIdx = swe is not null ? _outerAgents.IndexOf(swe) : -1;
+        var seLeader = _outerAgents.FirstOrDefault(a => a.Role == AgentRole.SoftwareEngineer);
+        int seLeaderIdx = seLeader is not null ? _outerAgents.IndexOf(seLeader) : -1;
 
-        var engineerRoles = new HashSet<AgentRole>
+        // Roles that report to the SE leader (not directly to PM)
+        var seChildRoles = new HashSet<AgentRole>
         {
             AgentRole.SoftwareEngineer, AgentRole.TestEngineer
         };
@@ -225,15 +226,19 @@ else
             var agent = _outerAgents[i];
             var pos = _outerPositions[i];
 
-            // PM → each outer agent (curved path)
-            bool isPe = agent.Role == AgentRole.SoftwareEngineer;
+            // Skip SE children — they connect to the SE leader, not PM
+            if (seLeader is not null && seChildRoles.Contains(agent.Role) && i != seLeaderIdx)
+                continue;
+
+            // PM → agent (curved path)
+            bool isLeader = agent.Role == AgentRole.SoftwareEngineer;
             var curve = ComputeCurve(_cx, _cy, pos.SvgX, pos.SvgY, curvature: 0.15);
 
             _connections.Add(new ConnectionArc
             {
                 Path = curve,
                 StrokeColor = "url(#grad-pm)",
-                StrokeWidth = isPe ? "2.5" : "1.5",
+                StrokeWidth = isLeader ? "2.5" : "1.5",
                 Opacity = "0.6",
                 Filter = "url(#glow-pm)",
                 ParticleColor = "#a371f7",
@@ -242,17 +247,17 @@ else
             });
         }
 
-        // SE leader → other engineers (if SE leader exists)
-        if (swe is not null && peIdx >= 0)
+        // SE leader → other SE agents + Test Engineer
+        if (seLeader is not null && seLeaderIdx >= 0)
         {
-            var pePos = _outerPositions[peIdx];
+            var leaderPos = _outerPositions[seLeaderIdx];
             for (int i = 0; i < _outerAgents.Count; i++)
             {
-                if (i == peIdx) continue;
-                if (!engineerRoles.Contains(_outerAgents[i].Role)) continue;
+                if (i == seLeaderIdx) continue;
+                if (!seChildRoles.Contains(_outerAgents[i].Role)) continue;
 
-                var engPos = _outerPositions[i];
-                var curve = ComputeCurve(pePos.SvgX, pePos.SvgY, engPos.SvgX, engPos.SvgY, curvature: 0.2);
+                var childPos = _outerPositions[i];
+                var curve = ComputeCurve(leaderPos.SvgX, leaderPos.SvgY, childPos.SvgX, childPos.SvgY, curvature: 0.2);
 
                 _connections.Add(new ConnectionArc
                 {
