@@ -517,6 +517,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "4. Identify dependencies between tasks\n" +
             "5. Reference the source GitHub Issue number for each task\n" +
             "6. For each task, specify which files to create/modify and the namespace to use\n\n" +
+
             "## CRITICAL — Foundation Task (MUST be Task T1)\n" +
             "The FIRST task (T1) MUST ALWAYS be a 'Project Foundation & Scaffolding' task that:\n" +
             "- Creates a proper .gitignore for the project's technology stack (e.g., bin/obj/node_modules/.env etc.) " +
@@ -524,51 +525,87 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "- Sets up the solution/project structure, build configuration, and shared infrastructure\n" +
             "- Creates the core data models, interfaces, and abstractions from the architecture document\n" +
             "- Establishes the directory layout, namespaces, and integration points that all other tasks build upon\n" +
-            "- Creates stub/skeleton files for major components so parallel engineers know where to implement\n" +
             "- Includes dependency injection registration, configuration models, and shared utilities\n" +
             "- Complexity: High (this is the most important task — it sets the foundation)\n" +
-            "- Has NO dependencies (all other tasks should depend on T1)\n" +
-            "This ensures the first PR establishes the project skeleton before any parallel work begins, " +
-            "giving every engineer a clear target for where their code goes.\n\n" +
+            "- Has NO dependencies (all other tasks should depend on T1)\n\n" +
+
+            "### T1 MUST create comprehensive placeholders for parallel engineers:\n" +
+            "T1 is the SINGLE SOURCE OF TRUTH for the project skeleton. It must be thorough enough that " +
+            "NO other task needs to create foundational files. Specifically, T1 must:\n" +
+            "- Create ALL shared data model files with complete record/class definitions\n" +
+            "- Create ALL service interfaces (e.g., IDataService, IAuthService) as real interfaces with method signatures\n" +
+            "- Create the application entry point (Program.cs) with ALL DI registrations as stubs " +
+            "(e.g., `builder.Services.AddSingleton<IMyService, MyService>();` even if MyService is a placeholder)\n" +
+            "- Create stub/skeleton component files for EVERY major UI component or page " +
+            "(with placeholder content like `<!-- TODO: Implement header section -->`)\n" +
+            "- Create the global CSS file with the full layout structure and clearly marked section boundaries " +
+            "(e.g., `/* === HEADER STYLES === */`, `/* === FOOTER STYLES === */`)\n" +
+            "- Create sample data files (e.g., data.json) with realistic structure matching the data models\n" +
+            "- Create configuration files (launchSettings.json, appsettings.json) with correct ports and settings\n\n" +
+            "The goal: after T1 merges, `dotnet build` (or equivalent) succeeds, `dotnet run` starts the app, " +
+            "and the app renders a working shell with placeholder content. " +
+            "Every subsequent task only FILLS IN existing placeholders — it never creates the skeleton.\n\n" +
+
+            "### T1 owns ALL cross-cutting files exclusively:\n" +
+            "- .gitignore, .sln, .csproj, Program.cs, App.razor, Routes.razor, _Imports.razor\n" +
+            "- Global CSS (app.css), layout components, shared models, configuration\n" +
+            "- These files appear ONLY in T1's FilePlan. Other tasks reference them as USE: or MODIFY: " +
+            "ONLY if T1 declares them as SHARED.\n\n" +
+
+            "## CRITICAL — EXACTLY ONE Task Creates Each File\n" +
+            "This is the #1 rule for preventing merge conflicts and duplicate work:\n" +
+            "- Every file in the repository MUST be owned by EXACTLY ONE task\n" +
+            "- The task that CREATEs a file is its owner — no other task may CREATE the same file\n" +
+            "- If another task needs to modify an owned file, the owner must declare it SHARED in the FilePlan\n" +
+            "- Before assigning CREATE to any file, verify no other task in your plan already creates it\n" +
+            "- If the 'Already-Merged PRs' section shows a file already exists on main, " +
+            "NO task should CREATE it — use MODIFY: instead (or skip it entirely)\n\n" +
+
             "## CRITICAL — Repository Structure Rules\n" +
             "The repository root IS the solution root. All file paths are relative to the repo root.\n" +
             "- Place the `.sln` file at the REPO ROOT (e.g., `MyApp.sln`)\n" +
             "- Place source projects in a SINGLE project subfolder (e.g., `MyApp/MyApp.csproj`, `MyApp/Program.cs`)\n" +
             "- NEVER create multiple levels of folders with the same name — `MyApp/MyApp/MyApp/` is WRONG\n" +
-            "- The repo name already provides the top-level context, so `ProjectName/file.cs` is the deepest the project root should go\n" +
             "- Only ONE `.gitignore` at the repo root — do NOT create nested `.gitignore` files in subfolders\n\n" +
+
             "## CRITICAL — Parallel-Friendly Task Decomposition\n" +
             "Multiple engineers will work on tasks IN PARALLEL. Design tasks to MINIMIZE overlap and merge conflicts:\n" +
             "- **Separate by component/module boundary**: each task should own a distinct set of files. " +
-            "Two tasks should NEVER create or modify the same file.\n" +
+            "Two tasks should NEVER create or modify the same file (unless declared SHARED).\n" +
             "- **Vertical slicing over horizontal**: prefer tasks that implement a complete feature end-to-end " +
-            "(model + service + API + tests) rather than tasks that cut across all features at one layer " +
-            "(e.g., 'add all models' then 'add all services').\n" +
+            "(model + service + component + tests) rather than tasks that cut across all features at one layer.\n" +
             "- **Explicit file ownership**: every task's FilePlan must list EXACTLY which files it creates or modifies. " +
             "If two tasks need to touch the same file (e.g., DI registration in Program.cs), " +
-            "assign that responsibility to only ONE of them and note it.\n" +
+            "assign that responsibility to only ONE of them.\n" +
             "- **Shared infrastructure in T1**: anything that multiple tasks would need (base classes, interfaces, " +
             "config models, shared DTOs) should go in T1 so parallel tasks only CONSUME these, never create them.\n" +
             "- **Shared file registry**: If a file MUST be modified by multiple tasks (e.g., Program.cs for DI registration), " +
             "declare it as SHARED in T1's FilePlan (e.g., `SHARED:MyApp/Program.cs`). Only SHARED files may be touched by multiple tasks. " +
-            "Keep shared files to a minimum — prefer each task to own its own files.\n" +
-            "- **Minimize cross-task dependencies**: maximize the number of tasks that depend ONLY on T1 " +
-            "so they can all run in parallel. Chain dependencies (T3 depends on T2 depends on T1) should be rare.\n" +
-            "- **Independent test scoping**: each task should include tests only for its own component, " +
-            "not shared test infrastructure (that belongs in T1).\n\n" +
+            "Keep shared files to an absolute minimum.\n" +
+            "- **Minimize cross-task dependencies**: maximize tasks that depend ONLY on T1 " +
+            "so they can all run in parallel. Chain dependencies (T3→T2→T1) should be rare.\n\n" +
+
             "## CRITICAL — Wave Scheduling for Parallel Execution\n" +
             "Assign each task to a WAVE that determines execution order:\n" +
-            "- **W1**: Foundation task (T1) and any tasks with no dependencies beyond T1. These run first.\n" +
-            "- **W2**: Tasks that depend on W1 tasks (other than T1). These run in the second wave.\n" +
-            "- **W3+**: Tasks depending on W2 tasks, and so on.\n\n" +
+            "- **W0**: Foundation task (T1) ONLY. Runs first, alone. Must complete before any other task starts.\n" +
+            "- **W1**: Tasks that depend only on T1. These all run in parallel after T1 merges.\n" +
+            "- **W2+**: Tasks depending on W1 tasks, and so on.\n\n" +
             "GOAL: At least 60% of non-foundation tasks should be in W1 (parallelizable immediately after T1). " +
-            "If you find yourself putting most tasks in W2+, restructure them to be more independent.\n" +
-            "A star topology (all tasks depend only on T1) is ideal — it maximizes W1 parallelism.\n\n" +
+            "A star topology (all tasks depend only on T1) is ideal — it maximizes W1 parallelism.\n" +
+            "IMPORTANT: T1 is the ONLY task in W0. Do NOT put any other task in W0. " +
+            "No two tasks in W0 should ever exist — that causes duplicate scaffolding.\n\n" +
+
+            "## CRITICAL — Preventing Duplicate Work\n" +
+            "If the 'Already-Merged PRs' section is present in the user prompt, it lists files that " +
+            "ALREADY EXIST on the main branch from previously merged pull requests.\n" +
+            "- Do NOT create tasks that recreate files listed in merged PRs\n" +
+            "- If T1 scaffolding has already been merged, skip T1 entirely and start from W1 tasks\n" +
+            "- Only include tasks for work that has NOT been done yet\n" +
+            "- If a merged PR partially covers a feature, create a task only for the REMAINING work\n\n" +
+
             "CRITICAL: Review the existing repository structure carefully. " +
             "Tasks MUST reference existing files when appropriate (modify, not recreate). " +
-            "New files should follow the existing directory structure and naming conventions. " +
-            "Each task should specify exact file paths and namespaces to prevent engineers from " +
-            "creating duplicate or conflicting code.\n\n" +
+            "New files should follow the existing directory structure and naming conventions.\n\n" +
             "Task complexity mapping:\n" +
             "- **High**: Complex tasks requiring deep expertise → Principal Engineer\n" +
             "- **Medium**: Moderate tasks → Senior Engineers\n" +
@@ -596,6 +633,35 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             userPromptBuilder.AppendLine();
         }
 
+        // Include files from already-merged PRs so the plan doesn't recreate them
+        try
+        {
+            var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+            if (mergedPRs.Count > 0)
+            {
+                var mergedFileSummary = new System.Text.StringBuilder();
+                mergedFileSummary.AppendLine("## Already-Merged PRs (DO NOT recreate these files)");
+                mergedFileSummary.AppendLine("The following PRs have already been merged. Their files ALREADY EXIST on main.");
+                mergedFileSummary.AppendLine("Your plan MUST NOT include tasks that CREATE these files — they are done.\n");
+
+                foreach (var mpr in mergedPRs.Take(10))
+                {
+                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mpr.Number, ct);
+                    if (prFiles.Count > 0)
+                    {
+                        mergedFileSummary.AppendLine($"### PR #{mpr.Number}: {mpr.Title}");
+                        mergedFileSummary.AppendLine($"Files: {string.Join(", ", prFiles)}");
+                        mergedFileSummary.AppendLine();
+                    }
+                }
+                userPromptBuilder.AppendLine(mergedFileSummary.ToString());
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Could not fetch merged PRs for plan deduplication — proceeding without");
+        }
+
         userPromptBuilder.AppendLine($"## GitHub Issues (User Stories)\n{issuesSummary}\n");
         var planUserSuffix = PromptService is not null
             ? await PromptService.RenderAsync("principal-engineer/plan-generation-user-suffix",
@@ -606,28 +672,35 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "REMEMBER:\n" +
             "- T1 MUST be the Project Foundation & Scaffolding task (High complexity, no dependencies). " +
             "It sets up the solution structure, shared interfaces, base classes, config, and DI registration " +
-            "so all other tasks have a clear skeleton to build upon.\n" +
-            "- ALL other tasks should depend on T1 at minimum.\n" +
+            "so all other tasks have a clear skeleton to build upon. T1 is in Wave W0 — it runs ALONE.\n" +
+            "- T1 must create COMPREHENSIVE placeholders: every model, every interface, every component stub, " +
+            "every CSS section marker, sample data files, config files. After T1 merges the app must BUILD and RUN.\n" +
+            "- ALL other tasks should depend on T1 at minimum and be in W1 or later.\n" +
             "- Design tasks for PARALLEL execution: each task should own distinct files with NO overlap.\n" +
+            "- NEVER assign the same file as CREATE in two different tasks. " +
+            "If two tasks need the same file, T1 creates it and declares it SHARED.\n" +
+            "- If 'Already-Merged PRs' lists files that already exist, do NOT create tasks for those files. " +
+            "Only plan tasks for work that hasn't been done yet.\n" +
             "- Prefer vertical slices (one feature end-to-end) over horizontal layers.\n" +
             "- Maximize tasks that depend ONLY on T1 (star topology, not chains).\n" +
-            "- Assign each task a WAVE (W1, W2, etc.) — aim for 60%+ tasks in W1.\n\n" +
+            "- Assign each task a WAVE: W0 for T1 only, W1 for tasks after T1, W2+ for later waves.\n\n" +
             "Output ONLY structured lines in this format:\n" +
             "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>|<Wave>\n\n" +
             "The FilePlan field should contain semicolon-separated file operations:\n" +
             "  CREATE:path/to/file.ext(namespace);MODIFY:path/to/existing.ext;USE:ExistingType(namespace)\n" +
             "  SHARED:path/to/file.ext — declare a file that multiple tasks may modify (use sparingly, T1 only)\n\n" +
-            "The Wave field: W1 for tasks parallelizable immediately after T1, W2 for tasks depending on W1, etc.\n\n" +
+            "The Wave field: W0 for T1 only, W1 for tasks parallelizable after T1, W2+ for later waves.\n\n" +
             "Example:\n" +
             "TASK|T1|42|Project Foundation & Scaffolding|Create solution structure, shared models, interfaces, " +
             "DI registration, and configuration|High|NONE|" +
-            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models);SHARED:MyApp/Program.cs|W1\n" +
+            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models);SHARED:MyApp/Program.cs|W0\n" +
             "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|Medium|T1|" +
             "CREATE:MyApp/Services/AuthService.cs(MyApp.Services);MODIFY:MyApp/Program.cs;USE:IAuthService(MyApp.Interfaces)|W1\n" +
             "TASK|T3|44|Implement user profile|Build user profile CRUD|Medium|T1|" +
             "CREATE:MyApp/Services/UserProfileService.cs(MyApp.Services);CREATE:MyApp/Controllers/ProfileController.cs(MyApp.Controllers)|W1\n\n" +
-            "Note how T2 and T3 both depend only on T1 (W1, parallel-safe) and own completely separate files. " +
-            "Program.cs is declared SHARED in T1, so T2 can MODIFY it for DI registration.\n\n" +
+            "Note: T1 is the ONLY task in W0 — it must complete alone before W1 starts. " +
+            "T2 and T3 are both in W1 (parallel-safe) and own completely separate files. " +
+            "Program.cs is declared SHARED in T1, so T2 can MODIFY it.\n\n" +
             "Only output TASK lines, nothing else.");
 
         history.AddUserMessage(userPromptBuilder.ToString());
@@ -830,6 +903,58 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         }
         _taskTracker.CompleteStep(decisionStepId);
 
+        // Programmatic safety: remove tasks whose files are already in merged PRs
+        try
+        {
+            var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+            if (mergedPRs.Count > 0)
+            {
+                var allMergedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var mpr in mergedPRs.Take(10))
+                {
+                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mpr.Number, ct);
+                    foreach (var f in prFiles)
+                        allMergedFiles.Add(f.ToLowerInvariant().Replace('\\', '/'));
+                }
+
+                var tasksToRemove = new List<EngineeringTask>();
+                foreach (var task in parsedTasks)
+                {
+                    if (task.Id == IntegrationTaskId || task.OwnedFiles.Count == 0)
+                        continue;
+
+                    var normalizedFiles = task.OwnedFiles
+                        .Select(f => f.ToLowerInvariant().Replace('\\', '/'))
+                        .ToList();
+                    var overlap = normalizedFiles.Count(f => allMergedFiles.Contains(f));
+
+                    if (overlap > 0 && overlap >= normalizedFiles.Count / 2)
+                    {
+                        Logger.LogWarning(
+                            "Removing task {TaskId} from plan: {Overlap}/{Total} files already exist in merged PRs",
+                            task.Id, overlap, normalizedFiles.Count);
+                        LogActivity("warning",
+                            $"⚠️ Dropped task {task.Id} ({task.Name}) — {overlap}/{normalizedFiles.Count} files already merged");
+                        tasksToRemove.Add(task);
+                    }
+                }
+
+                if (tasksToRemove.Count > 0)
+                {
+                    var removedIds = tasksToRemove.Select(t => t.Id).ToHashSet();
+                    parsedTasks.RemoveAll(t => removedIds.Contains(t.Id));
+                    // Clean up dependency references to removed tasks
+                    foreach (var task in parsedTasks)
+                        task.Dependencies.RemoveAll(d => removedIds.Contains(d));
+                    Logger.LogInformation("Removed {Count} duplicate tasks from plan", tasksToRemove.Count);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Merged PR deduplication check failed — proceeding with full plan");
+        }
+
         // Create GitHub issues for each task (the single source of truth)
         var createIssuesStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
             $"Creating {parsedTasks.Count} engineering task issues on GitHub", Identity.ModelTier);
@@ -947,8 +1072,14 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+            // Include file ownership so the AI can detect file-level overlap
             var existingTasksSummary = string.Join("\n", _taskManager.Tasks.Select(t =>
-                $"- {t.Id}: {t.Name} (Parent: #{t.ParentIssueNumber}) — {t.Description?.Split('\n').FirstOrDefault()}"));
+            {
+                var files = t.OwnedFiles.Count > 0
+                    ? $" | Files: [{string.Join(", ", t.OwnedFiles)}]"
+                    : "";
+                return $"- {t.Id}: {t.Name} (Parent: #{t.ParentIssueNumber}){files} — {t.Description?.Split('\n').FirstOrDefault()}";
+            }));
 
             foreach (var enhancement in uncoveredEnhancements)
             {
@@ -961,8 +1092,13 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                     "You are a Principal Engineer validating engineering plan coverage. " +
                     "An enhancement (user story) has no dedicated engineering task. " +
                     "Determine if this enhancement is COVERED by existing tasks or was MISSED.\n\n" +
+                    "IMPORTANT: Pay close attention to the Files listed for each task. " +
+                    "If an existing task creates the same files that this enhancement needs " +
+                    "(e.g., solution scaffolding, data models, services), it IS covered even if the task " +
+                    "has a different parent issue number.\n\n" +
                     "If COVERED: respond with COVERED followed by which specific tasks address it and how.\n" +
-                    "If MISSED: respond with MISSED followed by what engineering task should be created.");
+                    "If MISSED: respond with MISSED followed by what engineering task should be created. " +
+                    "The new task MUST NOT create files that are already owned by existing tasks.");
 
                 var enhUser = PromptService is not null
                     ? await PromptService.RenderAsync("principal-engineer/enhancement-coverage-user",
@@ -1360,16 +1496,63 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 return;
             }
 
-            // Claim validation: re-check GitHub to prevent race if another PE claimed it
-            // between our cache load and now
+            // Claim validation: re-fetch from GitHub to prevent race conditions
+            await _taskManager.LoadTasksAsync(ct);
             var freshTask = _taskManager.FindByIssueNumber(task.IssueNumber.Value);
-            if (freshTask is not null && freshTask.Status is "InProgress"
+            if (freshTask is null || EngineeringTaskIssueManager.IsTaskDone(freshTask))
+            {
+                Logger.LogInformation(
+                    "Task #{IssueNumber} already done or closed — skipping",
+                    task.IssueNumber);
+                return;
+            }
+            if (freshTask.Status is "InProgress"
                 && !string.Equals(freshTask.AssignedTo, Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
             {
                 Logger.LogInformation(
                     "Task #{IssueNumber} already in-progress by {Other}, skipping",
                     task.IssueNumber, freshTask.AssignedTo);
                 return;
+            }
+
+            // File overlap check: if this task's files already exist in recently merged PRs,
+            // the work is already done — mark the task complete and skip.
+            if (task.OwnedFiles.Count > 0)
+            {
+                var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var mergedPr in mergedPRs.Take(10)) // Check last 10 merged PRs
+                {
+                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
+                    foreach (var f in prFiles)
+                        mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
+                }
+
+                var taskFilesNormalized = task.OwnedFiles
+                    .Select(f => f.ToLowerInvariant().Replace('\\', '/'))
+                    .ToList();
+                var overlapping = taskFilesNormalized
+                    .Count(f => mergedFileSet.Contains(f));
+
+                if (overlapping > 0 && overlapping >= taskFilesNormalized.Count / 2)
+                {
+                    Logger.LogWarning(
+                        "Task {TaskId} (#{IssueNumber}): {Overlap}/{Total} owned files already exist in merged PRs — skipping as duplicate",
+                        task.Id, task.IssueNumber, overlapping, taskFilesNormalized.Count);
+                    LogActivity("warning",
+                        $"⚠️ Skipping task {task.Id} — {overlapping}/{taskFilesNormalized.Count} files already created by a merged PR");
+
+                    // Mark the task as done so no other agent picks it up
+                    if (task.IssueNumber.HasValue)
+                    {
+                        await GitHub.AddIssueCommentAsync(task.IssueNumber.Value,
+                            $"⚠️ **Duplicate detected**: {overlapping}/{taskFilesNormalized.Count} files from this task " +
+                            $"already exist in merged PRs. Closing as duplicate to avoid overlapping work.",
+                            ct);
+                        await _taskManager.MarkDoneAsync(task.IssueNumber.Value, prNumber: null, ct);
+                    }
+                    return;
+                }
             }
 
             // Mark as assigned to self via the task manager

@@ -515,6 +515,50 @@ public abstract class EngineerAgentBase : AgentBase
                 return;
             }
 
+            // File overlap check: skip task if its files already exist in merged PRs
+            var ownedFiles = EngineeringTaskIssueManager.ParseOwnedFiles(issue.Body);
+            if (ownedFiles.Count > 0)
+            {
+                try
+                {
+                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                    var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var mergedPr in mergedPRs.Take(10))
+                    {
+                        var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
+                        foreach (var f in prFiles)
+                            mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
+                    }
+
+                    var normalizedOwned = ownedFiles
+                        .Select(f => f.ToLowerInvariant().Replace('\\', '/'))
+                        .ToList();
+                    var overlapping = normalizedOwned.Count(f => mergedFileSet.Contains(f));
+
+                    if (overlapping > 0 && overlapping >= normalizedOwned.Count / 2)
+                    {
+                        Logger.LogWarning(
+                            "{Role} {Name}: Task #{IssueNumber} has {Overlap}/{Total} files already in merged PRs — skipping as duplicate",
+                            Identity.Role, Identity.DisplayName, assignment.IssueNumber, overlapping, normalizedOwned.Count);
+                        LogActivity("warning",
+                            $"⚠️ Skipping issue #{assignment.IssueNumber} — {overlapping}/{normalizedOwned.Count} files already created by a merged PR");
+
+                        await GitHub.AddIssueCommentAsync(assignment.IssueNumber,
+                            $"⚠️ **Duplicate detected by {Identity.DisplayName}**: {overlapping}/{normalizedOwned.Count} files from this task " +
+                            $"already exist in merged PRs. Closing as duplicate to avoid overlapping work.",
+                            ct);
+                        await GitHub.CloseIssueAsync(assignment.IssueNumber, ct);
+                        _taskTracker.CompleteStep(claimStepId);
+                        CurrentIssueNumber = null;
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "File overlap check failed — proceeding with task anyway");
+                }
+            }
+
             Logger.LogInformation("{Role} {Name} starting work on issue #{Number}: {Title}",
                 Identity.Role, Identity.DisplayName, issue.Number, issue.Title);
 
