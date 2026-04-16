@@ -161,7 +161,7 @@ internal sealed partial class EngineeringTaskIssueManager
     }
 
     /// <summary>Check if all dependency issues for a task are closed (Done).</summary>
-    public bool AreDependenciesMet(EngineeringTask task)
+    public bool AreDependenciesMet(EngineeringTask task, bool useRelaxation = false, HashSet<string>? sharedFiles = null)
     {
         if (task.DependencyIssueNumbers.Count == 0)
             return true;
@@ -169,7 +169,22 @@ internal sealed partial class EngineeringTaskIssueManager
         return task.DependencyIssueNumbers.All(depIssueNum =>
         {
             var dep = _cache.FirstOrDefault(t => t.IssueNumber == depIssueNum);
-            return dep is null || IsTaskDone(dep);
+            if (dep is null || IsTaskDone(dep))
+                return true;
+
+            // If relaxation is enabled, check typed dependencies
+            if (useRelaxation && task.DependencyTypes.Count > 0)
+            {
+                // Find the task ID for this dependency issue number
+                var depTaskId = dep.Id;
+                if (task.DependencyTypes.TryGetValue(depTaskId, out var depType))
+                {
+                    return PrincipalEngineerAgent.CanRelaxDependency(
+                        depType, dep, sharedFiles ?? new HashSet<string>());
+                }
+            }
+
+            return false;
         });
     }
 
@@ -331,12 +346,23 @@ internal sealed partial class EngineeringTaskIssueManager
         sb.AppendLine("## Metadata");
         sb.AppendLine($"- **Task ID:** {task.Id}");
         sb.AppendLine($"- **Complexity:** {task.Complexity}");
+        sb.AppendLine($"- **Wave:** {task.Wave}");
 
         if (task.ParentIssueNumber.HasValue)
             sb.AppendLine($"- **Parent Issue:** #{task.ParentIssueNumber}");
 
         if (depIssueNumbers.Count > 0)
             sb.AppendLine($"- **Depends On:** {string.Join(", ", depIssueNumbers.Select(n => $"#{n}"))}");
+
+        // Serialize typed dependencies for round-trip persistence
+        if (task.DependencyTypes.Count > 0)
+        {
+            var typedDeps = string.Join(", ", task.DependencyTypes.Select(kv => $"{kv.Key}({kv.Value})"));
+            sb.AppendLine($"- **Dependency Types:** {typedDeps}");
+        }
+
+        if (task.OwnedFiles.Count > 0)
+            sb.AppendLine($"- **Owned Files:** {string.Join(", ", task.OwnedFiles)}");
 
         sb.AppendLine();
         sb.AppendLine("_Created by Principal Engineer._");
@@ -354,6 +380,9 @@ internal sealed partial class EngineeringTaskIssueManager
         var assignedTo = ParseAssignedAgent(issue.Title);
         var deps = ParseDependencies(issue.Body);
         var parentIssue = ParseParentIssue(issue.Body);
+        var wave = ParseWave(issue.Body);
+        var depTypes = ParseDependencyTypes(issue.Body);
+        var ownedFiles = ParseOwnedFiles(issue.Body);
 
         return new EngineeringTask
         {
@@ -368,7 +397,10 @@ internal sealed partial class EngineeringTaskIssueManager
             IssueUrl = issue.Url,
             DependencyIssueNumbers = deps,
             ParentIssueNumber = parentIssue,
-            Labels = issue.Labels.ToList()
+            Labels = issue.Labels.ToList(),
+            Wave = wave,
+            DependencyTypes = depTypes,
+            OwnedFiles = ownedFiles
         };
     }
 
@@ -500,6 +532,56 @@ internal sealed partial class EngineeringTaskIssueManager
         return desc.ToString().Trim();
     }
 
+    /// <summary>Parse "- **Wave:** W1" from issue body metadata. Default "W1" if not found.</summary>
+    internal static string ParseWave(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return "W1";
+        var match = WavePattern().Match(body);
+        return match.Success ? match.Groups[1].Value.Trim() : "W1";
+    }
+
+    /// <summary>Parse "- **Dependency Types:** T1(files), T3(api)" from issue body metadata.</summary>
+    internal static Dictionary<string, string> ParseDependencyTypes(string? body)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(body))
+            return result;
+
+        var match = DependencyTypesPattern().Match(body);
+        if (!match.Success) return result;
+
+        // Parse "T1(files), T3(api)" format
+        var entries = match.Groups[1].Value.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var entry in entries)
+        {
+            var parenStart = entry.IndexOf('(');
+            if (parenStart > 0 && entry.EndsWith(')'))
+            {
+                var taskId = entry[..parenStart].Trim();
+                var depType = entry[(parenStart + 1)..^1].Trim().ToLowerInvariant();
+                result[taskId] = depType;
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Parse "- **Owned Files:** file1, file2" from issue body metadata.</summary>
+    internal static List<string> ParseOwnedFiles(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return new();
+
+        var match = OwnedFilesPattern().Match(body);
+        if (!match.Success) return new();
+
+        return match.Groups[1].Value
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(f => f.Trim())
+            .Where(f => !string.IsNullOrEmpty(f))
+            .ToList();
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────
 
     private static string[] ReplaceStatusLabel(List<string> currentLabels, string newStatus)
@@ -527,4 +609,13 @@ internal sealed partial class EngineeringTaskIssueManager
 
     [GeneratedRegex(@"\*\*Parent Issue:\*\*\s*#(\d+)", RegexOptions.IgnoreCase)]
     private static partial Regex ParentIssuePattern();
+
+    [GeneratedRegex(@"\*\*Wave:\*\*\s*(\S+)", RegexOptions.IgnoreCase)]
+    private static partial Regex WavePattern();
+
+    [GeneratedRegex(@"\*\*Dependency Types:\*\*\s*(.+)", RegexOptions.IgnoreCase)]
+    private static partial Regex DependencyTypesPattern();
+
+    [GeneratedRegex(@"\*\*Owned Files:\*\*\s*(.+)", RegexOptions.IgnoreCase)]
+    private static partial Regex OwnedFilesPattern();
 }

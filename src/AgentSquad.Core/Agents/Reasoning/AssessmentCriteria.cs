@@ -44,6 +44,8 @@ public static class AssessmentCriteria
         4. DEFINITION OF DONE: Does each task have clear completion criteria? Tasks without acceptance criteria or deliverables are a gap.
         5. TEST STRATEGY: Is there a testing approach defined (what to test, test tiers, coverage expectations)?
         6. INTEGRATION POINTS: Are integration points between tasks identified? Tasks that assume interfaces without defining them are a gap.
+        7. PARALLEL SAFETY: Do tasks own distinct files with no overlaps? Are shared files explicitly declared? Tasks with undeclared file overlaps are a gap.
+        8. WAVE SCHEDULING: Are tasks assigned to waves (W1, W2, etc.)? Are at least 60% of non-foundation tasks in W1? Low W1 percentage means poor parallelism.
         """;
 
     /// <summary>Get assessment criteria for a given agent role.</summary>

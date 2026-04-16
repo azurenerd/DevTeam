@@ -167,6 +167,7 @@ public class EngineeringTaskIssueManagerTests
         Assert.Contains("Create Blazor components", body);
         Assert.Contains("**Task ID:** T5", body);
         Assert.Contains("**Complexity:** Medium", body);
+        Assert.Contains("**Wave:** W1", body);
         Assert.Contains("**Parent Issue:** #52", body);
         Assert.Contains("**Depends On:** #98, #99", body);
     }

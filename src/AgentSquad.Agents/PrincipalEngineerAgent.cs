@@ -537,10 +537,21 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "assign that responsibility to only ONE of them and note it.\n" +
             "- **Shared infrastructure in T1**: anything that multiple tasks would need (base classes, interfaces, " +
             "config models, shared DTOs) should go in T1 so parallel tasks only CONSUME these, never create them.\n" +
+            "- **Shared file registry**: If a file MUST be modified by multiple tasks (e.g., Program.cs for DI registration), " +
+            "declare it as SHARED in T1's FilePlan (e.g., `SHARED:MyApp/Program.cs`). Only SHARED files may be touched by multiple tasks. " +
+            "Keep shared files to a minimum — prefer each task to own its own files.\n" +
             "- **Minimize cross-task dependencies**: maximize the number of tasks that depend ONLY on T1 " +
             "so they can all run in parallel. Chain dependencies (T3 depends on T2 depends on T1) should be rare.\n" +
             "- **Independent test scoping**: each task should include tests only for its own component, " +
             "not shared test infrastructure (that belongs in T1).\n\n" +
+            "## CRITICAL — Wave Scheduling for Parallel Execution\n" +
+            "Assign each task to a WAVE that determines execution order:\n" +
+            "- **W1**: Foundation task (T1) and any tasks with no dependencies beyond T1. These run first.\n" +
+            "- **W2**: Tasks that depend on W1 tasks (other than T1). These run in the second wave.\n" +
+            "- **W3+**: Tasks depending on W2 tasks, and so on.\n\n" +
+            "GOAL: At least 60% of non-foundation tasks should be in W1 (parallelizable immediately after T1). " +
+            "If you find yourself putting most tasks in W2+, restructure them to be more independent.\n" +
+            "A star topology (all tasks depend only on T1) is ideal — it maximizes W1 parallelism.\n\n" +
             "CRITICAL: Review the existing repository structure carefully. " +
             "Tasks MUST reference existing files when appropriate (modify, not recreate). " +
             "New files should follow the existing directory structure and naming conventions. " +
@@ -587,20 +598,24 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             "- ALL other tasks should depend on T1 at minimum.\n" +
             "- Design tasks for PARALLEL execution: each task should own distinct files with NO overlap.\n" +
             "- Prefer vertical slices (one feature end-to-end) over horizontal layers.\n" +
-            "- Maximize tasks that depend ONLY on T1 (star topology, not chains).\n\n" +
+            "- Maximize tasks that depend ONLY on T1 (star topology, not chains).\n" +
+            "- Assign each task a WAVE (W1, W2, etc.) — aim for 60%+ tasks in W1.\n\n" +
             "Output ONLY structured lines in this format:\n" +
-            "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>\n\n" +
+            "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>|<Wave>\n\n" +
             "The FilePlan field should contain semicolon-separated file operations:\n" +
-            "  CREATE:path/to/file.ext(namespace);MODIFY:path/to/existing.ext;USE:ExistingType(namespace)\n\n" +
+            "  CREATE:path/to/file.ext(namespace);MODIFY:path/to/existing.ext;USE:ExistingType(namespace)\n" +
+            "  SHARED:path/to/file.ext — declare a file that multiple tasks may modify (use sparingly, T1 only)\n\n" +
+            "The Wave field: W1 for tasks parallelizable immediately after T1, W2 for tasks depending on W1, etc.\n\n" +
             "Example:\n" +
             "TASK|T1|42|Project Foundation & Scaffolding|Create solution structure, shared models, interfaces, " +
             "DI registration, and configuration|High|NONE|" +
-            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models)\n" +
+            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models);SHARED:MyApp/Program.cs|W1\n" +
             "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|Medium|T1|" +
-            "CREATE:MyApp/Services/AuthService.cs(MyApp.Services);USE:IAuthService(MyApp.Interfaces)\n" +
+            "CREATE:MyApp/Services/AuthService.cs(MyApp.Services);MODIFY:MyApp/Program.cs;USE:IAuthService(MyApp.Interfaces)|W1\n" +
             "TASK|T3|44|Implement user profile|Build user profile CRUD|Medium|T1|" +
-            "CREATE:MyApp/Services/UserProfileService.cs(MyApp.Services);CREATE:MyApp/Controllers/ProfileController.cs(MyApp.Controllers)\n\n" +
-            "Note how T2 and T3 both depend only on T1 (parallel-safe) and own completely separate files.\n\n" +
+            "CREATE:MyApp/Services/UserProfileService.cs(MyApp.Services);CREATE:MyApp/Controllers/ProfileController.cs(MyApp.Controllers)|W1\n\n" +
+            "Note how T2 and T3 both depend only on T1 (W1, parallel-safe) and own completely separate files. " +
+            "Program.cs is declared SHARED in T1, so T2 can MODIFY it for DI registration.\n\n" +
             "Only output TASK lines, nothing else.");
 
         history.AddUserMessage(userPromptBuilder.ToString());
@@ -657,6 +672,16 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             // Parse optional FilePlan field (8th field) for file/namespace guidance
             var filePlan = parts.Length >= 8 ? parts[7].Trim() : "";
 
+            // Parse optional Wave field (9th field) — default W1 for backward compat
+            var wave = parts.Length >= 9 ? parts[8].Trim() : "W1";
+            if (string.IsNullOrWhiteSpace(wave)) wave = "W1";
+
+            // Extract owned files from FilePlan (both CREATE and MODIFY)
+            var ownedFiles = ExtractAllFilesFromFilePlan(filePlan);
+
+            // Parse typed dependencies: "T1(files),T3(api)" → {T1:files, T3:api}
+            var (plainDeps, depTypes) = ParseTypedDependencies(deps);
+
             parsedTasks.Add(new EngineeringTask
             {
                 Id = parts[1].Trim(),
@@ -664,8 +689,11 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 Description = parts[4].Trim() + (string.IsNullOrEmpty(filePlan) ? "" :
                     $"\n\n### File Plan\n{FormatFilePlan(filePlan)}"),
                 Complexity = NormalizeComplexity(parts[5].Trim()),
-                Dependencies = deps,
-                ParentIssueNumber = issueNum > 0 ? issueNum : null
+                Dependencies = plainDeps,
+                DependencyTypes = depTypes,
+                ParentIssueNumber = issueNum > 0 ? issueNum : null,
+                Wave = wave,
+                OwnedFiles = ownedFiles
             });
         }
 
@@ -688,6 +716,16 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         // Enforce foundation-first pattern: ensure T1 is a foundation task
         // and all other tasks depend on it
         EnsureFoundationFirstPattern(parsedTasks);
+
+        // PE Parallelism: Validate and repair file overlaps using AI-assisted fixing
+        await ValidateAndRepairTaskPlanAsync(parsedTasks, chat, ct);
+
+        // PE Parallelism: Validate wave assignments and log metrics
+        ValidateWaves(parsedTasks);
+        var finalSharedFiles = ExtractSharedFilesFromFilePlan(
+            ExtractRawFilePlanFromDescription(parsedTasks.FirstOrDefault()?.Description ?? ""));
+        var finalOverlaps = DetectFileOverlaps(parsedTasks, finalSharedFiles);
+        LogParallelismMetrics(parsedTasks, finalOverlaps);
 
         // Add a final integration & validation task that depends on ALL other tasks.
         // The PE leader will self-assign this after all other tasks are done.
@@ -2520,6 +2558,25 @@ public class PrincipalEngineerAgent : EngineerAgentBase
             if (parallelizable < 2)
                 return;
 
+            // Wave-aware scaling: identify current wave and look ahead
+            var currentWaveTasks = _taskManager.Tasks
+                .Where(t => t.Status is "Pending" or "Assigned" or "InProgress")
+                .ToList();
+            var activeWaves = currentWaveTasks
+                .GroupBy(t => t.Wave, StringComparer.OrdinalIgnoreCase)
+                .OrderBy(g => g.Key)
+                .ToList();
+
+            if (activeWaves.Count > 0)
+            {
+                var currentWave = activeWaves[0].Key;
+                var currentWaveParallelizable = activeWaves[0].Count(t =>
+                    t.Status == "Pending" && _taskManager.AreDependenciesMet(t));
+                Logger.LogInformation(
+                    "Wave-aware scaling: current wave {Wave} has {Parallelizable} parallelizable / {Total} total tasks",
+                    currentWave, currentWaveParallelizable, activeWaves[0].Count());
+            }
+
             // Count free workers across all roles (including non-leader PEs)
             var freeWorkers = 0;
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.PrincipalEngineer))
@@ -3675,25 +3732,8 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 task.Dependencies.Insert(0, t1Id);
             }
         }
-
-        // Log overlap warnings: detect tasks that create the same files
-        var fileOwnership = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var task in tasks)
-        {
-            var createFiles = ExtractCreateFilesFromDescription(task.Description);
-            foreach (var file in createFiles)
-            {
-                if (fileOwnership.TryGetValue(file, out var owner))
-                {
-                    Logger.LogWarning("File overlap detected: '{File}' is created by both {Task1} and {Task2}",
-                        file, owner, task.Id);
-                }
-                else
-                {
-                    fileOwnership[file] = task.Id;
-                }
-            }
-        }
+        // Note: File overlap detection is now handled by ValidateAndRepairTaskPlanAsync()
+        // which runs after this method and uses AI-assisted repair.
     }
 
     /// <summary>
@@ -3738,6 +3778,7 @@ public class PrincipalEngineerAgent : EngineerAgentBase
                 "CREATE" => "➕ **Create:**",
                 "MODIFY" => "✏️ **Modify:**",
                 "USE" => "📎 **Reference (do not recreate):**",
+                "SHARED" => "🔗 **Shared (multi-task):**",
                 _ => $"**{action}:**"
             };
 
@@ -3747,9 +3788,443 @@ public class PrincipalEngineerAgent : EngineerAgentBase
         return sb.ToString();
     }
 
+    #endregion
+
+    #region PE Parallelism Enhancements
+
     /// <summary>
-    /// Read visual design reference files from the repository for inclusion in engineering task context.
+    /// Normalizes a file path for consistent comparison:
+    /// forward slashes, lowercase, no leading slash, no trailing slash.
     /// </summary>
+    internal static string NormalizeFilePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return "";
+        // Strip namespace hint: "MyApp/File.cs(Namespace)" → "MyApp/File.cs"
+        var parenIdx = path.IndexOf('(');
+        if (parenIdx > 0) path = path[..parenIdx];
+        return path.Trim().Replace('\\', '/').TrimStart('/').TrimEnd('/').ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Extracts all CREATE and MODIFY file paths from a raw FilePlan string (semicolon-separated ops).
+    /// Returns normalized paths.
+    /// </summary>
+    internal static List<string> ExtractAllFilesFromFilePlan(string filePlan)
+    {
+        if (string.IsNullOrWhiteSpace(filePlan)) return new();
+        var files = new List<string>();
+        var ops = filePlan.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var op in ops)
+        {
+            var colonIdx = op.IndexOf(':');
+            if (colonIdx <= 0) continue;
+            var action = op[..colonIdx].Trim().ToUpperInvariant();
+            if (action is "CREATE" or "MODIFY")
+            {
+                var file = NormalizeFilePath(op[(colonIdx + 1)..]);
+                if (!string.IsNullOrEmpty(file))
+                    files.Add(file);
+            }
+        }
+        return files.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    /// <summary>
+    /// Extracts SHARED file declarations from T1's FilePlan.
+    /// These are files explicitly allowed to be modified by multiple tasks.
+    /// </summary>
+    internal static HashSet<string> ExtractSharedFilesFromFilePlan(string filePlan)
+    {
+        var shared = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(filePlan)) return shared;
+        var ops = filePlan.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        foreach (var op in ops)
+        {
+            var colonIdx = op.IndexOf(':');
+            if (colonIdx <= 0) continue;
+            var action = op[..colonIdx].Trim().ToUpperInvariant();
+            if (action == "SHARED")
+            {
+                var file = NormalizeFilePath(op[(colonIdx + 1)..]);
+                if (!string.IsNullOrEmpty(file))
+                    shared.Add(file);
+            }
+        }
+        return shared;
+    }
+
+    /// <summary>
+    /// Well-known infrastructure files that are inherently shared and should not trigger overlap errors.
+    /// These files are commonly modified by multiple tasks (build config, solution files, etc.).
+    /// </summary>
+    private static readonly HashSet<string> InfrastructureFiles = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".gitignore", "directory.build.props", "directory.build.targets",
+        "directory.packages.props", "global.json", "nuget.config",
+        ".editorconfig", "docker-compose.yml", "dockerfile"
+    };
+
+    /// <summary>
+    /// Detects file ownership overlaps between tasks.
+    /// Returns a dictionary of file → list of task IDs that touch it.
+    /// Excludes shared files (declared in T1's FilePlan) and well-known infrastructure files.
+    /// </summary>
+    internal static Dictionary<string, List<string>> DetectFileOverlaps(
+        List<EngineeringTask> tasks, HashSet<string> sharedFiles)
+    {
+        var fileOwnership = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var task in tasks)
+        {
+            foreach (var file in task.OwnedFiles)
+            {
+                // Skip shared files and infrastructure files
+                if (sharedFiles.Contains(file)) continue;
+                var fileName = Path.GetFileName(file);
+                if (InfrastructureFiles.Contains(fileName)) continue;
+
+                if (!fileOwnership.TryGetValue(file, out var owners))
+                {
+                    owners = new List<string>();
+                    fileOwnership[file] = owners;
+                }
+                if (!owners.Contains(task.Id, StringComparer.OrdinalIgnoreCase))
+                    owners.Add(task.Id);
+            }
+        }
+        // Return only files with >1 owner
+        return fileOwnership
+            .Where(kv => kv.Value.Count > 1)
+            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Validates and repairs file overlaps in the task plan using AI-assisted fixing.
+    /// If overlaps remain after AI retries, fails with a replan request rather than silently stealing files.
+    /// </summary>
+    private async Task ValidateAndRepairTaskPlanAsync(
+        List<EngineeringTask> tasks,
+        IChatCompletionService chat,
+        CancellationToken ct)
+    {
+        // Extract shared files from T1 (foundation task)
+        var t1 = tasks.FirstOrDefault();
+        var t1FilePlan = ExtractRawFilePlanFromDescription(t1?.Description ?? "");
+        var sharedFiles = ExtractSharedFilesFromFilePlan(t1FilePlan);
+
+        if (sharedFiles.Count > 0)
+            Logger.LogInformation("Shared file registry from T1: {SharedFiles}",
+                string.Join(", ", sharedFiles));
+
+        var overlaps = DetectFileOverlaps(tasks, sharedFiles);
+        if (overlaps.Count == 0)
+        {
+            Logger.LogInformation("No file overlaps detected — plan is parallel-safe");
+            return;
+        }
+
+        Logger.LogWarning("File overlaps detected: {Count} files shared across tasks. Attempting AI-assisted repair",
+            overlaps.Count);
+
+        const int maxRetries = 2;
+        for (var attempt = 1; attempt <= maxRetries; attempt++)
+        {
+            var overlapSummary = string.Join("\n", overlaps.Select(kv =>
+                $"  - `{kv.Key}` owned by: {string.Join(", ", kv.Value)}"));
+
+            var taskSummary = string.Join("\n", tasks.Select(t =>
+                $"  {t.Id} ({t.Wave}): {t.Name} — Files: [{string.Join(", ", t.OwnedFiles)}]"));
+
+            var fixPrompt =
+                "The following engineering tasks have FILE OVERLAPS — multiple tasks create/modify the same file. " +
+                "This causes merge conflicts when engineers work in parallel.\n\n" +
+                $"## Overlapping Files\n{overlapSummary}\n\n" +
+                $"## Current Tasks\n{taskSummary}\n\n" +
+                "Fix this by:\n" +
+                "1. Reassigning the disputed file to ONE task only\n" +
+                "2. If a task loses a file, update its description to use the OTHER task's output instead\n" +
+                "3. If a file truly MUST be shared, add it as SHARED in T1's FilePlan\n\n" +
+                "Output the CORRECTED task lines in TASK format (same as before):\n" +
+                "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies>|<FilePlan>|<Wave>\n\n" +
+                "Only output corrected TASK lines for tasks that CHANGED. Keep unchanged tasks as-is.";
+
+            var fixHistory = CreateChatHistory();
+            fixHistory.AddSystemMessage("You are a Principal Engineer fixing file ownership conflicts in an engineering plan. " +
+                "Each file should be owned by exactly one task unless explicitly declared SHARED.");
+            fixHistory.AddUserMessage(fixPrompt);
+
+            try
+            {
+                var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+                var fixes = fixResponse.Content ?? "";
+
+                // Parse corrected tasks and merge them into the existing list
+                var fixedCount = ApplyTaskFixes(tasks, fixes);
+                Logger.LogInformation("AI overlap repair attempt {Attempt}: {FixedCount} tasks updated",
+                    attempt, fixedCount);
+
+                // Re-detect overlaps
+                sharedFiles = ExtractSharedFilesFromFilePlan(
+                    ExtractRawFilePlanFromDescription(tasks.FirstOrDefault()?.Description ?? ""));
+                overlaps = DetectFileOverlaps(tasks, sharedFiles);
+
+                if (overlaps.Count == 0)
+                {
+                    Logger.LogInformation("File overlaps resolved after {Attempt} AI repair attempt(s)", attempt);
+                    return;
+                }
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "AI overlap repair attempt {Attempt} failed", attempt);
+            }
+        }
+
+        // After max retries, log the remaining overlaps as warnings (don't silently reassign)
+        Logger.LogWarning(
+            "File overlaps still present after {MaxRetries} AI repair attempts. " +
+            "Remaining overlaps: {Overlaps}. Proceeding with warning — engineers may encounter merge conflicts",
+            maxRetries,
+            string.Join("; ", overlaps.Select(kv => $"{kv.Key} → [{string.Join(",", kv.Value)}]")));
+    }
+
+    /// <summary>
+    /// Applies AI-generated task fixes to the existing task list.
+    /// Returns the number of tasks that were updated.
+    /// </summary>
+    private int ApplyTaskFixes(List<EngineeringTask> tasks, string aiResponse)
+    {
+        var fixedCount = 0;
+        foreach (var line in aiResponse.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmed = line.Trim();
+            if (!trimmed.StartsWith("TASK|", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var parts = trimmed.Split('|');
+            if (parts.Length < 7) continue;
+
+            var taskId = parts[1].Trim();
+            var existingIdx = tasks.FindIndex(t =>
+                string.Equals(t.Id, taskId, StringComparison.OrdinalIgnoreCase));
+            if (existingIdx < 0) continue;
+
+            var filePlan = parts.Length >= 8 ? parts[7].Trim() : "";
+            var wave = parts.Length >= 9 ? parts[8].Trim() : tasks[existingIdx].Wave;
+            var ownedFiles = ExtractAllFilesFromFilePlan(filePlan);
+
+            var deps = parts[6].Trim().Equals("NONE", StringComparison.OrdinalIgnoreCase)
+                ? new List<string>()
+                : parts[6].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+            var (plainDeps, depTypes) = ParseTypedDependencies(deps);
+
+            tasks[existingIdx] = tasks[existingIdx] with
+            {
+                Name = parts[3].Trim(),
+                Description = parts[4].Trim() + (string.IsNullOrEmpty(filePlan) ? "" :
+                    $"\n\n### File Plan\n{FormatFilePlan(filePlan)}"),
+                Complexity = NormalizeComplexity(parts[5].Trim()),
+                Dependencies = plainDeps,
+                DependencyTypes = depTypes,
+                Wave = wave,
+                OwnedFiles = ownedFiles
+            };
+            fixedCount++;
+        }
+        return fixedCount;
+    }
+
+    /// <summary>
+    /// Extracts the raw FilePlan string from a task description that has already been formatted.
+    /// Looks for the "### File Plan" section and reconstructs the semicolon-separated operations.
+    /// </summary>
+    private static string ExtractRawFilePlanFromDescription(string description)
+    {
+        var sb = new StringBuilder();
+        var inFilePlan = false;
+        foreach (var line in description.Split('\n'))
+        {
+            var trimmed = line.Trim();
+            if (trimmed == "### File Plan")
+            {
+                inFilePlan = true;
+                continue;
+            }
+            if (inFilePlan)
+            {
+                if (trimmed.StartsWith("###") || string.IsNullOrWhiteSpace(trimmed))
+                    break;
+                // Parse "- ➕ **Create:** `path`" back to "CREATE:path"
+                if (trimmed.Contains("**Create:**"))
+                    AppendExtractedOp(sb, trimmed, "CREATE");
+                else if (trimmed.Contains("**Modify:**"))
+                    AppendExtractedOp(sb, trimmed, "MODIFY");
+                else if (trimmed.Contains("**Shared (multi-task):**"))
+                    AppendExtractedOp(sb, trimmed, "SHARED");
+                else if (trimmed.Contains("**Reference"))
+                    AppendExtractedOp(sb, trimmed, "USE");
+            }
+        }
+        return sb.ToString().TrimEnd(';');
+    }
+
+    private static void AppendExtractedOp(StringBuilder sb, string line, string action)
+    {
+        var backtickStart = line.IndexOf('`');
+        var backtickEnd = line.LastIndexOf('`');
+        if (backtickStart >= 0 && backtickEnd > backtickStart)
+        {
+            if (sb.Length > 0) sb.Append(';');
+            sb.Append($"{action}:{line[(backtickStart + 1)..backtickEnd]}");
+        }
+    }
+
+    /// <summary>
+    /// Validates wave assignments in the task plan.
+    /// Checks that at least 60% of non-foundation tasks are in W1 (parallelizable).
+    /// Logs warnings if validation fails but does not reject the plan.
+    /// </summary>
+    internal bool ValidateWaves(List<EngineeringTask> tasks)
+    {
+        if (tasks.Count <= 1) return true;
+
+        // Skip foundation task (T1) from wave analysis
+        var nonFoundationTasks = tasks.Skip(1).ToList();
+        if (nonFoundationTasks.Count == 0) return true;
+
+        var w1Count = nonFoundationTasks.Count(t =>
+            string.Equals(t.Wave, "W1", StringComparison.OrdinalIgnoreCase));
+        var w1Percentage = (double)w1Count / nonFoundationTasks.Count * 100;
+
+        Logger.LogInformation(
+            "Wave analysis: {W1Count}/{Total} non-foundation tasks in W1 ({Percentage:F0}%)",
+            w1Count, nonFoundationTasks.Count, w1Percentage);
+
+        // Log wave breakdown
+        var waveGroups = nonFoundationTasks
+            .GroupBy(t => t.Wave, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(g => g.Key);
+        foreach (var group in waveGroups)
+        {
+            Logger.LogInformation("  Wave {Wave}: {Tasks}",
+                group.Key,
+                string.Join(", ", group.Select(t => $"{t.Id}:{t.Name}")));
+        }
+
+        // Validate: W2+ tasks should not depend on other W2+ tasks from the same wave
+        var waveViolations = new List<string>();
+        foreach (var task in nonFoundationTasks)
+        {
+            if (string.Equals(task.Wave, "W1", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            foreach (var depId in task.Dependencies)
+            {
+                var depTask = tasks.FirstOrDefault(t =>
+                    string.Equals(t.Id, depId, StringComparison.OrdinalIgnoreCase));
+                if (depTask is not null &&
+                    string.Equals(depTask.Wave, task.Wave, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(depTask.Id, tasks[0].Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    waveViolations.Add($"{task.Id}({task.Wave}) depends on {depTask.Id}({depTask.Wave})");
+                }
+            }
+        }
+
+        if (waveViolations.Count > 0)
+        {
+            Logger.LogWarning(
+                "Wave ordering violations — tasks in the same wave depend on each other: {Violations}",
+                string.Join("; ", waveViolations));
+        }
+
+        if (w1Percentage < 60)
+        {
+            Logger.LogWarning(
+                "Low W1 parallelism: only {Percentage:F0}% of tasks in W1 (target: 60%+). " +
+                "Consider restructuring tasks to reduce inter-task dependencies",
+                w1Percentage);
+            return false;
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Parses typed dependencies like "T1(files),T3(api)" into plain dep IDs and a type map.
+    /// Plain format "T1,T3" is also supported (no type annotation → "full" dependency).
+    /// </summary>
+    internal static (List<string> PlainDeps, Dictionary<string, string> DepTypes) ParseTypedDependencies(
+        List<string> rawDeps)
+    {
+        var plainDeps = new List<string>();
+        var depTypes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var dep in rawDeps)
+        {
+            var trimmed = dep.Trim();
+            var parenStart = trimmed.IndexOf('(');
+            if (parenStart > 0 && trimmed.EndsWith(')'))
+            {
+                var taskId = trimmed[..parenStart].Trim();
+                var depType = trimmed[(parenStart + 1)..^1].Trim().ToLowerInvariant();
+                plainDeps.Add(taskId);
+                depTypes[taskId] = depType;
+            }
+            else
+            {
+                plainDeps.Add(trimmed);
+                // No type annotation = full dependency
+            }
+        }
+
+        return (plainDeps, depTypes);
+    }
+
+    /// <summary>
+    /// Determines if a typed dependency can be relaxed (i.e., the dependent task can proceed
+    /// even though the dependency isn't fully complete).
+    /// Currently supports: "api" deps can proceed if the interface is declared in T1's shared files.
+    /// </summary>
+    internal static bool CanRelaxDependency(string depType, EngineeringTask depTask, HashSet<string> sharedFiles)
+    {
+        return depType.ToLowerInvariant() switch
+        {
+            // API dependency: can proceed if we have the interface contract from T1
+            "api" or "interface" => depTask.Wave == "W1" || sharedFiles.Count > 0,
+            // Schema dependency: can proceed if the schema is defined in T1
+            "schema" or "model" => string.Equals(depTask.Id, "T1", StringComparison.OrdinalIgnoreCase),
+            // File dependency: cannot be relaxed — must wait for actual file
+            "files" or "file" => false,
+            // Unknown type: treat as full dependency (cannot relax)
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// Logs parallelism metrics for dashboard/monitoring.
+    /// </summary>
+    private void LogParallelismMetrics(List<EngineeringTask> tasks, Dictionary<string, List<string>> overlaps)
+    {
+        var nonFoundation = tasks.Count > 1 ? tasks.Skip(1).ToList() : tasks;
+        var w1Count = nonFoundation.Count(t =>
+            string.Equals(t.Wave, "W1", StringComparison.OrdinalIgnoreCase));
+        var totalFiles = tasks.Sum(t => t.OwnedFiles.Count);
+        var sharedFileCount = tasks.Count > 0
+            ? ExtractSharedFilesFromFilePlan(
+                ExtractRawFilePlanFromDescription(tasks[0].Description)).Count
+            : 0;
+
+        Logger.LogInformation(
+            "📊 Parallelism metrics: {TaskCount} tasks, {W1Count} in W1 ({W1Pct:F0}%), " +
+            "{FileCount} total files, {SharedCount} shared files, {OverlapCount} remaining overlaps",
+            tasks.Count, w1Count,
+            nonFoundation.Count > 0 ? (double)w1Count / nonFoundation.Count * 100 : 100,
+            totalFiles, sharedFileCount, overlaps.Count);
+
+        LogActivity("task", $"📊 Plan parallelism: {w1Count}/{nonFoundation.Count} tasks in W1, " +
+            $"{totalFiles} files planned, {overlaps.Count} overlaps");
+    }
     private async Task<string?> ReadDesignReferencesAsync(CancellationToken ct)
     {
         try
@@ -3917,6 +4392,15 @@ internal record EngineeringTask
     public int? ParentIssueNumber { get; init; }
     /// <summary>Current GitHub labels on this issue (for status label management).</summary>
     public List<string> Labels { get; init; } = new();
+
+    // ── PE Parallelism Enhancements ──
+
+    /// <summary>Wave assignment for parallel scheduling (W1, W2, etc.). Default W1.</summary>
+    public string Wave { get; init; } = "W1";
+    /// <summary>Files this task owns (CREATE + MODIFY), extracted from FilePlan. Normalized paths.</summary>
+    public List<string> OwnedFiles { get; init; } = new();
+    /// <summary>Typed dependencies: taskId → dependency type (files, api, schema, etc.).</summary>
+    public Dictionary<string, string> DependencyTypes { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 // BUG FIX: Added AgentId field. Previously only Name (DisplayName) was stored, but
