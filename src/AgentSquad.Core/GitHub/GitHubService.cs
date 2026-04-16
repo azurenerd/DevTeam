@@ -15,6 +15,9 @@ public class GitHubService : IGitHubService
     private readonly ILogger<GitHubService> _logger;
     private readonly RateLimitManager _rl;
 
+    /// <summary>Label automatically added to every issue and PR created by the agent system.</summary>
+    internal const string AiGeneratedLabel = "AI-Generated";
+
     // --- Shared in-process cache for high-frequency list queries ---
     // Multiple agents poll GetOpenIssuesAsync/GetOpenPullRequestsAsync every 60s.
     // Without caching, 7 agents × 2-5 list calls/cycle = many API calls/hour,
@@ -134,11 +137,14 @@ public class GitHubService : IGitHubService
                 });
                 TrackRateLimit();
 
-                if (labels.Length > 0)
+                // Always add labels (at minimum AI-Generated)
                 {
+                    var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
+                        ? labels
+                        : [.. labels, AiGeneratedLabel];
                     try
                     {
-                        await _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, labels);
+                        await _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, allLabels);
                     }
                     catch (Exception labelEx)
                     {
@@ -147,7 +153,10 @@ public class GitHubService : IGitHubService
                 }
 
                 InvalidateListCaches();
-                return MapPullRequest(pr, labels.ToList());
+                var returnLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
+                    ? labels.ToList()
+                    : [.. labels, AiGeneratedLabel];
+                return MapPullRequest(pr, returnLabels);
             }
             catch (Exception ex)
             {
@@ -673,6 +682,8 @@ public class GitHubService : IGitHubService
                 var newIssue = new NewIssue(title) { Body = body };
                 foreach (var label in labels)
                     newIssue.Labels.Add(label);
+                if (!labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase))
+                    newIssue.Labels.Add(AiGeneratedLabel);
 
                 var issue = await _client.Issue.Create(_owner, _repo, newIssue);
                 TrackRateLimit();
