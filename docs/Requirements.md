@@ -995,7 +995,7 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-DASH-001a**: Dashboard can run in two modes: (1) embedded in the Runner process (in-process, default), or (2) as a standalone process via `AgentSquad.Dashboard.Host` on port 5051, separate from the Runner on port 5050. Standalone mode allows UI changes/restarts without killing running agents.
 - **REQ-DASH-001b**: Real-time updates via SignalR (no page refresh needed). In standalone mode, data is fetched via REST API instead of in-process services.
 - **REQ-DASH-001c**: Dark Grafana-style theme.
-- **REQ-DASH-001d**: Pages: Home (agent cards), AgentDetail, GitHubFeed, TeamViz (animated avatars), PullRequests, Issues.
+- **REQ-DASH-001d**: Pages: Home (agent cards), AgentDetail, Repository, TeamViz (animated avatars), PullRequests, Issues.
 
 ### REQ-DASH-002: Agent Cards
 

@@ -178,21 +178,6 @@ public class DashboardScenarioTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task S07_GitHubFeed_ShowsActivity()
-    {
-        await using var context = await CreateContextAsync("S07");
-        var page = await context.NewPageAsync();
-
-        await page.GotoAsync($"{_baseUrl}/github", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
-        await page.WaitForTimeoutAsync(2000);
-
-        var text = await page.InnerTextAsync("body");
-        Assert.False(string.IsNullOrWhiteSpace(text), "GitHub Feed page should have content");
-
-        await CaptureScreenshotAsync(page, "S07_GitHubFeed");
-    }
-
-    [Fact]
     public async Task S08_HealthMonitor_ShowsStatus()
     {
         await using var context = await CreateContextAsync("S08");

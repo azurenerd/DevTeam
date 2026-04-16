@@ -12,7 +12,7 @@
 |--------|-------|
 | ✅ Passed | 11 |
 | ❌ Failed | 0 |
-| **Total** | **11** |
+| **Total** | **10** |
 
 ## Scenarios
 
@@ -67,15 +67,6 @@ Validates: Timeline groups render, page has content.
 Validates: Configuration page has agent sections, settings, and config-related content.
 
 ![S06 Configuration](scenario-screenshots/S06_Configuration.png)
-
----
-
-### S07: GitHub Feed (`/github`)
-**Status:** ✅ PASSED
-
-Validates: GitHub activity feed renders with content.
-
-![S07 GitHub Feed](scenario-screenshots/S07_GitHubFeed.png)
 
 ---
 
