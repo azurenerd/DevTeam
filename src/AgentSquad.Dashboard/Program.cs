@@ -63,6 +63,11 @@ builder.Services.AddRazorComponents()
 
 builder.Services.AddSignalR();
 builder.Services.AddHttpClient();
+builder.Services.AddHttpClient("RunnerApi", client =>
+{
+    var runnerPort = builder.Configuration.GetValue("AgentSquad:Dashboard:RunnerPort", 5050);
+    client.BaseAddress = new Uri($"http://localhost:{runnerPort}");
+});
 builder.Services.AddSingleton<DashboardDataService>();
 builder.Services.AddSingleton<IDashboardDataService>(sp => sp.GetRequiredService<DashboardDataService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataService>());

@@ -11,6 +11,7 @@
 @inject IDashboardDataService DataService
 @inject IServiceProvider ServiceProvider
 @inject NavigationManager Navigation
+@inject DashboardMode DashboardMode
 
 <PageTitle>AgentSquad — @(_agent?.DisplayName ?? "Agent Detail")</PageTitle>
 
@@ -335,7 +336,10 @@ else
     protected override void OnInitialized()
     {
         _spawnManager = ServiceProvider.GetService<AgentSpawnManager>();
-        _taskTracker = ServiceProvider.GetService<IAgentTaskTracker>();
+        if (!DashboardMode.IsStandalone)
+        {
+            _taskTracker = ServiceProvider.GetService<IAgentTaskTracker>();
+        }
         if (_taskTracker is null)
         {
             var factory = ServiceProvider.GetService<IHttpClientFactory>();
