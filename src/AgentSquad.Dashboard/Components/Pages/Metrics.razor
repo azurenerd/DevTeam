@@ -261,7 +261,7 @@
             }
             else if (_http is not null)
             {
-                var result = await _http.GetFromJsonAsync<Dictionary<string, double>>("/api/metrics/aggregates");
+                var result = await _http.GetFromJsonAsync<Dictionary<string, double>>("/api/dashboard/metrics/aggregates");
                 if (result is not null) _buildTestMetrics = result;
             }
         }

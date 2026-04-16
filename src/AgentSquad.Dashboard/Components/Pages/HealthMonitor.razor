@@ -280,9 +280,9 @@
         if (_http is null) return;
         try
         {
-            _assessment = await _http.GetFromJsonAsync<ExecutionHealthAssessment>("/api/health/assessment") ?? _assessment;
-            _standaloneDiagnostics = await _http.GetFromJsonAsync<List<DiagnosticHistoryEntry>>("/api/health/diagnostics?limit=100");
-            var agents = await _http.GetFromJsonAsync<List<AgentSnapshot>>("/api/agents");
+            _assessment = await _http.GetFromJsonAsync<ExecutionHealthAssessment>("/api/dashboard/health/assessment") ?? _assessment;
+            _standaloneDiagnostics = await _http.GetFromJsonAsync<List<DiagnosticHistoryEntry>>("/api/dashboard/health/diagnostics?limit=100");
+            var agents = await _http.GetFromJsonAsync<List<AgentSnapshot>>("/api/dashboard/agents");
             if (agents is not null) _agents = agents;
             await InvokeAsync(StateHasChanged);
         }
