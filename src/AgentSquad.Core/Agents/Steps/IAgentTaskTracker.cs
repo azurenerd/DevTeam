@@ -36,6 +36,9 @@ public interface IAgentTaskTracker
     /// <summary>Get all steps for a specific task.</summary>
     IReadOnlyList<AgentTaskStep> GetTaskSteps(string agentId, string taskId);
 
+    /// <summary>Get all steps grouped by TaskId, with display names and per-task progress.</summary>
+    IReadOnlyList<AgentTaskGroup> GetGroupedSteps(string agentId);
+
     /// <summary>Get the total count of steps (completed + in-progress + pending) for an agent.</summary>
     (int completed, int total) GetProgress(string agentId);
 

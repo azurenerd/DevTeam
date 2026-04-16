@@ -54,3 +54,46 @@ public enum AgentTaskStepStatus
     Skipped,
     WaitingOnHuman
 }
+
+/// <summary>
+/// A group of steps that belong to the same logical task (e.g., "PE Planning", "PR #42 Testing").
+/// Used by the dashboard to display steps organized by task rather than as a flat list.
+/// </summary>
+public record AgentTaskGroup
+{
+    public required string TaskId { get; init; }
+    public required string DisplayName { get; init; }
+    public required IReadOnlyList<AgentTaskStep> Steps { get; init; }
+    public int Completed => Steps.Count(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
+    public int Total => Steps.Count;
+    public DateTime? StartedAt => Steps.Where(s => s.StartedAt.HasValue).Select(s => s.StartedAt!.Value).DefaultIfEmpty().Min();
+    public DateTime? CompletedAt => Steps.All(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped or AgentTaskStepStatus.Failed)
+        ? Steps.Where(s => s.CompletedAt.HasValue).Select(s => s.CompletedAt!.Value).DefaultIfEmpty().Max()
+        : null;
+
+    public AgentTaskStepStatus Status
+    {
+        get
+        {
+            if (Steps.Count == 0) return AgentTaskStepStatus.Pending;
+            if (Steps.Any(s => s.Status == AgentTaskStepStatus.WaitingOnHuman)) return AgentTaskStepStatus.WaitingOnHuman;
+            if (Steps.Any(s => s.Status == AgentTaskStepStatus.InProgress)) return AgentTaskStepStatus.InProgress;
+            if (Steps.Any(s => s.Status == AgentTaskStepStatus.Failed)) return AgentTaskStepStatus.Failed;
+            if (Steps.All(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped)) return AgentTaskStepStatus.Completed;
+            return AgentTaskStepStatus.Pending;
+        }
+    }
+
+    public TimeSpan? TotalElapsed
+    {
+        get
+        {
+            if (!StartedAt.HasValue) return null;
+            if (CompletedAt.HasValue) return CompletedAt.Value - StartedAt.Value;
+            return DateTime.UtcNow - StartedAt.Value;
+        }
+    }
+
+    public int TotalLlmCalls => Steps.Sum(s => s.LlmCallCount);
+    public decimal TotalCost => Steps.Sum(s => s.EstimatedCost);
+}

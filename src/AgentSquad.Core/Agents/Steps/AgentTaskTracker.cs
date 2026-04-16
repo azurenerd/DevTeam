@@ -173,6 +173,83 @@ public class AgentTaskTracker : IAgentTaskTracker
         }
     }
 
+    public IReadOnlyList<AgentTaskGroup> GetGroupedSteps(string agentId)
+    {
+        if (!_agentSteps.TryGetValue(agentId, out var list))
+            return Array.Empty<AgentTaskGroup>();
+
+        List<AgentTaskStep> snapshot;
+        lock (list)
+        {
+            snapshot = list.ToList();
+        }
+
+        // Group by TaskId, preserving insertion order (first step in each group determines order)
+        var groups = new List<AgentTaskGroup>();
+        var seen = new Dictionary<string, List<AgentTaskStep>>();
+        var order = new List<string>();
+
+        foreach (var step in snapshot)
+        {
+            if (!seen.TryGetValue(step.TaskId, out var taskSteps))
+            {
+                taskSteps = new List<AgentTaskStep>();
+                seen[step.TaskId] = taskSteps;
+                order.Add(step.TaskId);
+            }
+            taskSteps.Add(step);
+        }
+
+        foreach (var taskId in order)
+        {
+            groups.Add(new AgentTaskGroup
+            {
+                TaskId = taskId,
+                DisplayName = GetTaskDisplayName(taskId),
+                Steps = seen[taskId]
+            });
+        }
+
+        return groups;
+    }
+
+    /// <summary>Converts a TaskId to a human-friendly display name.</summary>
+    internal static string GetTaskDisplayName(string taskId)
+    {
+        // Static well-known mappings
+        if (WellKnownTaskNames.TryGetValue(taskId, out var name))
+            return name;
+
+        // Dynamic patterns
+        if (taskId.StartsWith("te-pr-", StringComparison.OrdinalIgnoreCase))
+            return $"PR #{taskId[6..]} Testing";
+
+        if (taskId.StartsWith("issue-", StringComparison.OrdinalIgnoreCase))
+            return $"Issue #{taskId[6..]}";
+
+        if (taskId.StartsWith("research-", StringComparison.OrdinalIgnoreCase))
+            return "Research";
+
+        if (taskId.StartsWith("arch-", StringComparison.OrdinalIgnoreCase))
+            return "Architecture Design";
+
+        // Fallback: titlecase the taskId
+        return System.Globalization.CultureInfo.CurrentCulture.TextInfo
+            .ToTitleCase(taskId.Replace('-', ' ').Replace('_', ' '));
+    }
+
+    private static readonly Dictionary<string, string> WellKnownTaskNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["pm-kickoff"] = "Project Kickoff",
+        ["pm-spec"] = "PM Specification",
+        ["pm-monitoring"] = "Team Monitoring",
+        ["pe-planning"] = "Engineering Planning",
+        ["pe-orchestration"] = "Engineer Orchestration",
+        ["pe-review"] = "Code Review",
+        ["te-loop"] = "Test Monitoring",
+        ["te-review"] = "Test Review",
+    };
+
     public (int completed, int total) GetProgress(string agentId)
     {
         if (!_agentSteps.TryGetValue(agentId, out var list))

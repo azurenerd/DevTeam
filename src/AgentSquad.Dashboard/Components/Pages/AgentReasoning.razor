@@ -76,8 +76,8 @@
     <div class="reasoning-timeline">
         @if (_typeFilter == "Steps")
         {
-            @* ── Step timeline view ── *@
-            @if (!_stepsByAgent.Any())
+            @* ── Step timeline view — grouped by task ── *@
+            @if (!_groupedStepsByAgent.Any())
             {
                 <div class="reasoning-empty">
                     <div class="empty-icon">📊</div>
@@ -88,10 +88,10 @@
             else
             {
                 <div class="step-timeline">
-                    @foreach (var kvp in _filteredStepsByAgent)
+                    @foreach (var kvp in _filteredGroupedSteps)
                     {
                         var agentId = kvp.Key;
-                        var steps = kvp.Value;
+                        var taskGroups = kvp.Value;
                         var progress = _stepProgress.GetValueOrDefault(agentId);
                         var isExpanded = _expandedStepAgents.Contains(agentId);
                         var pct = progress.total > 0 ? (int)(100.0 * progress.completed / progress.total) : 0;
@@ -100,7 +100,7 @@
                             <div class="step-agent-header" @onclick="() => ToggleStepAgent(agentId)">
                                 <span class="step-agent-chevron @(isExpanded ? "expanded" : "")">▶</span>
                                 <span class="step-agent-name">@GetDisplayName(agentId)</span>
-                                <span class="step-agent-progress-text">@progress.completed/@progress.total steps ✓</span>
+                                <span class="step-agent-progress-text">@progress.completed/@progress.total steps</span>
                             </div>
                             @if (isExpanded)
                             {
@@ -108,49 +108,60 @@
                                     <div class="step-progress-bar">
                                         <div class="step-progress-fill" style="width: @(pct)%"></div>
                                     </div>
-                                    <div class="step-list">
-                                        @foreach (var step in steps)
-                                        {
-                                            <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
-                                                <span class="step-icon">@GetStepStatusIcon(step.Status)</span>
-                                                <span class="step-name @(step.Status == AgentTaskStepStatus.Pending ? "step-name-pending" : "")">@step.Name</span>
-                                                <div class="step-meta">
-                                                    @if (step.Elapsed.HasValue)
+                                    @foreach (var group in taskGroups)
+                                    {
+                                        var groupKey = $"{agentId}:{group.TaskId}";
+                                        var isGroupExpanded = _expandedTaskGroups.Contains(groupKey)
+                                            || group.Status == AgentTaskStepStatus.InProgress
+                                            || group.Status == AgentTaskStepStatus.WaitingOnHuman;
+                                        var groupPct = group.Total > 0 ? (int)(100.0 * group.Completed / group.Total) : 0;
+
+                                        <div class="step-task-group @(group.Status == AgentTaskStepStatus.InProgress ? "step-task-active" : "")">
+                                            <div class="step-task-header" @onclick="() => ToggleTaskGroup(groupKey)">
+                                                <span class="step-task-chevron @(isGroupExpanded ? "expanded" : "")">▶</span>
+                                                <span class="step-task-icon">@GetTaskGroupIcon(group.Status)</span>
+                                                <span class="step-task-name">@group.DisplayName</span>
+                                                <div class="step-task-meta">
+                                                    <span class="step-task-progress">@group.Completed/@group.Total</span>
+                                                    @if (group.TotalElapsed.HasValue)
                                                     {
-                                                        <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
+                                                        <span class="step-elapsed">@FormatStepDuration(group.TotalElapsed.Value)</span>
                                                     }
-                                                    @if (step.EstimatedCost > 0)
+                                                    @if (group.TotalLlmCalls > 0)
                                                     {
-                                                        <span class="step-cost">@FormatStepCost(step.EstimatedCost)</span>
-                                                    }
-                                                    @if (step.LlmCallCount > 0)
-                                                    {
-                                                        <span class="step-llm-count">@step.LlmCallCount calls</span>
+                                                        <span class="step-llm-count">@group.TotalLlmCalls calls</span>
                                                     }
                                                 </div>
                                             </div>
-                                            @if (step.SubSteps.Count > 0)
+                                            @if (isGroupExpanded)
                                             {
-                                                <div class="step-substeps">
-                                                    @foreach (var sub in step.SubSteps)
-                                                    {
-                                                        <div class="step-substep">
-                                                            <span class="step-substep-turn">#@sub.TurnIndex</span>
-                                                            <span class="step-substep-desc">@sub.Description</span>
-                                                            @if (sub.Duration.HasValue)
-                                                            {
-                                                                <span class="step-substep-duration">@FormatStepDuration(sub.Duration.Value)</span>
-                                                            }
-                                                            @if (sub.EstimatedCost > 0)
-                                                            {
-                                                                <span class="step-substep-cost">@FormatStepCost(sub.EstimatedCost)</span>
-                                                            }
-                                                        </div>
-                                                    }
+                                                <div class="step-task-body">
+                                                    <div class="step-task-progress-bar">
+                                                        <div class="step-progress-fill" style="width: @(groupPct)%"></div>
+                                                    </div>
+                                                    <div class="step-list">
+                                                        @foreach (var step in group.Steps)
+                                                        {
+                                                            <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
+                                                                <span class="step-icon">@GetStepStatusIcon(step.Status)</span>
+                                                                <span class="step-name @(step.Status == AgentTaskStepStatus.Pending ? "step-name-pending" : "")">@step.Name</span>
+                                                                <div class="step-meta">
+                                                                    @if (step.Elapsed.HasValue)
+                                                                    {
+                                                                        <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
+                                                                    }
+                                                                    @if (step.LlmCallCount > 0)
+                                                                    {
+                                                                        <span class="step-llm-count">@step.LlmCallCount calls</span>
+                                                                    }
+                                                                </div>
+                                                            </div>
+                                                        }
+                                                    </div>
                                                 </div>
                                             }
-                                        }
-                                    </div>
+                                        </div>
+                                    }
                                 </div>
                             }
                         </div>
@@ -297,14 +308,15 @@
     private bool _disposed;
 
     // Step tracking state
-    private Dictionary<string, IReadOnlyList<AgentTaskStep>> _stepsByAgent = new();
+    private Dictionary<string, IReadOnlyList<AgentTaskGroup>> _groupedStepsByAgent = new();
     private Dictionary<string, (int completed, int total)> _stepProgress = new();
     private HashSet<string> _expandedStepAgents = new();
+    private HashSet<string> _expandedTaskGroups = new();
 
-    private Dictionary<string, IReadOnlyList<AgentTaskStep>> _filteredStepsByAgent =>
+    private Dictionary<string, IReadOnlyList<AgentTaskGroup>> _filteredGroupedSteps =>
         _selectedAgent is null
-            ? _stepsByAgent
-            : _stepsByAgent
+            ? _groupedStepsByAgent
+            : _groupedStepsByAgent
                 .Where(kvp => kvp.Key == _selectedAgent)
                 .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
 
@@ -405,43 +417,43 @@
     {
         if (_taskTracker is not null)
         {
-            var newSteps = new Dictionary<string, IReadOnlyList<AgentTaskStep>>();
+            var newGrouped = new Dictionary<string, IReadOnlyList<AgentTaskGroup>>();
             var newProgress = new Dictionary<string, (int completed, int total)>();
             foreach (var agentId in _agentIds)
             {
-                var steps = _taskTracker.GetSteps(agentId);
-                if (steps.Count > 0)
+                var groups = _taskTracker.GetGroupedSteps(agentId);
+                if (groups.Count > 0)
                 {
-                    newSteps[agentId] = steps;
+                    newGrouped[agentId] = groups;
                     newProgress[agentId] = _taskTracker.GetProgress(agentId);
                 }
             }
             // Also check active steps for agents not yet in _agentIds
             foreach (var step in _taskTracker.GetActiveSteps())
             {
-                if (!newSteps.ContainsKey(step.AgentId))
+                if (!newGrouped.ContainsKey(step.AgentId))
                 {
-                    newSteps[step.AgentId] = _taskTracker.GetSteps(step.AgentId);
+                    newGrouped[step.AgentId] = _taskTracker.GetGroupedSteps(step.AgentId);
                     newProgress[step.AgentId] = _taskTracker.GetProgress(step.AgentId);
                     if (!_agentIds.Contains(step.AgentId))
                         _agentIds.Add(step.AgentId);
                 }
             }
-            _stepsByAgent = newSteps;
+            _groupedStepsByAgent = newGrouped;
             _stepProgress = newProgress;
         }
         else if (_http is not null)
         {
-            var newSteps = new Dictionary<string, IReadOnlyList<AgentTaskStep>>();
+            var newGrouped = new Dictionary<string, IReadOnlyList<AgentTaskGroup>>();
             var newProgress = new Dictionary<string, (int completed, int total)>();
             foreach (var agentId in _agentIds)
             {
                 try
                 {
-                    var steps = await _http.GetFromJsonAsync<List<AgentTaskStep>>($"/api/steps/{agentId}");
-                    if (steps is { Count: > 0 })
+                    var groups = await _http.GetFromJsonAsync<List<AgentTaskGroup>>($"/api/steps/{agentId}/grouped");
+                    if (groups is { Count: > 0 })
                     {
-                        newSteps[agentId] = steps;
+                        newGrouped[agentId] = groups;
                         var progress = await _http.GetFromJsonAsync<ProgressDto>($"/api/steps/{agentId}/progress");
                         if (progress is not null)
                             newProgress[agentId] = (progress.Completed, progress.Total);
@@ -449,7 +461,7 @@
                 }
                 catch { /* skip this agent */ }
             }
-            _stepsByAgent = newSteps;
+            _groupedStepsByAgent = newGrouped;
             _stepProgress = newProgress;
         }
     }
@@ -524,6 +536,21 @@
         if (!_expandedStepAgents.Remove(agentId))
             _expandedStepAgents.Add(agentId);
     }
+
+    private void ToggleTaskGroup(string groupKey)
+    {
+        if (!_expandedTaskGroups.Remove(groupKey))
+            _expandedTaskGroups.Add(groupKey);
+    }
+
+    private static string GetTaskGroupIcon(AgentTaskStepStatus status) => status switch
+    {
+        AgentTaskStepStatus.Completed => "✅",
+        AgentTaskStepStatus.InProgress => "🔨",
+        AgentTaskStepStatus.WaitingOnHuman => "⏳",
+        AgentTaskStepStatus.Failed => "❌",
+        _ => "⬜"
+    };
 
     private static string GetStepStatusIcon(AgentTaskStepStatus status) => status switch
     {

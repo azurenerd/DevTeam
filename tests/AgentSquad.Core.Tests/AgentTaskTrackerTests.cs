@@ -232,6 +232,136 @@ public class AgentTaskTrackerTests : IDisposable
             Assert.Equal(10, steps.Count);
         }
     }
+
+    // ── Grouped steps tests ──
+
+    [Fact]
+    public void GetGroupedSteps_GroupsByTaskId()
+    {
+        _tracker.BeginStep("agent-1", "task-a", "Step A1");
+        _tracker.BeginStep("agent-1", "task-b", "Step B1");
+        _tracker.BeginStep("agent-1", "task-a", "Step A2");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal(2, groups.Count);
+        Assert.Equal("task-a", groups[0].TaskId);
+        Assert.Equal(2, groups[0].Steps.Count);
+        Assert.Equal("task-b", groups[1].TaskId);
+        Assert.Single(groups[1].Steps);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_PreservesInsertionOrder()
+    {
+        _tracker.BeginStep("agent-1", "first", "S1");
+        _tracker.BeginStep("agent-1", "second", "S2");
+        _tracker.BeginStep("agent-1", "third", "S3");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal(3, groups.Count);
+        Assert.Equal("first", groups[0].TaskId);
+        Assert.Equal("second", groups[1].TaskId);
+        Assert.Equal("third", groups[2].TaskId);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_ReturnsEmptyForUnknownAgent()
+    {
+        var groups = _tracker.GetGroupedSteps("nonexistent");
+        Assert.Empty(groups);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_CalculatesPerTaskProgress()
+    {
+        var s1 = _tracker.BeginStep("agent-1", "task-a", "Step 1");
+        _tracker.CompleteStep(s1);
+        _tracker.BeginStep("agent-1", "task-a", "Step 2");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Single(groups);
+        Assert.Equal(1, groups[0].Completed);
+        Assert.Equal(2, groups[0].Total);
+        Assert.Equal(AgentTaskStepStatus.InProgress, groups[0].Status);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_CompletedGroupStatus()
+    {
+        var s1 = _tracker.BeginStep("agent-1", "task-a", "Step 1");
+        _tracker.CompleteStep(s1);
+        var s2 = _tracker.BeginStep("agent-1", "task-a", "Step 2");
+        _tracker.CompleteStep(s2);
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Single(groups);
+        Assert.Equal(AgentTaskStepStatus.Completed, groups[0].Status);
+        Assert.NotNull(groups[0].CompletedAt);
+        Assert.NotNull(groups[0].TotalElapsed);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_SumsLlmCallsAndCost()
+    {
+        var s1 = _tracker.BeginStep("agent-1", "task-a", "Step 1");
+        _tracker.RecordLlmCall(s1, 0.05m);
+        _tracker.CompleteStep(s1);
+        var s2 = _tracker.BeginStep("agent-1", "task-a", "Step 2");
+        _tracker.RecordLlmCall(s2, 0.10m);
+        _tracker.RecordLlmCall(s2, 0.03m);
+        _tracker.CompleteStep(s2);
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal(3, groups[0].TotalLlmCalls);
+        Assert.Equal(0.18m, groups[0].TotalCost);
+    }
+
+    [Fact]
+    public void GetGroupedSteps_WaitingOnHumanStatus()
+    {
+        var s1 = _tracker.BeginStep("agent-1", "task-a", "Step 1");
+        _tracker.CompleteStep(s1);
+        var s2 = _tracker.BeginStep("agent-1", "task-a", "Gate");
+        _tracker.SetStepWaiting(s2);
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal(AgentTaskStepStatus.WaitingOnHuman, groups[0].Status);
+    }
+
+    [Theory]
+    [InlineData("pm-kickoff", "Project Kickoff")]
+    [InlineData("pm-spec", "PM Specification")]
+    [InlineData("pe-planning", "Engineering Planning")]
+    [InlineData("pe-orchestration", "Engineer Orchestration")]
+    [InlineData("te-loop", "Test Monitoring")]
+    [InlineData("te-pr-42", "PR #42 Testing")]
+    [InlineData("te-pr-1357", "PR #1357 Testing")]
+    [InlineData("issue-99", "Issue #99")]
+    [InlineData("research-abc123", "Research")]
+    [InlineData("arch-design", "Architecture Design")]
+    [InlineData("some-unknown-task", "Some Unknown Task")]
+    public void GetTaskDisplayName_MapsCorrectly(string taskId, string expected)
+    {
+        Assert.Equal(expected, AgentTaskTracker.GetTaskDisplayName(taskId));
+    }
+
+    [Fact]
+    public void GetGroupedSteps_HasCorrectDisplayNames()
+    {
+        _tracker.BeginStep("agent-1", "pe-planning", "Read arch");
+        _tracker.BeginStep("agent-1", "pe-orchestration", "Assign");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal("Engineering Planning", groups[0].DisplayName);
+        Assert.Equal("Engineer Orchestration", groups[1].DisplayName);
+    }
 }
 
 public class AgentStepTemplatesTests

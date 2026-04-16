@@ -347,6 +347,9 @@ stepsApi.MapGet("/{agentId}/progress", (string agentId, AgentSquad.Core.Agents.S
 stepsApi.MapGet("/active", (AgentSquad.Core.Agents.Steps.IAgentTaskTracker tracker) =>
     Results.Ok(tracker.GetActiveSteps()));
 
+stepsApi.MapGet("/{agentId}/grouped", (string agentId, AgentSquad.Core.Agents.Steps.IAgentTaskTracker tracker) =>
+    Results.Ok(tracker.GetGroupedSteps(agentId)));
+
 stepsApi.MapGet("/templates/{role}", (string role) =>
 {
     if (!Enum.TryParse<AgentSquad.Core.Agents.AgentRole>(role, true, out var agentRole))
