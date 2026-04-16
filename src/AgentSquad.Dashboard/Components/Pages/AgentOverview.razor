@@ -476,6 +476,9 @@ else
     private async void OnDataChanged()
     {
         RefreshData();
+        // Re-check for TeamComposition.md if not yet loaded
+        if (_teamComposition is null)
+            await LoadTeamCompositionAsync();
         await InvokeAsync(StateHasChanged);
     }
 

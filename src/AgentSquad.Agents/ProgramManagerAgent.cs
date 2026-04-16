@@ -1882,6 +1882,25 @@ public class ProgramManagerAgent : AgentBase
                 $"Created and merged PMSpec.md for project '{projectName}'",
                 TruncateForMemory(pmSpecDoc), ct);
 
+            // Team composition BEFORE signaling downstream agents — the team must be
+            // composed before the Architect, PE, and Engineers begin their work.
+            if (_teamComposer is not null && _config.SmeAgents.Enabled && !_teamCompositionComplete)
+            {
+                var teamStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Team composition analysis",
+                    "Evaluating optimal team composition", Identity.ModelTier);
+                try
+                {
+                    await ComposeTeamAsync(ct);
+                    _taskTracker.CompleteStep(teamStepId);
+                }
+                catch (Exception ex)
+                {
+                    _taskTracker.FailStep(teamStepId, ex.Message);
+                    Logger.LogWarning(ex, "Team composition failed — continuing without it to avoid blocking workflow");
+                    // Don't rethrow — team composition failure shouldn't block the entire pipeline
+                }
+            }
+
             // Notify all agents that PMSpec is ready — Architect will pick this up
             var signalStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Signal Architect",
                 "Notifying team that PM Specification is ready", Identity.ModelTier);
@@ -1895,23 +1914,6 @@ public class ProgramManagerAgent : AgentBase
             }, ct);
 
             Logger.LogInformation("Triggered Architect to begin architecture design");
-
-            // Team composition: evaluate catalog and propose optimal team (if SME system enabled)
-            if (_teamComposer is not null && _config.SmeAgents.Enabled && !_teamCompositionComplete)
-            {
-                var teamStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Team composition analysis",
-                    "Evaluating optimal team composition", Identity.ModelTier);
-                try
-                {
-                    await ComposeTeamAsync(ct);
-                    _taskTracker.CompleteStep(teamStepId);
-                }
-                catch (Exception ex)
-                {
-                    _taskTracker.FailStep(teamStepId, ex.Message);
-                    throw;
-                }
-            }
 
             // After PMSpec is merged, create User Story Issues
             await CreateUserStoryIssuesAsync(ct);
