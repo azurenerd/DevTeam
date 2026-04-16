@@ -888,8 +888,7 @@ public class ArchitectAgent : AgentBase
                     pr.Number, pr.Title);
 
                 // Force-approve after max rework cycles — only if Architect is a required reviewer
-                string verdict;
-                string reasoning;
+                StructuredReviewResult reviewResult;
                 if (_forceApprovalPrs.Contains(prNumber))
                 {
                     _forceApprovalPrs.Remove(prNumber);
@@ -900,9 +899,14 @@ public class ArchitectAgent : AgentBase
                         _reviewedPrNumbers.Add(prNumber);
                         continue;
                     }
-                    verdict = "APPROVED";
-                    reasoning = "Force-approving after maximum rework cycles reached. " +
-                        "The engineer has made best-effort improvements across multiple iterations.";
+                    reviewResult = new StructuredReviewResult
+                    {
+                        Verdict = "APPROVED",
+                        Summary = "Force-approving after maximum rework cycles reached. " +
+                            "The engineer has made best-effort improvements across multiple iterations.",
+                        RiskLevel = ReviewRiskLevel.Low,
+                        Comments = []
+                    };
                 }
                 else
                 {
@@ -910,23 +914,72 @@ public class ArchitectAgent : AgentBase
                     if (!hasNewCommits)
                     {
                         Logger.LogWarning("No new commits on PR #{Number} since last Architect review — approving to unblock", prNumber);
-                        verdict = "APPROVED";
-                        reasoning = "No new code commits detected since last review. " +
-                            "The author marked the PR as ready but did not push file changes. " +
-                            "Approving to avoid blocking progress — previous feedback still applies.";
+                        reviewResult = new StructuredReviewResult
+                        {
+                            Verdict = "APPROVED",
+                            Summary = "No new code commits detected since last review. " +
+                                "The author marked the PR as ready but did not push file changes. " +
+                                "Approving to avoid blocking progress — previous feedback still applies.",
+                            RiskLevel = ReviewRiskLevel.Low,
+                            Comments = []
+                        };
                     }
                     else
                     {
-                        (verdict, reasoning) = await EvaluateArchitecturalAlignmentAsync(pr, ct);
+                        reviewResult = await EvaluateArchitecturalAlignmentAsync(pr, ct);
                     }
+                }
+
+                var verdict = reviewResult.Verdict;
+                var reasoning = reviewResult.Summary;
+                var riskSuffix = _config.Review.EnableRiskAssessment
+                    ? $"\n\n⚠️ **Risk Level**: {reviewResult.RiskLevel.ToString().ToUpperInvariant()}"
+                    : "";
+
+                // Check human risk gate BEFORE adding phase-transition labels
+                if (verdict == "APPROVED" && _config.Review.MinRiskLevelForHumanReview != ReviewRiskLevel.None
+                    && reviewResult.RiskLevel >= _config.Review.MinRiskLevelForHumanReview)
+                {
+                    Logger.LogInformation(
+                        "PR #{Number} risk level {Risk} >= gate threshold {Threshold} — adding human-review-required label",
+                        pr.Number, reviewResult.RiskLevel, _config.Review.MinRiskLevelForHumanReview);
+
+                    var gateLabels = pr.Labels
+                        .Append(PullRequestWorkflow.Labels.HumanReviewRequired)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    await _github.UpdatePullRequestAsync(pr.Number, labels: gateLabels, ct: ct);
+                    await _github.AddPullRequestCommentAsync(pr.Number,
+                        $"**[Architect] APPROVED** (pending human review)\n\n" +
+                        $"🏗️ Architecture Review: {reasoning}{riskSuffix}\n\n" +
+                        $"⏳ **Human review required** — risk level `{reviewResult.RiskLevel}` meets or exceeds " +
+                        $"the configured threshold `{_config.Review.MinRiskLevelForHumanReview}`. " +
+                        $"Remove the `{PullRequestWorkflow.Labels.HumanReviewRequired}` label to proceed.", ct);
+
+                    // Submit inline comments as a review even though we're gating
+                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    {
+                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
+                    }
+
+                    LogActivity("task", $"⏳ PR #{pr.Number} approved but held for human review (risk: {reviewResult.RiskLevel})");
+                    _reviewedPrNumbers.Add(pr.Number);
+                    continue; // Don't add architect-approved label yet
                 }
 
                 if (verdict == "APPROVED")
                 {
                     // Phase 1 complete: Architect approved → add architect-approved label, do NOT merge.
                     // The TE will pick up the PR next (Phase 2), then PM reviews last (Phase 3).
-                    var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
+                    var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}{riskSuffix}";
                     await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
+
+                    // Submit inline comments as a GitHub review
+                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    {
+                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "APPROVE", ct);
+                    }
+
                     Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
 
                     // Add architect-approved label
@@ -956,7 +1009,14 @@ public class ArchitectAgent : AgentBase
                 else if (verdict == "REWORK")
                 {
                     await _prWorkflow.RequestChangesAsync(
-                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}", ct);
+                        pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}{riskSuffix}", ct);
+
+                    // Submit inline comments as a REQUEST_CHANGES review
+                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    {
+                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "REQUEST_CHANGES", ct);
+                    }
+
                     Logger.LogInformation("Architect requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
                     await RememberAsync(MemoryType.Decision,
@@ -993,7 +1053,42 @@ public class ArchitectAgent : AgentBase
         }
     }
 
-    private async Task<(string Verdict, string Reasoning)> EvaluateArchitecturalAlignmentAsync(
+    /// <summary>
+    /// Submits inline review comments as a GitHub PR review.
+    /// Falls back gracefully if the GitHub API call fails.
+    /// </summary>
+    private async Task SubmitInlineReviewCommentsAsync(
+        int prNumber, StructuredReviewResult reviewResult, string eventType, CancellationToken ct)
+    {
+        try
+        {
+            var maxComments = _config.Review.MaxInlineCommentsPerReview;
+            var comments = reviewResult.Comments
+                .Take(maxComments)
+                .ToList();
+
+            if (comments.Count == 0) return;
+
+            var reviewBody = $"🏗️ **Architect Inline Review** — {reviewResult.Verdict}\n\n" +
+                $"{reviewResult.Summary}\n\n" +
+                $"_{comments.Count} inline comment(s) below_";
+
+            await _github.CreatePullRequestReviewWithCommentsAsync(
+                prNumber, reviewBody, eventType, comments, ct: ct);
+
+            Logger.LogInformation(
+                "Submitted {Count} inline review comments on PR #{Number}",
+                comments.Count, prNumber);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex,
+                "Failed to submit inline review comments on PR #{Number} — review body was still posted",
+                prNumber);
+        }
+    }
+
+    private async Task<StructuredReviewResult> EvaluateArchitecturalAlignmentAsync(
         AgentPullRequest pr, CancellationToken ct)
     {
         try
@@ -1052,6 +1147,9 @@ public class ArchitectAgent : AgentBase
                     : ""
             };
 
+            var useInlineComments = _config.Review.EnableInlineComments;
+            var useRiskAssessment = _config.Review.EnableRiskAssessment;
+
             var reviewSys = await _promptService.RenderAsync("architect/pr-review-system", reviewSysVars, ct)
                 ?? "You are a software architect reviewing a PR for architecture alignment.\n\n" +
                    "SCOPE: This PR is ONE task. Review only the parts it touches against the architecture doc.\n\n" +
@@ -1074,16 +1172,33 @@ public class ArchitectAgent : AgentBase
                    "Only request REWORK for real architectural violations (wrong boundaries, wrong tech stack, " +
                    "wrong patterns), MISSING files/components listed in acceptance criteria, " +
                    "OR runtime errors visible in screenshots. Minor issues → APPROVE.\n\n" +
-                   "RESPONSE FORMAT — your ENTIRE response must be ONLY:\n" +
-                   "- First line: APPROVED or REWORK\n" +
-                   "- If REWORK: a **numbered list** (1. 2. 3.) starting on the SECOND line. " +
-                   "Each item states the architectural violation, missing file/component, or screenshot issue. Nothing else. " +
-                   "No preamble, no thinking, no analysis narration.\n" +
-                   "- If APPROVED: one sentence or empty after the verdict. No recap.\n\n" +
-                   "WRONG: 'Let me review the architecture... 1. Violation'\n" +
-                   "RIGHT: 'REWORK\\n1. **Services/** folder violates layered boundary\\n" +
-                   "2. Missing Models/ReportData.cs, Models/Milestone.cs listed in acceptance criteria\\n" +
-                   "3. Screenshot shows unhandled exception on app load'";
+                   "RESPONSE FORMAT — your ENTIRE response must be valid JSON:\n" +
+                   "```\n" +
+                   "{\n" +
+                   "  \"verdict\": \"APPROVED\" or \"REWORK\",\n" +
+                   "  \"summary\": \"Brief 1-2 sentence assessment\",\n" +
+                   (useRiskAssessment ? "  \"riskLevel\": \"LOW\" or \"MEDIUM\" or \"HIGH\",\n" : "") +
+                   (useInlineComments
+                       ? "  \"comments\": [\n" +
+                         "    {\n" +
+                         "      \"file\": \"path/to/file.cs\",\n" +
+                         "      \"line\": 42,\n" +
+                         "      \"priority\": \"🔴 Critical\" or \"🟠 Important\" or \"🟡 Suggestion\" or \"🟢 Nit\",\n" +
+                         "      \"body\": \"Description of the issue\"\n" +
+                         "    }\n" +
+                         "  ]\n"
+                       : "") +
+                   "}\n" +
+                   "```\n" +
+                   "PRIORITY GUIDE:\n" +
+                   "- 🔴 Critical: Must fix — breaks architecture, missing critical files, security issues\n" +
+                   "- 🟠 Important: Should fix — wrong patterns, significant gaps\n" +
+                   "- 🟡 Suggestion: Worth considering — could be cleaner\n" +
+                   "- 🟢 Nit: Minor — skip unless it genuinely hurts maintainability\n\n" +
+                   (useRiskAssessment
+                       ? "RISK GUIDE: LOW = cosmetic/minor changes. MEDIUM = modifies shared models or APIs. HIGH = breaking changes, security-sensitive, or major rework.\n\n"
+                       : "") +
+                   "Output ONLY the JSON object. No preamble, no markdown fences, no explanation outside JSON.";
             history.AddSystemMessage(reviewSys);
 
             var userMessageText =
@@ -1125,10 +1240,20 @@ public class ArchitectAgent : AgentBase
 
             var text = response.Content?.Trim() ?? "";
 
-            // Strip any preamble/thinking before the actual verdict
+            // Try to parse as structured JSON first
+            var structuredResult = TryParseStructuredReview(text);
+            if (structuredResult != null)
+            {
+                Logger.LogInformation(
+                    "Architect review of PR #{Number}: {Verdict} (risk={Risk}, {CommentCount} inline comments)",
+                    pr.Number, structuredResult.Verdict, structuredResult.RiskLevel, structuredResult.Comments.Count);
+                return structuredResult;
+            }
+
+            // Fallback: parse as plain text (original format)
+            Logger.LogWarning("Architect AI didn't return valid JSON for PR #{Number}, falling back to text parsing", pr.Number);
             text = PullRequestWorkflow.StripReviewPreamble(text);
 
-            // Parse verdict from first line
             var firstLine = text.Split('\n', 2)[0].Trim();
             string verdict;
             string reasoning;
@@ -1149,22 +1274,124 @@ public class ArchitectAgent : AgentBase
             }
             else
             {
-                // AI didn't follow format — try to infer from content
-                verdict = text.Contains("REWORK", StringComparison.OrdinalIgnoreCase) ? "REWORK" : "APPROVED";
+                // AI didn't follow format — default to REWORK (fail closed)
+                verdict = text.Contains("APPROVED", StringComparison.OrdinalIgnoreCase)
+                    && !text.Contains("REWORK", StringComparison.OrdinalIgnoreCase)
+                    ? "APPROVED" : "REWORK";
                 reasoning = text;
                 Logger.LogWarning("Architect AI didn't start with APPROVED/REWORK, inferred {Verdict}", verdict);
             }
 
-            // Strip any remaining preamble from the reasoning body
             reasoning = PullRequestWorkflow.StripReviewPreamble(reasoning);
 
-            return (verdict, reasoning);
+            return new StructuredReviewResult
+            {
+                Verdict = verdict,
+                Summary = reasoning,
+                RiskLevel = ReviewRiskLevel.Medium, // Unknown risk from text fallback
+                Comments = []
+            };
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to evaluate PR #{Number} for architecture alignment",
                 pr.Number);
-            return ("UNKNOWN", "Architecture review failed due to an internal error.");
+            return new StructuredReviewResult
+            {
+                Verdict = "UNKNOWN",
+                Summary = "Architecture review failed due to an internal error.",
+                RiskLevel = ReviewRiskLevel.Medium,
+                Comments = []
+            };
+        }
+    }
+
+    /// <summary>
+    /// Attempts to parse AI response as structured JSON review result.
+    /// Returns null if parsing fails (caller should fall back to text parsing).
+    /// </summary>
+    private static StructuredReviewResult? TryParseStructuredReview(string text)
+    {
+        try
+        {
+            // Strip markdown fences if present
+            var json = text.Trim();
+            if (json.StartsWith("```"))
+            {
+                var firstNewline = json.IndexOf('\n');
+                if (firstNewline >= 0) json = json[(firstNewline + 1)..];
+                var lastFence = json.LastIndexOf("```");
+                if (lastFence >= 0) json = json[..lastFence];
+                json = json.Trim();
+            }
+
+            // Try to find JSON object boundaries
+            var startBrace = json.IndexOf('{');
+            var endBrace = json.LastIndexOf('}');
+            if (startBrace < 0 || endBrace <= startBrace) return null;
+            json = json[startBrace..(endBrace + 1)];
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var verdict = root.TryGetProperty("verdict", out var v)
+                ? v.GetString()?.Trim().ToUpperInvariant() ?? "REWORK"
+                : "REWORK";
+
+            // Normalize verdict
+            if (verdict != "APPROVED" && verdict != "REWORK")
+                verdict = verdict.Contains("APPROV") ? "APPROVED" : "REWORK";
+
+            var summary = root.TryGetProperty("summary", out var s)
+                ? s.GetString()?.Trim() ?? ""
+                : "";
+
+            var riskLevel = ReviewRiskLevel.Medium;
+            if (root.TryGetProperty("riskLevel", out var r))
+            {
+                var riskStr = r.GetString()?.Trim().ToUpperInvariant() ?? "";
+                riskLevel = riskStr switch
+                {
+                    "LOW" => ReviewRiskLevel.Low,
+                    "HIGH" => ReviewRiskLevel.High,
+                    _ => ReviewRiskLevel.Medium
+                };
+            }
+
+            var comments = new List<InlineReviewComment>();
+            if (root.TryGetProperty("comments", out var commentsArr)
+                && commentsArr.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var c in commentsArr.EnumerateArray())
+                {
+                    var file = c.TryGetProperty("file", out var f) ? f.GetString() : null;
+                    var line = c.TryGetProperty("line", out var l) ? l.GetInt32() : 0;
+                    var priority = c.TryGetProperty("priority", out var p) ? p.GetString() ?? "" : "";
+                    var body = c.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "";
+
+                    if (!string.IsNullOrEmpty(file) && !string.IsNullOrEmpty(body) && line > 0)
+                    {
+                        comments.Add(new InlineReviewComment
+                        {
+                            FilePath = file,
+                            Line = line,
+                            Body = $"{priority}: {body}".Trim()
+                        });
+                    }
+                }
+            }
+
+            return new StructuredReviewResult
+            {
+                Verdict = verdict,
+                Summary = summary,
+                RiskLevel = riskLevel,
+                Comments = comments
+            };
+        }
+        catch
+        {
+            return null;
         }
     }
 

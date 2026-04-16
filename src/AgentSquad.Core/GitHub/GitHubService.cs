@@ -339,6 +339,139 @@ public class GitHubService : IGitHubService
         }, ct);
     }
 
+    public async Task<IReadOnlyList<PullRequestFileDiff>> GetPullRequestFilesWithPatchAsync(int prNumber, CancellationToken ct = default)
+    {
+        return await _rl.ExecuteAsync(async _ =>
+        {
+            try
+            {
+                var files = await _client.PullRequest.Files(_owner, _repo, prNumber);
+                TrackRateLimit();
+                return files.Select(f => new PullRequestFileDiff
+                {
+                    FileName = f.FileName,
+                    Patch = f.Patch,
+                    Status = f.Status,
+                    Additions = f.Additions,
+                    Deletions = f.Deletions
+                }).ToList() as IReadOnlyList<PullRequestFileDiff>;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to get files with patch for PR #{Number}", prNumber);
+                throw;
+            }
+        }, ct);
+    }
+
+    public async Task CreatePullRequestReviewWithCommentsAsync(
+        int prNumber, string body, string eventType,
+        IReadOnlyList<InlineReviewComment> comments, string? commitId = null,
+        CancellationToken ct = default)
+    {
+        await _rl.ExecuteAsync(async _ =>
+        {
+            try
+            {
+                var reviewEvent = eventType.ToUpperInvariant() switch
+                {
+                    "APPROVE" => PullRequestReviewEvent.Approve,
+                    "REQUEST_CHANGES" => PullRequestReviewEvent.RequestChanges,
+                    "COMMENT" => PullRequestReviewEvent.Comment,
+                    _ => PullRequestReviewEvent.Comment
+                };
+
+                // Resolve commit SHA if not provided
+                if (string.IsNullOrEmpty(commitId))
+                {
+                    var pr = await _client.PullRequest.Get(_owner, _repo, prNumber);
+                    commitId = pr.Head.Sha;
+                    TrackRateLimit();
+                }
+
+                // Get file patches to map line numbers to diff positions
+                var files = await _client.PullRequest.Files(_owner, _repo, prNumber);
+                TrackRateLimit();
+                var patchesByFile = files.ToDictionary(f => f.FileName, f => f.Patch, StringComparer.OrdinalIgnoreCase);
+
+                var review = new PullRequestReviewCreate
+                {
+                    Body = body,
+                    Event = reviewEvent,
+                    CommitId = commitId
+                };
+
+                // Map each inline comment to a diff position
+                var mappedCount = 0;
+                foreach (var comment in comments)
+                {
+                    if (!patchesByFile.TryGetValue(comment.FilePath, out var patch))
+                    {
+                        _logger.LogDebug("Inline comment on {File}:{Line} skipped — file not in PR diff",
+                            comment.FilePath, comment.Line);
+                        continue;
+                    }
+
+                    var position = DiffPositionMapper.MapLineToPosition(patch, comment.Line);
+                    if (position is null)
+                    {
+                        _logger.LogDebug("Inline comment on {File}:{Line} skipped — line not in diff",
+                            comment.FilePath, comment.Line);
+                        continue;
+                    }
+
+                    review.Comments.Add(new DraftPullRequestReviewComment(
+                        comment.Body, comment.FilePath, position.Value));
+                    mappedCount++;
+                }
+
+                _logger.LogInformation(
+                    "Submitting {Event} review on PR #{Number} with {Mapped}/{Total} inline comments",
+                    eventType, prNumber, mappedCount, comments.Count);
+
+                await _client.PullRequest.Review.Create(_owner, _repo, prNumber, review);
+                TrackRateLimit();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to submit review with inline comments on PR #{Number}", prNumber);
+                throw;
+            }
+        }, ct);
+    }
+
+    public async Task<IReadOnlyList<ReviewThread>> GetPullRequestReviewThreadsAsync(int prNumber, CancellationToken ct = default)
+    {
+        return await _rl.ExecuteAsync(async _ =>
+        {
+            try
+            {
+                var comments = await _client.PullRequest.ReviewComment.GetAll(_owner, _repo, prNumber);
+                TrackRateLimit();
+
+                // Group by InReplyToId to form threads — root comments have InReplyToId == 0
+                // For simplicity, return each root comment as a thread
+                return comments
+                    .Where(c => c.InReplyToId == null || c.InReplyToId == 0)
+                    .Select(c => new ReviewThread
+                    {
+                        Id = c.Id,
+                        FilePath = c.Path ?? "",
+                        Line = c.OriginalPosition,
+                        Body = c.Body ?? "",
+                        Author = c.User?.Login ?? "",
+                        CreatedAt = c.CreatedAt.UtcDateTime
+                    })
+                    .ToList() as IReadOnlyList<ReviewThread>;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to get review threads for PR #{Number}", prNumber);
+                return Array.Empty<ReviewThread>();
+            }
+        }, ct);
+    }
+
     public async Task<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>> GetPullRequestCommitsWithDatesAsync(
         int prNumber, CancellationToken ct = default)
     {

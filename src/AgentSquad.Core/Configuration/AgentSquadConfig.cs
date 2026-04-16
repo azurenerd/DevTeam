@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Workspace;
 
 namespace AgentSquad.Core.Configuration;
@@ -18,6 +19,7 @@ public class AgentSquadConfig
     public SmeAgentsConfig SmeAgents { get; set; } = new();
     public PromptsConfig Prompts { get; set; } = new();
     public DecisionGatingConfig DecisionGating { get; set; } = new();
+    public ReviewConfig Review { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -336,6 +338,41 @@ public class CopilotCliConfig
 
     /// <summary>Additional arguments to pass to the copilot CLI.</summary>
     public string? AdditionalArgs { get; set; }
+}
+
+/// <summary>
+/// Configuration for the enhanced PR review system.
+/// Controls inline comments, risk assessment, and human gating.
+/// </summary>
+public class ReviewConfig
+{
+    /// <summary>
+    /// When true, reviewers (Architect, TE, PM) post inline comments on specific code lines
+    /// using GitHub's Pull Request Review API instead of plain comment bodies.
+    /// Default: true.
+    /// </summary>
+    public bool EnableInlineComments { get; set; } = true;
+
+    /// <summary>
+    /// When true, reviews include a risk assessment (Low/Medium/High) in the review body.
+    /// Default: true.
+    /// </summary>
+    public bool EnableRiskAssessment { get; set; } = true;
+
+    /// <summary>
+    /// Minimum risk level that triggers a human review gate. Reviews at or above
+    /// this level will pause the workflow and add a 'human-review-required' label
+    /// until a human approves.
+    /// Set to None (default) to disable risk-based human gating entirely.
+    /// </summary>
+    public ReviewRiskLevel MinRiskLevelForHumanReview { get; set; } = ReviewRiskLevel.None;
+
+    /// <summary>
+    /// Maximum number of inline comments per review. Prevents AI from flooding PRs.
+    /// Comments beyond this limit are summarized in the review body instead.
+    /// Default: 15.
+    /// </summary>
+    public int MaxInlineCommentsPerReview { get; set; } = 15;
 }
 
 /// <summary>

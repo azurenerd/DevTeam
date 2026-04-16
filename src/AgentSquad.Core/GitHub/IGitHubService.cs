@@ -106,6 +106,25 @@ public interface IGitHubService
     Task<IReadOnlyList<string>> GetPullRequestCommitMessagesAsync(int prNumber, CancellationToken ct = default);
 
     /// <summary>
+    /// Get changed files with their unified diff patches for inline review comments.
+    /// </summary>
+    Task<IReadOnlyList<PullRequestFileDiff>> GetPullRequestFilesWithPatchAsync(int prNumber, CancellationToken ct = default);
+
+    /// <summary>
+    /// Create a PR review with inline comments on specific lines.
+    /// Falls back to body-only review if no comments can be mapped.
+    /// </summary>
+    Task CreatePullRequestReviewWithCommentsAsync(
+        int prNumber, string body, string eventType,
+        IReadOnlyList<InlineReviewComment> comments, string? commitId = null,
+        CancellationToken ct = default);
+
+    /// <summary>
+    /// Get existing review threads on a PR for context-aware re-reviews.
+    /// </summary>
+    Task<IReadOnlyList<ReviewThread>> GetPullRequestReviewThreadsAsync(int prNumber, CancellationToken ct = default);
+
+    /// <summary>
     /// Get the timestamps of all commits on a PR branch.
     /// Used by reviewers to detect whether new commits were pushed since the last review.
     /// </summary>

@@ -92,6 +92,12 @@ file sealed class NullGitHubService : IGitHubService
         => Task.FromResult<IReadOnlyList<string>>([]);
     public Task<IReadOnlyList<string>> GetPullRequestCommitMessagesAsync(int prNumber, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<string>>([]);
+    public Task<IReadOnlyList<PullRequestFileDiff>> GetPullRequestFilesWithPatchAsync(int prNumber, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<PullRequestFileDiff>>([]);
+    public Task CreatePullRequestReviewWithCommentsAsync(int prNumber, string body, string eventType, IReadOnlyList<InlineReviewComment> comments, string? commitId = null, CancellationToken ct = default)
+        => Task.CompletedTask;
+    public Task<IReadOnlyList<ReviewThread>> GetPullRequestReviewThreadsAsync(int prNumber, CancellationToken ct = default)
+        => Task.FromResult<IReadOnlyList<ReviewThread>>([]);
     public Task<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>> GetPullRequestCommitsWithDatesAsync(int prNumber, CancellationToken ct = default)
         => Task.FromResult<IReadOnlyList<(string Sha, string Message, DateTime CommittedAt)>>([]);
 

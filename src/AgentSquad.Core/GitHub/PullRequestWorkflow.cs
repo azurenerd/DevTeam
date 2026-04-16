@@ -41,6 +41,8 @@ public partial class PullRequestWorkflow
         public const string HighComplexity = "complexity-high";
         public const string MediumComplexity = "complexity-medium";
         public const string LowComplexity = "complexity-low";
+        /// <summary>Review risk gating — requires human approval before agent continues.</summary>
+        public const string HumanReviewRequired = "human-review-required";
     }
 
     private readonly ConflictDetector? _conflictDetector;
@@ -370,13 +372,14 @@ public partial class PullRequestWorkflow
     }
 
     /// <summary>
-    /// Submit a code review on a PR.
+    /// Submit a code review on a PR, optionally with inline comments.
     /// </summary>
     public async Task SubmitReviewAsync(
         int prNumber,
         string reviewerAgent,
         string body,
         bool approve,
+        IReadOnlyList<InlineReviewComment>? inlineComments = null,
         CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(reviewerAgent);
@@ -385,10 +388,18 @@ public partial class PullRequestWorkflow
         var reviewBody = $"**Review by {reviewerAgent}**\n\n{body}";
         var eventType = approve ? "APPROVE" : "REQUEST_CHANGES";
 
-        _logger.LogInformation("Agent {Agent} submitting {ReviewType} review on PR #{Number}",
-            reviewerAgent, eventType, prNumber);
+        _logger.LogInformation("Agent {Agent} submitting {ReviewType} review on PR #{Number} ({InlineCount} inline comments)",
+            reviewerAgent, eventType, prNumber, inlineComments?.Count ?? 0);
 
-        await _github.AddPullRequestReviewAsync(prNumber, reviewBody, eventType, ct);
+        if (inlineComments is { Count: > 0 })
+        {
+            await _github.CreatePullRequestReviewWithCommentsAsync(
+                prNumber, reviewBody, eventType, inlineComments, ct: ct);
+        }
+        else
+        {
+            await _github.AddPullRequestReviewAsync(prNumber, reviewBody, eventType, ct);
+        }
 
         if (approve)
         {
