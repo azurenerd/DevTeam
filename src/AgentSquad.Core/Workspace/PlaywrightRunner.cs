@@ -1671,45 +1671,16 @@ public class PlaywrightRunner
                 continue;
             }
 
-            // Strategy 3: Generate a minimal valid data.json when no source exists.
-            // This happens when PR branches are created before the task that adds data.json
-            // gets merged — the branch simply doesn't have the file.
-            var minimalData = """
-                {
-                  "project": {
-                    "name": "Sample Project",
-                    "lead": "Project Lead",
-                    "status": "On Track",
-                    "lastUpdated": "2026-01-01",
-                    "summary": "Sample project dashboard for preview."
-                  },
-                  "title": "Executive Reporting Dashboard",
-                  "subtitle": "Project Status Overview",
-                  "backlogLink": "",
-                  "currentMonth": "January",
-                  "months": ["January", "February", "March"],
-                  "milestones": [
-                    { "title": "Phase 1", "targetDate": "2026-02-01", "status": "Completed" },
-                    { "title": "Phase 2", "targetDate": "2026-04-01", "status": "In Progress" }
-                  ],
-                  "shipped": [
-                    { "title": "Foundation", "description": "Project scaffolding", "category": "Infrastructure", "percentComplete": 100 }
-                  ],
-                  "inProgress": [
-                    { "title": "Dashboard UI", "description": "Building components", "category": "Frontend", "percentComplete": 60 }
-                  ],
-                  "timeline": { "startMonth": "Jan 2026", "endMonth": "Jun 2026", "tracks": [] },
-                  "heatmap": { "months": ["Jan", "Feb", "Mar"], "categories": [], "items": [] }
-                }
-                """;
-
-            foreach (var dest in candidatePaths)
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                File.WriteAllText(dest, minimalData);
-            }
-            _logger.LogInformation("Generated minimal data.json ({Count} locations) for app preview in {AppDir}",
-                candidatePaths.Length, Path.GetRelativePath(workspacePath, appDir));
+            // Strategy 3: No data file found — log a warning but do NOT generate a fallback.
+            // A hardcoded fallback schema will almost certainly not match the app's data model,
+            // causing misleading "schema validation failed" errors in screenshots.
+            // Better to let the app show "data.json not found" (which is at least accurate)
+            // than to create a file with the wrong schema that triggers confusing validation errors.
+            _logger.LogWarning(
+                "No data.json or data.template.json found for app in {AppDir}. " +
+                "The app may show a 'file not found' error in screenshots. " +
+                "Ensure the engineering task includes creating a sample data.json matching the data model schema.",
+                Path.GetRelativePath(workspacePath, appDir));
         }
     }
 }

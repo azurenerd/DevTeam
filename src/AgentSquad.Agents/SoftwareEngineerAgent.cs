@@ -540,7 +540,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             "(with placeholder content like `<!-- TODO: Implement header section -->`)\n" +
             "- Create the global CSS file with the full layout structure and clearly marked section boundaries " +
             "(e.g., `/* === HEADER STYLES === */`, `/* === FOOTER STYLES === */`)\n" +
-            "- Create sample data files (e.g., data.json) with realistic structure matching the data models\n" +
+            "- Create sample data files (e.g., data.json) that EXACTLY match the data model records/classes you define. " +
+            "Every property in the C# record must have a corresponding JSON field with the correct casing and structure. " +
+            "If DashboardData has a 'milestoneStreams' property of type List<MilestoneStream>, the JSON must have 'milestoneStreams' as an array of matching objects. " +
+            "A schema mismatch between data.json and the data model will cause runtime validation errors.\n" +
             "- Create configuration files (launchSettings.json, appsettings.json) with correct ports and settings\n\n" +
             "The goal: after T1 merges, `dotnet build` (or equivalent) succeeds, `dotnet run` starts the app, " +
             "and the app renders a working shell with placeholder content. " +

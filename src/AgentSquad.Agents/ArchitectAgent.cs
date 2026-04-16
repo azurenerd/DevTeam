@@ -1141,9 +1141,12 @@ public class ArchitectAgent : AgentBase
                 ["screenshot_instructions"] = hasScreenshots
                     ? "ALSO CHECK: Screenshots are provided — you can SEE them embedded in this message. " +
                       "Verify the app renders correctly without errors.\n" +
-                      "  - Error pages, unhandled exceptions, blank screens, JSON errors visible in screenshots = REWORK.\n" +
+                      "  - Error pages, unhandled exceptions, blank screens visible in screenshots = REWORK.\n" +
                       "  - The visual output should match what the PR description says it implements.\n" +
-                      "  - A white screen with error text or a 'data.json' error = REWORK.\n"
+                      "  - EXCEPTION: If the PR explicitly states that data files (e.g., data.json) are NOT part of this task " +
+                      "and will be provided by a separate task, a 'file not found' error for data files is acceptable — " +
+                      "do NOT flag it as REWORK. However, if the PR INCLUDES a data.json file and the screenshot " +
+                      "shows a schema/validation error, that IS a REWORK issue (the file doesn't match the data model).\n"
                     : ""
             };
 
@@ -1162,9 +1165,11 @@ public class ArchitectAgent : AgentBase
                    (hasScreenshots
                        ? "ALSO CHECK: Screenshots are provided — you can SEE them embedded in this message. " +
                          "Verify the app renders correctly without errors.\n" +
-                         "  - Error pages, unhandled exceptions, blank screens, JSON errors visible in screenshots = REWORK.\n" +
+                         "  - Error pages, unhandled exceptions, blank screens visible in screenshots = REWORK.\n" +
                          "  - The visual output should match what the PR description says it implements.\n" +
-                         "  - A white screen with error text or a 'data.json' error = REWORK.\n"
+                         "  - EXCEPTION: If the PR states data files are NOT part of this task, a 'file not found' " +
+                         "error for data files is acceptable. But if the PR INCLUDES data files and the screenshot " +
+                         "shows a schema/validation error, that IS a REWORK issue.\n"
                        : "") +
                    "IGNORE: code quality, null checks, naming, tests.\n\n" +
                    "IMPORTANT: Code may appear truncated in your review context due to length limits — " +
@@ -1172,33 +1177,31 @@ public class ArchitectAgent : AgentBase
                    "Only request REWORK for real architectural violations (wrong boundaries, wrong tech stack, " +
                    "wrong patterns), MISSING files/components listed in acceptance criteria, " +
                    "OR runtime errors visible in screenshots. Minor issues → APPROVE.\n\n" +
-                   "RESPONSE FORMAT — your ENTIRE response must be valid JSON:\n" +
-                   "```\n" +
-                   "{\n" +
-                   "  \"verdict\": \"APPROVED\" or \"REWORK\",\n" +
-                   "  \"summary\": \"Brief 1-2 sentence assessment\",\n" +
-                   (useRiskAssessment ? "  \"riskLevel\": \"LOW\" or \"MEDIUM\" or \"HIGH\",\n" : "") +
+                   "RESPONSE FORMAT — you MUST respond with ONLY a JSON object, nothing else.\n" +
+                   "Do NOT include any text before or after the JSON. Do NOT wrap in markdown fences.\n" +
+                   "The JSON schema is:\n" +
+                   "- \"verdict\": string, either \"APPROVED\" or \"REWORK\"\n" +
+                   "- \"summary\": string, brief 1-2 sentence assessment\n" +
+                   (useRiskAssessment ? "- \"riskLevel\": string, either \"LOW\", \"MEDIUM\", or \"HIGH\"\n" : "") +
                    (useInlineComments
-                       ? "  \"comments\": [\n" +
-                         "    {\n" +
-                         "      \"file\": \"path/to/file.cs\",\n" +
-                         "      \"line\": 42,\n" +
-                         "      \"priority\": \"🔴 Critical\" or \"🟠 Important\" or \"🟡 Suggestion\" or \"🟢 Nit\",\n" +
-                         "      \"body\": \"Description of the issue\"\n" +
-                         "    }\n" +
-                         "  ]\n"
+                       ? "- \"comments\": array of objects with:\n" +
+                         "  - \"file\": string, relative file path (e.g. \"src/Services/MyService.cs\")\n" +
+                         "  - \"line\": integer, line number in the new file where the comment applies\n" +
+                         "  - \"priority\": string, one of \"🔴 Critical\", \"🟠 Important\", \"🟡 Suggestion\", \"🟢 Nit\"\n" +
+                         "  - \"body\": string, description of the issue\n"
                        : "") +
-                   "}\n" +
-                   "```\n" +
-                   "PRIORITY GUIDE:\n" +
-                   "- 🔴 Critical: Must fix — breaks architecture, missing critical files, security issues\n" +
-                   "- 🟠 Important: Should fix — wrong patterns, significant gaps\n" +
-                   "- 🟡 Suggestion: Worth considering — could be cleaner\n" +
-                   "- 🟢 Nit: Minor — skip unless it genuinely hurts maintainability\n\n" +
+                   "\nExample response:\n" +
+                   "{\"verdict\":\"REWORK\",\"summary\":\"CSS class names don't match architecture spec.\"" +
+                   (useRiskAssessment ? ",\"riskLevel\":\"MEDIUM\"" : "") +
+                   (useInlineComments ? ",\"comments\":[{\"file\":\"wwwroot/css/app.css\",\"line\":15,\"priority\":\"🔴 Critical\",\"body\":\"Uses .cur instead of .apr per architecture\"}]" : "") +
+                   "}\n\n" +
+                   "PRIORITY GUIDE: 🔴 Critical = must fix (breaks architecture, missing files, security). " +
+                   "🟠 Important = should fix (wrong patterns, significant gaps). " +
+                   "🟡 Suggestion = worth considering. 🟢 Nit = minor.\n" +
                    (useRiskAssessment
-                       ? "RISK GUIDE: LOW = cosmetic/minor changes. MEDIUM = modifies shared models or APIs. HIGH = breaking changes, security-sensitive, or major rework.\n\n"
+                       ? "RISK GUIDE: LOW = cosmetic/minor. MEDIUM = modifies shared models/APIs. HIGH = breaking changes, security, major rework.\n"
                        : "") +
-                   "Output ONLY the JSON object. No preamble, no markdown fences, no explanation outside JSON.";
+                   "\nYour entire response must be parseable as JSON. Start with { and end with }.";
             history.AddSystemMessage(reviewSys);
 
             var userMessageText =
@@ -1251,7 +1254,8 @@ public class ArchitectAgent : AgentBase
             }
 
             // Fallback: parse as plain text (original format)
-            Logger.LogWarning("Architect AI didn't return valid JSON for PR #{Number}, falling back to text parsing", pr.Number);
+            Logger.LogWarning("Architect AI didn't return valid JSON for PR #{Number}, falling back to text parsing. Raw response (first 500 chars): {RawResponse}",
+                pr.Number, text.Length > 500 ? text[..500] : text);
             text = PullRequestWorkflow.StripReviewPreamble(text);
 
             var firstLine = text.Split('\n', 2)[0].Trim();
@@ -1314,21 +1318,48 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            // Strip markdown fences if present
             var json = text.Trim();
-            if (json.StartsWith("```"))
+
+            // Strip markdown fences if present (```json ... ``` or ``` ... ```)
+            if (json.Contains("```"))
             {
-                var firstNewline = json.IndexOf('\n');
-                if (firstNewline >= 0) json = json[(firstNewline + 1)..];
-                var lastFence = json.LastIndexOf("```");
-                if (lastFence >= 0) json = json[..lastFence];
-                json = json.Trim();
+                // Find JSON content between fences
+                var fenceStart = json.IndexOf("```");
+                var afterFence = json.IndexOf('\n', fenceStart);
+                if (afterFence >= 0)
+                {
+                    var fenceEnd = json.IndexOf("```", afterFence);
+                    if (fenceEnd > afterFence)
+                    {
+                        json = json[(afterFence + 1)..fenceEnd].Trim();
+                    }
+                    else
+                    {
+                        json = json[(afterFence + 1)..].Trim();
+                    }
+                }
             }
 
-            // Try to find JSON object boundaries
+            // Try to find JSON object boundaries — handle nested braces properly
             var startBrace = json.IndexOf('{');
-            var endBrace = json.LastIndexOf('}');
-            if (startBrace < 0 || endBrace <= startBrace) return null;
+            if (startBrace < 0) return null;
+
+            // Find matching closing brace (handle nesting)
+            var depth = 0;
+            var endBrace = -1;
+            var inString = false;
+            var escape = false;
+            for (var i = startBrace; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escape) { escape = false; continue; }
+                if (c == '\\' && inString) { escape = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) { endBrace = i; break; } }
+            }
+            if (endBrace < 0) return null;
             json = json[startBrace..(endBrace + 1)];
 
             using var doc = System.Text.Json.JsonDocument.Parse(json);
