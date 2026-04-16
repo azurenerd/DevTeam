@@ -43,6 +43,15 @@
             @onclick='() => SetTypeFilter("Steps")'>📊 Steps</button>
 </div>
 
+@if (_loading)
+{
+    <div class="reasoning-loading">
+        <div class="reasoning-loading-spinner"></div>
+        <p>Connecting to agent reasoning stream…</p>
+    </div>
+}
+else
+{
 <div class="reasoning-layout">
     @* ── Left: Agent Selector ── *@
     <div class="reasoning-agents">
@@ -290,6 +299,7 @@
         }
     </div>
 </div>
+}
 
 @code {
     [Inject] private IServiceProvider Services { get; set; } = default!;
@@ -306,6 +316,7 @@
     private string? _typeFilter;
     private int _pendingDecisionCount;
     private bool _disposed;
+    private bool _loading = true;
 
     // Step tracking state
     private Dictionary<string, IReadOnlyList<AgentTaskGroup>> _groupedStepsByAgent = new();
@@ -408,6 +419,7 @@
                 await PollStepsAsync();
             }
 
+            _loading = false;
             await InvokeAsync(StateHasChanged);
         }
         catch { /* Runner not reachable — silently retry */ }
