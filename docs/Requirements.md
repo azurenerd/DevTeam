@@ -1035,24 +1035,6 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-DASH-006a**: Dashboard port configurable via `AgentSquad:Dashboard:Port` (default: 5050). Value wired to Kestrel at startup via `builder.WebHost.UseUrls()`.
 - **REQ-DASH-006b**: Dashboard is non-essential — port conflict or binding failure MUST NOT crash the agent runner.
 
-### REQ-DASH-007: Engineering Plan Visualization Tab
-
-- **REQ-DASH-007a**: Dedicated Engineering Plan page (`/engineering-plan`) accessible from the nav menu (📊 icon). Visualizes engineering tasks as an interactive dependency graph using Cytoscape.js with the dagre hierarchical layout.
-- **REQ-DASH-007b**: Task nodes are color-coded by status: completed (green), in-progress (yellow/amber), pending (gray), blocked (red). Node labels show task ID, name, and complexity.
-- **REQ-DASH-007c**: Dependency edges shown as directed arrows between task nodes. Edge validation: skip edges where source/target node IDs don't exist (prevents layout crashes from stale cross-run data).
-- **REQ-DASH-007d**: Side detail panel: clicking a task node opens a slide-out panel showing full task details (description, status, assignee, linked issue, parent enhancement, complexity, dependencies).
-- **REQ-DASH-007e**: Progress summary bar at top: shows completion percentage, task counts by status, and current workflow phase.
-- **REQ-DASH-007f**: `EngineeringPlanDataService` provides task data sourced from `AgentStateStore` (SQLite), registered as a scoped service in DI.
-- **REQ-DASH-007g**: Layout fallback: if dagre layout fails (e.g., orphaned edges, plugin not registered), fall back to grid layout rather than showing an empty canvas. Console logging for debugging.
-- **REQ-DASH-007h**: DOM readiness: graph initialization must wait for the container element to be rendered (150ms delay after `OnAfterRenderAsync`) and retry on failure rather than setting `_graphInitialized` prematurely.
-
-**Scenario: Engineering Plan Graph Usage**
-1. User navigates to `/engineering-plan` → sees dependency graph with 9 task nodes
-2. T1 (foundation) at top with no incoming edges → T2-T5 depend on T1 (arrows from T1)
-3. T1 is green (completed), T2-T4 yellow (in-progress), T5-T9 gray (pending)
-4. User clicks T3 node → detail panel slides open showing: description, assigned to "Senior Engineer 1", Issue #460, complexity Medium
-5. T7 shows red (blocked) with incoming dependency edge from T5 which is still pending
-
 **Scenario: Dashboard Issues Tab Usage**
 1. User navigates to `/issues` → sees all open issues with count badges
 2. Filters by label "engineering-task" → sees only engineering work items
@@ -1844,8 +1826,6 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 | PM stale dashboard status | MODERATE | PM shows "Reviewing PR #X" for already-merged PR | `ReviewPullRequestsAsync` sets Working status but never resets after reviews complete | Added `UpdateStatus(AgentStatus.Idle, "Monitoring team progress")` after review foreach loop |
 | TE Playwright scaffold swapped args | CRITICAL | TE crashes with IOException: path contains URL (`C:\Agents\...\http:\localhost:5000\tests`) | `GeneratePlaywrightTestScaffold()` called with projectName and testProjectDir arguments swapped — URL passed as directory path | Fixed argument order: `GetSourceProjectName()` as projectName, `"tests/UITests"` as testProjectDir |
 | TE infinite retry on failed PRs | MODERATE | TE retries failed PR creation every scan cycle, flooding logs | Failed test PRs not added to `_testedPRs` set — dedup check never triggered for failed attempts | Add PR to `_testedPRs` in catch block to prevent infinite retry loops |
-| Engineering Plan graph empty canvas | MODERATE | Engineering Plan page shows blank graph despite valid data | Multiple causes: cytoscape-dagre extension not explicitly registered, `_graphInitialized` flag set before JS call (preventing retry on failure), no edge source/target validation, no DOM readiness delay | Added explicit dagre registration, moved flag after success, added 150ms delay, edge validation, dagre→grid fallback layout |
-| EngineeringPlanDataService missing from DI | CRITICAL | Engineering Plan page crashes on navigation with DI resolution error | `EngineeringPlanDataService` registered in Dashboard project but not in Runner's `Program.cs` | Added `AddScoped<EngineeringPlanDataService>()` to Runner DI registration |
 | TE missing .csproj scaffolding | MODERATE | AI-generated test code has no .csproj, build fails | Test Engineer AI sometimes omits .csproj file in generated output | Added auto-scaffolding: detect .cs files without .csproj → generate test .csproj with xUnit + Playwright packages |
 | PE misses PM enhancements | MODERATE | Enhancement issues stay open forever with no engineering tasks | PE's AI-generated engineering plan doesn't always cover all PM enhancement issues; PM's completion review skips enhancements with 0 sub-issues | TODO: Add PE enhancement coverage validation pass + PM orphaned enhancement detection |
 | RateLimitManager never wired into GitHubService | CRITICAL | Rate limit handling existed in code but was completely inactive — all 76 API calls bypassed it | `RateLimitManager` was registered in DI as singleton but never injected into `GitHubService` constructor; all `_client` calls went directly to Octokit with no throttling | Added constructor injection of `RateLimitManager`, wrapped all 42 public methods with `_rl.ExecuteAsync()`, added `TrackRateLimit()` after each API call |

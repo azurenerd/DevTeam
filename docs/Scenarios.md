@@ -136,5 +136,5 @@ dotnet test tests/AgentSquad.Dashboard.Tests --filter "S01"
 ### Known Limitations
 
 - **Metrics page** (`/metrics`) now properly registers `BuildTestMetrics` in standalone DI and returns 200.
-- **Engineering Plan page** does not exist yet (no `/engineering-plan` route). Replaced with Agent Reasoning test.
+- **Engineering Plan page** was removed (duplicate of Timeline). Agent Reasoning page (`/reasoning`) is tested instead.
 - Tests require both Runner (API backend on 5050) and Dashboard (UI on 5051) to be running.
