@@ -100,10 +100,18 @@ else
                     var phaseItems = phase.Items;
                     var phaseDone = phaseItems.Count(g => g.Issue.State == "closed");
 
-                    <div class="ntl-phase-column @phaseClass">
+                    <div class="ntl-phase-column @phaseClass @(phase.IsWavePhase ? "wave-column" : "")">
                         <!-- Phase label — top-left -->
                         <div class="ntl-phase-label">
-                            <span class="ntl-phase-name">@phase.Name</span>
+                            @if (phase.IsWavePhase)
+                            {
+                                <span class="ntl-phase-name ntl-wave-name">@phase.Name</span>
+                                <span class="ntl-wave-badge">@phase.Items.Count tasks</span>
+                            }
+                            else
+                            {
+                                <span class="ntl-phase-name">@phase.Name</span>
+                            }
                             <span class="ntl-phase-counter">@phaseDone/@phaseItems.Count</span>
                         </div>
 
@@ -131,6 +139,14 @@ else
                                             <span class="ntl-node-title">@TruncateTitle(issue.Title, 34)</span>
                                         </div>
                                     </div>
+
+                                    @* Dependency badge for wave items *@
+                                    @if (group.DependsOn.Count > 0)
+                                    {
+                                        <div class="ntl-dep-badge" title="Blocked by @(string.Join(", ", group.DependsOn.Select(d => $"#{d}")))">
+                                            🔗 @(string.Join(", ", group.DependsOn.Select(d => $"#{d}")))
+                                        </div>
+                                    }
 
                                     @* Child issue nodes *@
                                     @if (group.ChildIssues.Count > 0)
@@ -173,6 +189,14 @@ else
                             }
                         </div>
                     </div>
+
+                    @* Wave connector arrow between wave columns *@
+                    @if (phase.IsWavePhase)
+                    {
+                        <div class="ntl-wave-connector">
+                            <div class="ntl-wave-arrow">→</div>
+                        </div>
+                    }
                 }
             </div>
         </div>
@@ -210,6 +234,23 @@ else
                     {
                         <span class="ntl-label">@label</span>
                     }
+                </div>
+            }
+            @if (!string.IsNullOrEmpty(sg.Wave))
+            {
+                <div class="ntl-detail-wave">
+                    <span class="ntl-detail-section-title">Wave &amp; Dependencies</span>
+                    <div class="ntl-detail-wave-info">
+                        <span class="ntl-wave-pill">📦 @sg.Wave</span>
+                        @if (sg.DependsOn.Count > 0)
+                        {
+                            <span class="ntl-dep-pill">🔗 Blocked by @(string.Join(", ", sg.DependsOn.Select(d => $"#{d}")))</span>
+                        }
+                        else
+                        {
+                            <span class="ntl-dep-pill ntl-dep-none">No blockers</span>
+                        }
+                    </div>
                 </div>
             }
             @if (sg.ChildIssues.Count > 0)
@@ -535,21 +576,20 @@ else
                 var isEngTask = issue.Labels.Any(l => l.Equals("engineering-task", StringComparison.OrdinalIgnoreCase));
                 if (isEngTask)
                 {
-                    // Engineering task is always top-level; linked PRs become child items
                     var g = new IssueGroup
                     {
                         Issue = issue,
                         LinkedPRs = engTaskPRs.GetValueOrDefault(issue.Number, []),
                         ChildIssues = [],
-                        IsPullRequest = _syntheticPrNumbers.Contains(issue.Number)
+                        IsPullRequest = _syntheticPrNumbers.Contains(issue.Number),
+                        Wave = ParseWaveFromBody(issue.Body),
+                        DependsOn = ParseDependsOnFromBody(issue.Body)
                     };
                     groups.Add(g);
                     _groupLookup[issue.Number] = g;
                 }
                 else if (!childIssueNumbers.Contains(issue.Number))
                 {
-                    // Non-engineering items: enhancement issues lose children in this view
-                    // (children are shown as top-level engineering tasks instead)
                     var g = new IssueGroup
                     {
                         Issue = issue,
@@ -595,22 +635,71 @@ else
 
         // --- Step 6: Group into phases ---
         // In PM view: "Development" shows enhancement issues (PM user stories) with eng-task children
-        // In Engineering view: "Development" shows engineering-task issues with linked PRs
-        var phaseOrder = new[]
+        // In Engineering view: Development is split into wave sub-phases (W0, W1, W2, ...)
+        var staticPhases = new[]
         {
             ("Research",      "🔍", "research"),
             ("PM Spec",       "📝", "pmspec"),
             ("Architecture",  "🏗️", "architecture"),
-            ("Development",   "⚡", "development"),
+        };
+        var tailPhases = new[]
+        {
             ("Finalization",   "✅", "finalization")
         };
 
         _phases = new();
-        foreach (var (name, icon, css) in phaseOrder)
+
+        // Add static pre-development phases
+        foreach (var (name, icon, css) in staticPhases)
         {
-            var items = groups.Where(g => ClassifyPhase(g.Issue) == name).ToList();
-            if (name == "Development")
-                items = items.OrderBy(g => g.Issue.Number).ToList();
+            var items = groups.Where(g => ClassifyPhase(g) == name).ToList();
+            if (items.Count > 0)
+                _phases.Add(new NeonPhase { Name = name, Icon = icon, CssClass = css, Items = items });
+        }
+
+        if (_devViewMode == "engineering")
+        {
+            // Engineering view: split Development into wave sub-phases
+            var devItems = groups.Where(g => ClassifyPhase(g).StartsWith("Development")).ToList();
+            var waveGroups = devItems
+                .GroupBy(g => g.Wave is { Length: > 0 } ? g.Wave : "W1")
+                .OrderBy(wg => wg.Key, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var wg in waveGroups)
+            {
+                var waveName = $"Development {wg.Key}";
+                var waveIcon = wg.Key == "W0" ? "🏗️" : "⚡";
+                _phases.Add(new NeonPhase
+                {
+                    Name = waveName,
+                    Icon = waveIcon,
+                    CssClass = "development",
+                    Items = wg.OrderBy(g => g.Issue.Number).ToList(),
+                    IsWavePhase = true
+                });
+            }
+        }
+        else
+        {
+            // PM view: single Development phase
+            var devItems = groups.Where(g => ClassifyPhase(g) == "Development").ToList();
+            if (devItems.Count > 0)
+            {
+                _phases.Add(new NeonPhase
+                {
+                    Name = "Development",
+                    Icon = "⚡",
+                    CssClass = "development",
+                    Items = devItems.OrderBy(g => g.Issue.Number).ToList()
+                });
+            }
+        }
+
+        // Add tail phases
+        foreach (var (name, icon, css) in tailPhases)
+        {
+            var items = groups.Where(g => ClassifyPhase(g) == name).ToList();
             if (items.Count > 0)
                 _phases.Add(new NeonPhase { Name = name, Icon = icon, CssClass = css, Items = items });
         }
@@ -630,8 +719,9 @@ else
         }
     }
 
-    private string ClassifyPhase(AgentIssue issue)
+    private string ClassifyPhase(IssueGroup group)
     {
+        var issue = group.Issue;
         var title = issue.Title.ToLowerInvariant();
         var labels = issue.Labels.Select(l => l.ToLowerInvariant()).ToList();
 
@@ -651,10 +741,12 @@ else
 
         if (_devViewMode == "engineering")
         {
-            // Engineering view: engineering-task issues → Development (open or closed)
-            // Their PRs are shown as children, so they stay in Development regardless of state
             if (labels.Contains("engineering-task"))
-                return "Development";
+            {
+                // Return wave-specific phase name for wave splitting
+                var wave = group.Wave is { Length: > 0 } ? group.Wave : "W1";
+                return $"Development {wave}";
+            }
             if (labels.Contains("enhancement"))
                 return "hidden"; // PM issues hidden in engineering view
         }
@@ -689,7 +781,7 @@ else
                 return true;
             }).ToList();
             if (filtered.Count > 0)
-                result.Add(new NeonPhase { Name = phase.Name, Icon = phase.Icon, CssClass = phase.CssClass, Items = filtered });
+                result.Add(new NeonPhase { Name = phase.Name, Icon = phase.Icon, CssClass = phase.CssClass, Items = filtered, IsWavePhase = phase.IsWavePhase });
         }
         return result;
     }
@@ -766,6 +858,7 @@ else
         "Architecture" => "phase-architecture",
         "Development" => "phase-development",
         "Finalization" => "phase-finalization",
+        _ when name.StartsWith("Development W") => "phase-development",
         _ => "phase-development"
     };
 
@@ -802,6 +895,10 @@ else
         public required List<AgentIssue> ChildIssues { get; init; }
         /// <summary>True when the top-level item is actually a PR rendered as a synthetic issue.</summary>
         public bool IsPullRequest { get; init; }
+        /// <summary>Wave assignment for engineering tasks (e.g., "W0", "W1"). Empty for non-engineering items.</summary>
+        public string Wave { get; init; } = "";
+        /// <summary>Issue numbers this task depends on (blocked by).</summary>
+        public List<int> DependsOn { get; init; } = [];
     }
 
     private record NeonPhase
@@ -810,5 +907,30 @@ else
         public required string Icon { get; init; }
         public required string CssClass { get; init; }
         public required List<IssueGroup> Items { get; init; }
+        /// <summary>True when this phase is a development wave sub-phase.</summary>
+        public bool IsWavePhase { get; init; }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex WaveRegex = new(
+        @"\*\*Wave:\*\*\s*(W\d+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static readonly System.Text.RegularExpressions.Regex DependsOnRegex = new(
+        @"\*\*Depends On:\*\*\s*((?:#\d+(?:,\s*)?)+)", System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    private static string ParseWaveFromBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return "W1";
+        var match = WaveRegex.Match(body);
+        return match.Success ? match.Groups[1].Value : "W1";
+    }
+
+    private static List<int> ParseDependsOnFromBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return [];
+        var match = DependsOnRegex.Match(body);
+        if (!match.Success) return [];
+        return System.Text.RegularExpressions.Regex.Matches(match.Groups[1].Value, @"#(\d+)")
+            .Select(m => int.Parse(m.Groups[1].Value))
+            .ToList();
     }
 }

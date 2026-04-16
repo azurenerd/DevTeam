@@ -5273,6 +5273,131 @@ a.ntl-child-node { text-decoration: none; color: inherit; }
 }
 
 /* ═══════════════════════════════════════════════════════════════
+   WAVE COLUMNS — vertical stacking for parallel tasks
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Wave columns use vertical stacking to show parallel tasks */
+.wave-column .ntl-phase-nodes {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+
+.wave-column .ntl-node-cluster {
+    flex-direction: row;
+    align-items: flex-start;
+    min-width: unset;
+    width: 100%;
+    gap: 8px;
+}
+
+.wave-column .ntl-spine-dot {
+    flex-shrink: 0;
+    margin-top: 14px;
+}
+
+.wave-column .ntl-connector {
+    display: none;
+}
+
+.wave-column .ntl-node {
+    flex: 1;
+    min-width: 0;
+}
+
+.wave-column .ntl-children {
+    flex: 1;
+    min-width: 0;
+}
+
+/* Wave phase label styling */
+.ntl-wave-name {
+    font-size: 0.85em;
+}
+
+.ntl-wave-badge {
+    display: inline-block;
+    background: rgba(var(--phase-rgb, 99,102,241), 0.2);
+    color: var(--phase, #6366f1);
+    font-size: 0.65em;
+    padding: 1px 6px;
+    border-radius: 8px;
+    margin-left: 6px;
+    font-weight: 500;
+    letter-spacing: 0.02em;
+}
+
+/* Wave connector arrow between wave columns */
+.ntl-wave-connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    flex-shrink: 0;
+    align-self: stretch;
+}
+
+.ntl-wave-arrow {
+    color: var(--phase, #6366f1);
+    font-size: 1.4em;
+    opacity: 0.5;
+    text-shadow: 0 0 8px var(--phase, #6366f1);
+}
+
+/* Dependency badge on nodes */
+.ntl-dep-badge {
+    font-size: 0.65em;
+    color: #f59e0b;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 6px;
+    padding: 1px 6px;
+    margin-top: 4px;
+    white-space: nowrap;
+    text-align: center;
+}
+
+/* Detail panel wave info */
+.ntl-detail-wave {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(255,255,255,0.06);
+}
+
+.ntl-detail-wave-info {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 4px;
+}
+
+.ntl-wave-pill {
+    font-size: 0.78em;
+    background: rgba(99, 102, 241, 0.15);
+    color: #818cf8;
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-weight: 500;
+}
+
+.ntl-dep-pill {
+    font-size: 0.78em;
+    background: rgba(245, 158, 11, 0.12);
+    color: #f59e0b;
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 10px;
+    padding: 2px 10px;
+    font-weight: 500;
+}
+
+.ntl-dep-pill.ntl-dep-none {
+    background: rgba(34, 197, 94, 0.1);
+    color: #22c55e;
+    border-color: rgba(34, 197, 94, 0.25);
+}
+
+/* ═══════════════════════════════════════════════════════════════
    THEME: BLUEPRINT — Blue gradient spine, L-shaped connectors
    ═══════════════════════════════════════════════════════════════ */
 
