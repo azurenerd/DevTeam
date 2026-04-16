@@ -37,6 +37,7 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 - **Crash-Resilient Sessions** — CLI session IDs persist to SQLite so agents resume the same Copilot conversation after runner restarts, preserving full AI context for rework
 - **15-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, and approval management
 - **Decision Impact Classification & Gating** — Agents classify decisions by impact level (XS–XL) using AI. High-impact decisions are gated for human approval before agents proceed. Configurable threshold levels, structured implementation plans for gated decisions, and a rich dashboard UI for reviewing and approving decisions
+- **Agent Task Steps** — Real-time workflow visibility: all 7 agents report step-by-step progress (BeginStep/CompleteStep/RecordSubStep) with per-step timing, LLM call counts, and cost. Dashboard shows live step timelines with progress bars and expected-step templates per role — zero LLM overhead, pure observability
 - **PE Parallelism Enhancements** — Principal Engineer validates file overlap across parallel tasks, enforces wave scheduling (W1/W2/W3+), uses typed dependencies, and logs parallelism metrics. AI-assisted repair of file conflicts ensures engineers can work in parallel without merge conflicts
 - **Phase-Gated Workflow** — State machine enforces linear progression: Initialization → Research → Architecture → Planning → Development → Testing → Review → Finalization
 - **GitHub-Native Coordination** — Dual-layer communication: in-process message bus (<1ms, real-time) + GitHub API (durable PRs/Issues, human-visible). All work products are real GitHub artifacts
@@ -307,7 +308,7 @@ The Blazor Server dashboard provides real-time visibility into the agent team wi
 | **Approvals** | `/approvals` | Human gate approval management with filter buttons |
 | **Configuration** | `/configuration` | Settings editor, gate presets, SME management, GitHub cleanup |
 | **Agent Detail** | `/agent/{id}` | Deep dive into a single agent with pause/resume/terminate controls |
-| **Agent Reasoning** | `/reasoning` | View agent decision-making chains and AI conversation history |
+| **Agent Reasoning** | `/reasoning` | View agent decision-making chains, AI conversation history, and step-by-step task progress |
 | **GitHub Feed** | `/github-feed` | Live feed of GitHub activity across the project |
 | **Repository** | `/repository` | Browse repository file tree and content |
 
@@ -319,6 +320,7 @@ AgentSquad/
 ├── src/
 │   ├── AgentSquad.Core/                # Shared abstractions and infrastructure
 │   │   ├── Agents/                     # AgentBase, IAgent, AgentRole, AgentStatus, messages
+│   │   │   └── Steps/                  # AgentTaskStep, IAgentTaskTracker, AgentStepTemplates
 │   │   ├── AI/                         # CopilotCli provider, MCP config, knowledge pipeline
 │   │   ├── Configuration/              # Config models, SME definitions, MCP server defs
 │   │   ├── GitHub/                     # GitHubService, rate limiting, PR/Issue workflows

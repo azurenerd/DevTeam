@@ -31,6 +31,9 @@
 21. [Blazor Server SynchronizationContext Kills HTTP Calls](#21-blazor-server-synchronizationcontext-kills-http-calls)
 22. [Transient Status Flash from Pre-Gate Status Updates](#22-transient-status-flash-from-pre-gate-status-updates)
 23. [AI Agents Rewrite Components from Scratch During Incremental PRs](#23-ai-agents-rewrite-components-from-scratch-during-incremental-prs)
+24. [PE Parallelism Enhancements](#24-pe-parallelism-enhancements)
+25. [Decision Impact Classification & Gating](#25-decision-impact-classification--gating)
+26. [Agent Task Steps — Real-Time Workflow Visibility](#26-agent-task-steps--real-time-workflow-visibility)
 
 ---
 
@@ -695,6 +698,28 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 7. **Dashboard Integration Requires Multiple Touchpoints** — A single "decisions" page isn't enough. Users need: (1) Filtering in the Reasoning tab to see decisions alongside other events, (2) Actionable approve/reject in the Approvals tab, and (3) A quick-glance count on the Overview page. Three integration points = complete visibility.
 
 8. **Gate Notifications Should Reuse Existing Infrastructure** — Rather than building a new notification system, decision gates reuse `GateNotificationService` with a `"Decision:{id}"` prefix pattern. This leverages existing notification UI, polling, and resolution mechanics. Build on what exists.
+
+---
+
+## 26. Agent Task Steps — Real-Time Workflow Visibility
+
+**What**: Added step-by-step progress tracking to all 7 agent roles, with a dashboard UI showing live step timelines, progress bars, timing, LLM call counts, and cost per step.
+
+**Key Lessons**:
+
+1. **Dynamic Steps Beat Pre-Planned Steps** — Agent execution paths are conditional (a PM may skip clarification, an engineer may not need rework). Pre-planning steps creates false predictions that confuse users when agents deviate. Emitting steps as they happen — `BeginStep()` when starting, `CompleteStep()` when done — ensures the UI always reflects reality. Step templates provide the "expected future" view without binding agents to a fixed plan.
+
+2. **Step Instrumentation Must Be Non-Blocking** — Every `BeginStep`/`CompleteStep`/`RecordSubStep` call in agent code is wrapped in try/catch. If step tracking fails (OOM, corrupted state, race condition), the agent continues working. Observability must never interfere with execution. This is the same principle as logging — you never let a logging failure crash your service.
+
+3. **Step Templates Provide UI Completeness Without Pre-Computation** — Users want to see "what's coming next" even before the agent reaches that step. `AgentStepTemplates` provides expected step names per role, shown greyed out in the UI. This gives progress context (3 of 7 steps done) without requiring the agent to pre-compute its plan. Templates are informational, not prescriptive — the agent may skip or add steps.
+
+4. **Zero LLM Overhead Is Non-Negotiable for Observability** — Step tracking is pure in-process instrumentation — no extra AI calls, no token usage, no cost. Adding observability that consumes LLM budget would undermine the very visibility it provides by slowing agents down. The `AgentTaskTracker` is a ConcurrentDictionary with atomic status transitions — microsecond overhead.
+
+5. **Sub-Steps Add Depth Without Complexity** — Rather than creating deeply nested step hierarchies, `RecordSubStep()` adds a flat child entry to an existing step (e.g., "Reviewing file: auth.cs" under "Code Review"). This gives meaningful progress detail during long-running steps without complicating the data model or the UI rendering.
+
+6. **Shared Engineer Base Reduces Instrumentation Duplication** — Senior and Junior engineers share common workflows (issue pickup, implementation, build/test, PR creation) via `EngineerAgentBase`. Instrumenting steps at the base class level means both roles get step tracking for free, with role-specific steps added only in subclasses. This mirrors the existing agent architecture — step instrumentation follows the same inheritance patterns.
+
+7. **REST API Enables External Tooling** — The five step endpoints (`/api/steps/{agentId}`, `/current`, `/progress`, `/active`, `/templates/{role}`) enable external dashboards, CLI tools, and automation scripts to consume step data. This is important for CI/CD integration where teams want to monitor agent progress programmatically, not just through the Blazor UI.
 
 ---
 

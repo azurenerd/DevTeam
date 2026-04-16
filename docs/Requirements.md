@@ -42,7 +42,8 @@
 30. [Prompt Externalization Requirements](#30-prompt-externalization-requirements)
 31. [PE Parallelism Enhancements Requirements](#31-pe-parallelism-enhancements-requirements)
 32. [Decision Impact Classification & Gating Requirements](#32-decision-impact-classification--gating-requirements)
-33. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+33. [Agent Task Steps — Real-Time Workflow Visibility](#33-agent-task-steps--real-time-workflow-visibility)
+34. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -1984,6 +1985,68 @@ These requirements govern how agents classify decisions by impact level and gate
 2. Each agent's decisions stored in separate list within `ConcurrentDictionary`
 3. Per-agent list access protected by `lock(list)`
 4. Dashboard receives `OnDecisionChanged` events for each new decision
+
+---
+
+## 33. Agent Task Steps — Real-Time Workflow Visibility
+
+### REQ-STEP-001: Agent Task Step Model
+
+- **REQ-STEP-001a**: An `AgentTaskStep` record captures a discrete unit of work within an agent's execution loop. Fields: `Id` (GUID), `AgentId`, `StepName`, `Description`, `Status` (Pending/InProgress/Completed/Failed/WaitingOnHuman), `StartedAt`, `CompletedAt`, `Duration`, `SubSteps` (list), `Metadata` (dictionary for LLM call counts, token usage, cost).
+- **REQ-STEP-001b**: Steps are dynamic — emitted as agents execute, not pre-planned — because agent paths are conditional (e.g., a PM may or may not enter a clarification loop). This avoids false predictions and ensures the step timeline reflects actual execution.
+- **REQ-STEP-001c**: Sub-steps track finer-grained work within a step (e.g., "Analyzing file: auth.cs" within a "Code Review" step). Recorded via `RecordSubStep()` without creating a separate top-level step.
+
+### REQ-STEP-002: Step Tracking Interface & Implementation
+
+- **REQ-STEP-002a**: `IAgentTaskTracker` interface provides: `BeginStep(agentId, stepName, description)`, `CompleteStep(agentId, stepName, metadata?)`, `FailStep(agentId, stepName, error)`, `RecordSubStep(agentId, parentStepName, subStepName)`, `GetSteps(agentId)`, `GetCurrentStep(agentId)`, `GetProgress(agentId)`.
+- **REQ-STEP-002b**: `AgentTaskTracker` implementation uses thread-safe collections (ConcurrentDictionary keyed by agentId). All public methods are safe for concurrent access from multiple agents.
+- **REQ-STEP-002c**: Step instrumentation is non-blocking — all `BeginStep`/`CompleteStep`/`RecordSubStep` calls in agent code are wrapped in try/catch to never break agent functionality. Observability must not interfere with execution.
+- **REQ-STEP-002d**: Zero LLM overhead — step tracking is pure in-process instrumentation. No additional AI calls are made for step reporting.
+
+### REQ-STEP-003: Step Templates Per Agent Role
+
+- **REQ-STEP-003a**: `AgentStepTemplates` static class provides expected step names for each of the 7 agent roles (Researcher, PM, Architect, PE, Senior Engineer, Junior Engineer, Test Engineer).
+- **REQ-STEP-003b**: Templates are used by the UI to show expected future steps (greyed out / pending state) alongside completed and in-progress steps, giving users a sense of overall progress without requiring agents to pre-compute their execution plan.
+- **REQ-STEP-003c**: Templates are informational, not prescriptive — agents may skip steps or execute additional steps not in the template. The UI handles this gracefully.
+
+### REQ-STEP-004: Agent Instrumentation
+
+- **REQ-STEP-004a**: All 7 core agent types report step progress: Researcher, PM, Architect, PE, Senior Engineer (via EngineerAgentBase), Junior Engineer (via EngineerAgentBase), Test Engineer.
+- **REQ-STEP-004b**: Step names are descriptive and consistent per role (e.g., Researcher: "Gathering Sources", "Analyzing Documentation", "Synthesizing Research"; PM: "Reading Project Description", "Creating PMSpec", "Generating User Stories").
+- **REQ-STEP-004c**: Engineers share common step instrumentation via `EngineerAgentBase` for shared workflows (issue pickup, implementation, build/test, PR creation) with role-specific steps added in subclasses.
+
+### REQ-STEP-005: Dashboard Step Visualization
+
+- **REQ-STEP-005a**: "📊 Steps" sub-tab in the Agent Reasoning page shows per-agent step timelines. This is a filter/view mode within the existing Reasoning tab, not a separate page.
+- **REQ-STEP-005b**: Each step displays: step name, status icon (✅ completed / 🔄 in-progress / ⏳ pending / ❌ failed / 👤 waiting-on-human), duration, and progress bar.
+- **REQ-STEP-005c**: Step progress indicator on Overview agent cards shows a compact summary (e.g., "Step 3/7 — Creating PMSpec").
+- **REQ-STEP-005d**: Agent Detail page includes a "Task Steps" card showing the full step timeline with timing, LLM call counts, and cost metadata.
+- **REQ-STEP-005e**: CSS styling supports all step states with distinct visual treatment: completed (green), in-progress (blue/animated), pending (grey), failed (red), waiting-on-human (amber).
+
+### REQ-STEP-006: Step REST API
+
+- **REQ-STEP-006a**: `GET /api/steps/{agentId}` — Returns all steps for a specific agent.
+- **REQ-STEP-006b**: `GET /api/steps/{agentId}/current` — Returns the currently in-progress step for an agent.
+- **REQ-STEP-006c**: `GET /api/steps/{agentId}/progress` — Returns progress summary (completed count, total expected from template, percentage).
+- **REQ-STEP-006d**: `GET /api/steps/active` — Returns all currently in-progress steps across all agents.
+- **REQ-STEP-006e**: `GET /api/steps/templates/{role}` — Returns the expected step template for a given agent role.
+
+### REQ-STEP-007: Thread Safety
+
+1. `AgentTaskTracker` uses `ConcurrentDictionary<string, List<AgentTaskStep>>` keyed by agent ID
+2. Per-agent step list access is synchronized to prevent concurrent modification
+3. Step status transitions are atomic (BeginStep sets InProgress, CompleteStep sets Completed)
+4. Dashboard receives step updates via existing SignalR push infrastructure
+
+**Scenario: Step Timeline During PM Execution**
+```
+1. PM agent starts → BeginStep("Reading Project Description")
+2. Dashboard shows: [🔄 Reading Project Description] [⏳ Creating PMSpec] [⏳ Generating User Stories] ...
+3. PM completes reading → CompleteStep("Reading Project Description", {duration: "12s"})
+4. PM starts spec → BeginStep("Creating PMSpec") → RecordSubStep("Creating PMSpec", "Drafting Executive Summary")
+5. Dashboard shows: [✅ Reading Project Description (12s)] [🔄 Creating PMSpec — Drafting Executive Summary] [⏳ Generating User Stories] ...
+6. User navigates to Agent Detail → sees full step timeline with LLM call counts and cost per step
+```
 
 ---
 
