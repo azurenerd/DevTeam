@@ -36,6 +36,8 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 - **Dynamic Team Scaling** — The PM analyzes project requirements and proposes an optimal team composition (agent counts, SME specialists), enforced through human gate approval
 - **Crash-Resilient Sessions** — CLI session IDs persist to SQLite so agents resume the same Copilot conversation after runner restarts, preserving full AI context for rework
 - **15-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, and approval management
+- **Decision Impact Classification & Gating** — Agents classify decisions by impact level (XS–XL) using AI. High-impact decisions are gated for human approval before agents proceed. Configurable threshold levels, structured implementation plans for gated decisions, and a rich dashboard UI for reviewing and approving decisions
+- **PE Parallelism Enhancements** — Principal Engineer validates file overlap across parallel tasks, enforces wave scheduling (W1/W2/W3+), uses typed dependencies, and logs parallelism metrics. AI-assisted repair of file conflicts ensures engineers can work in parallel without merge conflicts
 - **Phase-Gated Workflow** — State machine enforces linear progression: Initialization → Research → Architecture → Planning → Development → Testing → Review → Finalization
 - **GitHub-Native Coordination** — Dual-layer communication: in-process message bus (<1ms, real-time) + GitHub API (durable PRs/Issues, human-visible). All work products are real GitHub artifacts
 - **Multi-Model Support** — Anthropic Claude, OpenAI GPT, Azure OpenAI, and local Ollama with four configurable tiers (premium / standard / budget / local) assigned per agent role
@@ -265,7 +267,25 @@ Configuration lives in `src/AgentSquad.Runner/appsettings.json` under the `Agent
 | `Limits` | Max additional engineers, daily token budget, poll intervals, timeouts, concurrency |
 | `Workspace` | Local build/test paths, commands, per-tier test timeouts, max retries |
 | `Gates` | Human gate configuration, presets (FullAuto / Supervised / FullControl) |
+| `DecisionGating` | Decision impact classification & gating — enable/disable, minimum gate level (XS–XL), plan requirements, timeouts, fallback actions |
 | `Dashboard` | Dashboard port and SignalR toggle |
+
+**Decision Gating** — classify and gate high-impact agent decisions:
+
+```json
+{
+  "AgentSquad": {
+    "DecisionGating": {
+      "Enabled": true,
+      "MinimumGateLevel": "L",
+      "RequirePlanForGated": true,
+      "MaxDecisionTurns": 3,
+      "GateTimeoutMinutes": 0,
+      "TimeoutFallbackAction": "auto-approve"
+    }
+  }
+}
+```
 
 See [docs/setup-guide.md](docs/setup-guide.md) for a detailed walkthrough of every configuration option.
 
@@ -325,12 +345,17 @@ AgentSquad/
 │   │   ├── WorkflowStateMachine.cs     # Phase-gated project progression
 │   │   ├── DeadlockDetector.cs         # Wait-for graph DFS cycle detection
 │   │   ├── HealthMonitor.cs            # Stuck agent detection and health snapshots
-│   │   └── GracefulShutdownHandler.cs  # Clean shutdown with state persistence
+│   │   ├── GracefulShutdownHandler.cs  # Clean shutdown with state persistence
+│   │   ├── DecisionGateService.cs     # AI impact classification, plan generation, gate workflow
+│   │   ├── DecisionLog.cs             # Thread-safe in-memory decision storage (IDecisionLog)
+│   │   └── DecisionGatingConfig.cs    # Gate level thresholds, timeouts, fallback actions
 │   │
 │   ├── AgentSquad.Dashboard/           # Real-time monitoring UI (shared library)
-│   │   ├── Components/Pages/           # 15 Blazor pages
+│   │   ├── Components/Pages/           # 15 Blazor pages (incl. decision approval UI)
 │   │   ├── Hubs/AgentHub.cs            # SignalR hub for push updates
 │   │   └── Services/                   # IDashboardDataService, HttpDashboardDataService
+│   │       # Dashboard decision UI: Reasoning tab filters, Approvals tab decision view,
+│   │       # Overview stat card for pending/approved/rejected decisions
 │   │
 │   ├── AgentSquad.Dashboard.Host/      # Standalone dashboard process (port 5051)
 │   └── AgentSquad.Runner/              # Application host (port 5050)
@@ -338,9 +363,9 @@ AgentSquad/
 │       └── AgentSquadWorker.cs         # Bootstrap: spawns core agents in phased sequence
 │
 ├── tests/
-│   ├── AgentSquad.Core.Tests/          # 258 unit tests
-│   ├── AgentSquad.Agents.Tests/        # 22 agent behavior tests
-│   └── AgentSquad.Integration.Tests/   # 37 integration tests
+│   ├── AgentSquad.Core.Tests/          # ~340 unit tests
+│   ├── AgentSquad.Agents.Tests/        # ~50 agent behavior tests
+│   └── AgentSquad.Integration.Tests/   # ~38 integration tests
 │
 ├── scripts/
 │   ├── start-runner.ps1                # Start the Runner process
@@ -384,7 +409,7 @@ dotnet build AgentSquad.sln
 ### Test
 
 ```bash
-# Run all 317 tests
+# Run all 428 tests
 dotnet test AgentSquad.sln
 
 # Run a specific test project

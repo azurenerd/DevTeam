@@ -656,4 +656,46 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 
 ---
 
+## 24. PE Parallelism Enhancements
+
+**What**: Enhanced the Principal Engineer agent's task planning to maximize parallel execution by multiple engineers working simultaneously on separate PRs.
+
+**Key Lessons**:
+
+1. **File Overlap Detection is Critical for Parallel Work** — When multiple engineers work on tasks in parallel, file conflicts are the #1 source of merge failures. Implementing `DetectFileOverlaps()` to compare owned files across tasks in the same wave, combined with AI-assisted repair via `ValidateAndRepairTaskPlanAsync()`, prevents conflicts before they happen. Prevention is far cheaper than resolution.
+
+2. **Wave Scheduling Enables Structured Parallelism** — Assigning tasks to waves (W1, W2, W3+) based on dependency chains provides a simple but effective parallelism model. Targeting 60%+ of non-foundation tasks in W1 (depending only on the foundation task T1) maximizes throughput. A star topology (all tasks depend only on T1) is ideal but not always achievable.
+
+3. **Typed Dependencies Add Precision** — Simple dependency lists (T1, T3) don't tell you WHY tasks depend on each other. Adding type annotations (T1(files), T3(api)) enables smarter scheduling and helps identify dependencies that could be restructured. The coupling type matters — a file dependency is harder to parallelize than an API dependency.
+
+4. **Parallelism Metrics Drive Improvement** — Logging W1 percentage, overlap count, and a qualitative score (Excellent/Good/Fair/Poor) after each planning cycle creates a feedback loop. Without metrics, you can't tell if task decomposition is getting better or worse over time.
+
+5. **Shared Files Must Be Explicit** — The SHARED file declaration pattern (e.g., `SHARED:Program.cs` in T1's FilePlan) makes it clear which files multiple tasks may touch. Without explicit shared file tracking, overlap detection would flag legitimate shared modifications as conflicts.
+
+---
+
+## 25. Decision Impact Classification & Gating
+
+**What**: Implemented a system where agents classify their design decisions by impact level (XS-XL) and high-impact decisions are gated for human approval before the agent continues.
+
+**Key Lessons**:
+
+1. **AI Classification Beats Hardcoded Rules** — Using an AI turn to classify decision impact handles novel situations that rule-based systems would miss. The AI considers scope, reversibility, risk, and component count — factors that are hard to capture in static rules. Fallback to Medium on classification failure is a safe default.
+
+2. **Optional Dependencies Preserve Backward Compatibility** — Making `DecisionGateService?` an optional constructor parameter (null-safe) across all 7 agent types means existing tests and configurations work unchanged. Agents check `_decisionGate != null` before calling, so the feature is purely additive. This pattern is essential when adding cross-cutting features to an established codebase.
+
+3. **Extra AI Turns Only When Needed** — Generating structured implementation plans (plan generation turn) only for gated decisions (L+ by default) avoids slowing down routine XS/S decisions. The cost of an extra AI call is justified only when human review is required.
+
+4. **Configurable Gate Thresholds Enable Progressive Adoption** — The `MinimumGateLevel` config ("None", "XS", "S", "M", "L", "XL") lets users start with light gating (L only) and tighten it over time. This reduces friction during initial adoption while still catching the highest-impact decisions.
+
+5. **Separate Decision Storage from Reasoning Events** — `AgentDecision` records are richer than `AgentReasoningEvent` (rationale, alternatives, plan, approval status, feedback). Keeping them as separate data models with their own `IDecisionLog` interface enables purpose-built queries and UI without polluting the existing reasoning pipeline.
+
+6. **Timeout Fallback Strategy Matters** — Gated decisions that block agents indefinitely can stall the entire pipeline. The configurable timeout with fallback action ("auto-approve" or "block") gives users control over the tradeoff between safety and throughput. Auto-approve after timeout is the pragmatic default for most teams.
+
+7. **Dashboard Integration Requires Multiple Touchpoints** — A single "decisions" page isn't enough. Users need: (1) Filtering in the Reasoning tab to see decisions alongside other events, (2) Actionable approve/reject in the Approvals tab, and (3) A quick-glance count on the Overview page. Three integration points = complete visibility.
+
+8. **Gate Notifications Should Reuse Existing Infrastructure** — Rather than building a new notification system, decision gates reuse `GateNotificationService` with a `"Decision:{id}"` prefix pattern. This leverages existing notification UI, polling, and resolution mechanics. Build on what exists.
+
+---
+
 *This document was compiled from 80+ checkpoints, 400+ conversation turns, and 85+ end-to-end test runs across six Copilot CLI sessions building the AgentSquad system.*

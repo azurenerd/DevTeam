@@ -40,7 +40,9 @@
 28. [SME Agent System Requirements](#28-sme-agent-system-requirements)
 29. [Knowledge Pipeline Requirements](#29-knowledge-pipeline-requirements)
 30. [Prompt Externalization Requirements](#30-prompt-externalization-requirements)
-31. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+31. [PE Parallelism Enhancements Requirements](#31-pe-parallelism-enhancements-requirements)
+32. [Decision Impact Classification & Gating Requirements](#32-decision-impact-classification--gating-requirements)
+33. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -1798,6 +1800,190 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-PROMPT-003a**: All 8 agent types (Researcher, PM, Architect, PE, Senior/Junior Engineer, TE, Custom) inject `IPromptTemplateService` via constructor and use templates for prompt generation.
 - **REQ-PROMPT-003b**: Every template call preserves the original hardcoded prompt as a `??` null-coalescing fallback, ensuring agents function even if template files are missing or corrupted.
 - **REQ-PROMPT-003c**: Template variables include all dynamic values that were previously embedded via string interpolation (tech stack, document content, issue details, etc.).
+
+---
+
+## 31. PE Parallelism Enhancements Requirements
+
+These requirements govern how the Principal Engineer validates and optimizes task parallelism during engineering planning.
+
+### REQ-PE-PAR-01: File Overlap Enforcement
+
+- **Requirement**: The Principal Engineer MUST validate that no two engineering tasks in the same wave own overlapping files (except explicitly SHARED files).
+- **Workflow**: After AI generates tasks, PE runs `DetectFileOverlaps()` which compares OwnedFiles across tasks in the same wave. Non-shared overlaps trigger AI-assisted repair via `ValidateAndRepairTaskPlanAsync()`.
+- **Validation**: File overlap count logged via `LogParallelismMetrics()`. Post-repair overlaps should be 0.
+
+**Scenario: File Overlap Detected and Repaired**
+1. AI generates 6 tasks; T2 and T4 both own `src/Services/AuthService.cs` but it is not marked SHARED
+2. `DetectFileOverlaps()` detects the overlap, returns overlap count = 1
+3. `ValidateAndRepairTaskPlanAsync()` invokes AI to reassign ownership or merge tasks
+4. Post-repair `DetectFileOverlaps()` returns overlap count = 0
+5. `LogParallelismMetrics()` logs the final overlap count
+
+### REQ-PE-PAR-02: Wave Scheduling Validation
+
+- **Requirement**: Tasks MUST be assigned to waves (W1, W2, W3+) based on dependency chains. At least 60% of non-foundation tasks should be in W1 for maximum parallelism.
+- **Workflow**: `ValidateWaves()` checks that task wave assignments are consistent with their dependencies. Tasks depending only on T1 must be in W1.
+- **Validation**: W1 percentage logged. Star topology (all tasks depend only on T1) is ideal.
+
+**Scenario: Wave Assignment Validation**
+1. AI generates tasks with dependencies: T2→T1, T3→T1, T4→T1, T5→T3, T6→T4
+2. `ValidateWaves()` assigns: T2, T3, T4 to W1; T5, T6 to W2
+3. W1 percentage = 3/5 non-foundation tasks = 60% — meets threshold
+4. Metrics logged: total=6, W1=3, W1%=60%
+
+### REQ-PE-PAR-03: Typed Dependencies
+
+- **Requirement**: Task dependencies SHOULD include dependency type annotations (e.g., `T1(files)`, `T3(api)`) to indicate the nature of the coupling.
+- **Workflow**: `ParseTypedDependencies()` extracts both plain dependency IDs and type annotations from the TASK line format.
+- **Validation**: Dependency types are preserved in `EngineeringTask.DependencyTypes` dictionary.
+
+**Scenario: Typed Dependency Parsing**
+1. AI generates task line: `TASK T5 | Auth Middleware | depends:T1(files),T3(api) | ...`
+2. `ParseTypedDependencies()` extracts: T1 with type "files", T3 with type "api"
+3. `EngineeringTask.DependencyTypes` contains: `{ "T1": "files", "T3": "api" }`
+
+### REQ-PE-PAR-04: Parallelism Assessment
+
+- **Requirement**: The PE MUST log parallelism metrics after task planning: total tasks, W1 count, W1 percentage, overlap count, shared file count.
+- **Workflow**: `LogParallelismMetrics()` computes and logs metrics. `AssessParallelismScore()` provides a qualitative assessment (Excellent/Good/Fair/Poor).
+- **Validation**: Metrics visible in agent logs. Score based on W1% and overlap count.
+
+**Scenario: Parallelism Score Assessment**
+1. Task plan has 8 tasks, 5 in W1, 0 overlaps, 2 shared files
+2. W1% = 5/7 = 71% (excluding foundation T1)
+3. `AssessParallelismScore()` returns "Excellent" (W1% > 70% and 0 overlaps)
+4. All metrics logged in structured format for dashboard consumption
+
+### REQ-PE-PAR-05: Wave-Aware Scaling
+
+- **Requirement**: When requesting additional engineers, the PE SHOULD consider wave boundaries. Engineers spawned for W2 tasks should only start after W1 tasks complete.
+- **Workflow**: `GetWaveReadyTasks()` returns tasks whose wave prerequisites are met. The assignment loop prioritizes wave-ready tasks.
+
+**Scenario: Wave-Aware Task Assignment**
+1. PE has 3 W1 tasks and 2 W2 tasks
+2. PE spawns 3 engineers for W1 tasks
+3. W1 tasks complete; `GetWaveReadyTasks()` now returns W2 tasks
+4. PE assigns W2 tasks to available engineers
+
+---
+
+## 32. Decision Impact Classification & Gating Requirements
+
+These requirements govern how agents classify decisions by impact level and gate significant decisions for human review.
+
+### REQ-DEC-01: Decision Impact Classification
+
+- **Requirement**: Agents MUST classify significant decisions by impact level using AI: XS (Extra Small), S (Small), M (Medium), L (Large), XL (Extra Large).
+- **Impact Scale**:
+  - **XS**: Cosmetic changes (CSS tweaks, comment fixes, formatting)
+  - **S**: Low-risk isolated changes (utility methods, config values, simple bug fixes)
+  - **M**: Moderate structural changes (refactoring classes, changing API signatures, adding dependencies)
+  - **L**: Significant architectural impact (new services/modules, database schema changes, core abstractions)
+  - **XL**: Project-defining changes (restructuring project layout, changing tech stacks, pivoting features)
+- **Workflow**: Agent calls `DecisionGateService.ClassifyAndGateDecisionAsync()` which uses an AI turn to classify impact level, extract rationale, alternatives, affected files, and risk assessment.
+- **Validation**: Decision logged in `IDecisionLog` with full metadata. Classification visible on dashboard Reasoning tab.
+
+**Scenario: Decision Classification**
+1. Architect proposes adding a new message broker service
+2. Agent calls `ClassifyAndGateDecisionAsync()` with decision description
+3. AI classifies as "L" — significant architectural impact (new service/module)
+4. Decision logged with rationale, alternatives, affected files, and risk assessment
+
+### REQ-DEC-02: Configurable Gate Levels
+
+- **Requirement**: The system MUST support configurable minimum gate levels. Only decisions at or above the configured level require human approval.
+- **Configuration**: `DecisionGating.MinimumGateLevel` in `appsettings.json`. Values: "XS", "S", "M", "L", "XL", "None" (disabled).
+  - "L" (default) gates L and XL decisions
+  - "M" gates M, L, and XL decisions
+  - "None" disables all gating (auto-approves everything)
+- **Workflow**: `DecisionGatingConfig.RequiresGate(level)` checks if the classified level meets or exceeds the threshold.
+- **Validation**: Decisions below threshold auto-approved; above threshold create gate notifications.
+
+**Scenario: Gate Level Filtering**
+1. MinimumGateLevel configured as "L"
+2. Agent classifies a decision as "M" (moderate) — auto-approved, agent continues
+3. Agent classifies a decision as "L" (large) — gate triggered, agent blocks for approval
+4. Agent classifies a decision as "XL" (extra large) — gate triggered, agent blocks for approval
+
+### REQ-DEC-03: Decision Plan Generation
+
+- **Requirement**: Gated decisions MUST include a structured implementation plan generated via an additional AI turn for human review.
+- **Plan Contents**: Summary, Implementation Steps, Files Affected, Risks & Mitigations, Rollback Strategy, Testing Approach.
+- **Configuration**: `DecisionGating.RequirePlanForGated` (default: true), `DecisionGating.MaxDecisionTurns` (default: 3).
+- **Workflow**: When `RequiresGate` is true and `RequirePlanForGated` is enabled, a second AI turn generates the plan before creating the gate notification.
+- **Validation**: Plan visible in dashboard Approvals tab decision view.
+
+**Scenario: Plan Generation for Gated Decision**
+1. Agent classifies decision as "XL" — gate required
+2. `RequirePlanForGated` is true — second AI turn generates implementation plan
+3. Plan includes: Summary, 5 Implementation Steps, 12 Files Affected, 3 Risks, Rollback Strategy, Testing Approach
+4. Gate notification created with full plan for human review on Approvals tab
+
+### REQ-DEC-04: Human Approval Workflow
+
+- **Requirement**: Gated decisions MUST block the agent until a human reviewer approves or rejects the decision.
+- **Workflow**: `WaitForDecisionAsync()` polls every 10 seconds until the decision is resolved. Timeout configurable via `DecisionGating.GateTimeoutMinutes` (default: 0 = no timeout). Timeout fallback: "auto-approve" or "block".
+- **Approval**: Human clicks Approve/Reject on dashboard Approvals tab with optional feedback text.
+- **Rejection**: Agent receives `DecisionStatus.Rejected` with `HumanFeedback`, logs reasoning event, stores feedback in memory, and either reworks or escalates.
+- **Validation**: Decision status transitions: Pending → Approved/Rejected. Gate notification resolved on approval/rejection.
+
+**Scenario: Decision Approval Flow**
+1. Agent classifies decision as "L", gate triggered
+2. Agent enters `WaitForDecisionAsync()` — polls every 10 seconds
+3. Human reviews decision + plan on Approvals tab, clicks Approve with feedback "Looks good, proceed"
+4. Agent receives Approved status, logs approval, continues execution
+
+**Scenario: Decision Rejection Flow**
+1. Agent classifies decision as "XL", gate triggered with plan
+2. Human reviews and clicks Reject with feedback "Too risky, consider alternative B instead"
+3. Agent receives Rejected status with feedback text
+4. Agent logs reasoning event, stores feedback in memory, attempts rework or escalates
+
+### REQ-DEC-05: Dashboard Decision UI
+
+- **Requirement**: The dashboard MUST display decision information in three locations:
+  1. **Reasoning Tab**: Event-type filter bar (All/Decisions/Planning/Generating/Assessing/Other). Decision events show impact badge, rationale, alternatives, affected files, risk, and plan details.
+  2. **Approvals Tab**: Pending gated decisions with full plan view. Approve/Reject buttons with feedback input field.
+  3. **Overview Page**: Decision summary stat card showing total decisions count and pending gated decision count.
+- **Workflow**: Dashboard polls `IDecisionLog` for decision data. Real-time updates via Timer-based polling.
+- **Validation**: All three dashboard locations render decision data correctly.
+
+**Scenario: Dashboard Decision Display**
+1. Agent logs 3 decisions: XS (auto-approved), M (auto-approved), L (gated, pending)
+2. Overview page shows: "3 total decisions, 1 pending"
+3. Reasoning tab shows all 3 with impact badges (XS green, M yellow, L orange)
+4. Approvals tab shows 1 pending L decision with full plan and Approve/Reject buttons
+
+### REQ-DEC-06: Agent Integration Points
+
+- **Requirement**: Decision gating MUST be integrated at key decision points across agents:
+  - **PM Agent**: Team composition decisions (category: TeamComposition)
+  - **Architect Agent**: Architecture design decisions (category: Architecture)
+  - **Principal Engineer**: Task decomposition and wave scheduling (category: TaskPlanning)
+  - **Senior/Junior Engineers**: Available via `DecisionGate` protected field in `EngineerAgentBase`
+  - **Test Engineer**: Constructor wired, available for test strategy decisions
+- **Workflow**: Each agent checks `_decisionGate != null` before calling. Optional parameter ensures backward compatibility.
+- **Validation**: All 428 existing tests pass with no regressions. Agents without `DecisionGateService` in DI continue to work unchanged.
+
+**Scenario: Agent Decision Integration**
+1. PM decides team needs 3 Senior Engineers — calls `ClassifyAndGateDecisionAsync()` with category "TeamComposition"
+2. AI classifies as "M" — below "L" gate threshold, auto-approved
+3. Architect proposes microservices architecture — calls with category "Architecture"
+4. AI classifies as "XL" — gate triggered, Architect blocks until human approves
+
+### REQ-DEC-07: Thread-Safe Decision Storage
+
+- **Requirement**: The decision log MUST be thread-safe for concurrent agent access with configurable limits.
+- **Implementation**: `DecisionLog` uses `ConcurrentDictionary` with per-agent lists and `lock(list)` for thread safety.
+- **Limits**: Max 200 decisions per agent, max 2000 total. Oldest decisions evicted when limits reached.
+- **Events**: `OnDecisionChanged` event fires on new decisions and status updates for dashboard subscriptions.
+
+**Scenario: Concurrent Decision Logging**
+1. Three agents simultaneously log decisions
+2. Each agent's decisions stored in separate list within `ConcurrentDictionary`
+3. Per-agent list access protected by `lock(list)`
+4. Dashboard receives `OnDecisionChanged` events for each new decision
 
 ---
 
