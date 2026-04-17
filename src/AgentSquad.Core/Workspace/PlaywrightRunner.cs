@@ -14,9 +14,99 @@ public class PlaywrightRunner
     private readonly ILogger<PlaywrightRunner> _logger;
     private static readonly HttpClient _httpClient = new() { Timeout = TimeSpan.FromSeconds(5) };
 
+    /// <summary>Whether Playwright is validated and ready (browsers installed, Chromium launches).</summary>
+    public bool IsReady { get; private set; }
+
+    /// <summary>Human-readable reason when IsReady is false.</summary>
+    public string? NotReadyReason { get; private set; }
+
+    /// <summary>Last time a successful validation occurred.</summary>
+    public DateTime? LastValidatedUtc { get; private set; }
+
+    /// <summary>Event raised when IsReady changes. Dashboard subscribes for live updates.</summary>
+    public event Action<bool>? ReadyStateChanged;
+
     public PlaywrightRunner(ILogger<PlaywrightRunner> logger)
     {
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Validate that Playwright is operational: browsers exist and Chromium can launch.
+    /// Sets IsReady/NotReadyReason. Call at startup and periodically.
+    /// </summary>
+    public async Task<bool> ValidateAsync(WorkspaceConfig config, string? workspacePath = null, CancellationToken ct = default)
+    {
+        var previousState = IsReady;
+        try
+        {
+            var browsersPath = config.GetPlaywrightBrowsersPath();
+
+            // Step 1: Check browser binary exists
+            if (!IsBrowserExecutablePresent(browsersPath))
+            {
+                if (workspacePath is not null)
+                {
+                    _logger.LogInformation("Playwright browsers not found — attempting install to {Path}", browsersPath);
+                    await EnsureBrowsersInstalledAsync(config, workspacePath, ct);
+
+                    if (!IsBrowserExecutablePresent(browsersPath))
+                    {
+                        SetNotReady("Browser install failed — Chromium executable not found after install attempt");
+                        return false;
+                    }
+                }
+                else
+                {
+                    SetNotReady($"Chromium not found at {browsersPath}");
+                    return false;
+                }
+            }
+
+            // Step 2: Smoke test — can Chromium actually launch?
+            Environment.SetEnvironmentVariable("PLAYWRIGHT_BROWSERS_PATH", browsersPath);
+            var playwright = await Microsoft.Playwright.Playwright.CreateAsync();
+            try
+            {
+                var browser = await playwright.Chromium.LaunchAsync(new Microsoft.Playwright.BrowserTypeLaunchOptions
+                {
+                    Headless = true,
+                    Timeout = 10000 // 10s — if it doesn't launch in 10s, something is broken
+                });
+                await browser.CloseAsync();
+            }
+            finally
+            {
+                playwright.Dispose();
+            }
+
+            // All good
+            IsReady = true;
+            NotReadyReason = null;
+            LastValidatedUtc = DateTime.UtcNow;
+            _logger.LogInformation("Playwright validated ✓ — Chromium launches successfully from {Path}", browsersPath);
+
+            if (!previousState)
+                ReadyStateChanged?.Invoke(true);
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            SetNotReady($"Chromium launch failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private void SetNotReady(string reason)
+    {
+        var wasReady = IsReady;
+        IsReady = false;
+        NotReadyReason = reason;
+        _logger.LogWarning("Playwright NOT ready: {Reason}", reason);
+
+        if (wasReady)
+            ReadyStateChanged?.Invoke(false);
     }
 
     /// <summary>
@@ -371,7 +461,7 @@ public class PlaywrightRunner
 
                 // Wait for app readiness
                 var ready = await WaitForAppReadyAsync(
-                    baseUrl, config.AppStartupTimeoutSeconds, ct);
+                    baseUrl, config.AppStartupTimeoutSeconds, ct, appProcess);
 
                 if (!ready)
                 {
@@ -385,7 +475,7 @@ public class PlaywrightRunner
                         _logger.LogInformation(
                             "Derived port {DerivedUrl} not responding, trying configured base URL {ConfiguredUrl}",
                             baseUrl, configuredUrl);
-                        ready = await WaitForAppReadyAsync(configuredUrl, 15, ct);
+                        ready = await WaitForAppReadyAsync(configuredUrl, 5, ct);
                         if (ready)
                         {
                             _logger.LogInformation(
@@ -439,7 +529,7 @@ public class PlaywrightRunner
                             appProcess = proc2;
                             var retryUrl = detectedUrl2 ?? baseUrl;
                             if (detectedUrl2 is not null) { baseUrl = detectedUrl2; envVars["BASE_URL"] = baseUrl; }
-                            ready = await WaitForAppReadyAsync(retryUrl, config.AppStartupTimeoutSeconds, ct);
+                            ready = await WaitForAppReadyAsync(retryUrl, config.AppStartupTimeoutSeconds, ct, appProcess);
                         }
                         else
                         {
@@ -652,8 +742,8 @@ public class PlaywrightRunner
         _logger.LogInformation("Started app under test: {Command} (PID {Pid})",
             appCommand, process.Id);
 
-        // Poll for URL detection — dotnet run includes compilation so it can take 30s+
-        for (var i = 0; i < 60 && detectedUrl is null && !process.HasExited; i++)
+        // Poll for URL detection — dotnet run includes compilation so it can take 15-20s
+        for (var i = 0; i < 20 && detectedUrl is null && !process.HasExited; i++)
             await Task.Delay(1000, ct);
 
         if (detectedUrl is not null)
@@ -675,7 +765,7 @@ public class PlaywrightRunner
             }
             else
             {
-                _logger.LogDebug("No listening URL detected from process output after 60s");
+                _logger.LogDebug("No listening URL detected from process output after 20s");
             }
         }
 
@@ -969,16 +1059,26 @@ public class PlaywrightRunner
 
     /// <summary>
     /// Poll the base URL until it returns HTTP 200 or timeout expires.
+    /// If a process is provided, bail immediately when it exits (crash/build error).
     /// </summary>
     internal async Task<bool> WaitForAppReadyAsync(
         string baseUrl,
         int timeoutSeconds,
-        CancellationToken ct)
+        CancellationToken ct,
+        Process? appProcess = null)
     {
         var deadline = DateTime.UtcNow.AddSeconds(timeoutSeconds);
 
         while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
         {
+            // Fast-fail: if the process already exited, no point polling
+            if (appProcess is not null && appProcess.HasExited)
+            {
+                _logger.LogWarning("App process exited with code {Code} during readiness poll — aborting wait",
+                    appProcess.ExitCode);
+                return false;
+            }
+
             try
             {
                 var response = await _httpClient.GetAsync(baseUrl, ct);
@@ -1323,7 +1423,7 @@ public class PlaywrightRunner
                 screenshotUrl = detectedUrl;
             }
 
-            var ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct);
+            var ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct, appProcess);
 
             if (!ready)
             {
@@ -1352,7 +1452,7 @@ public class PlaywrightRunner
                         var (proc2, detectedUrl2) = await StartAppUnderTestAsync(workspacePath, config, envVars, ct);
                         appProcess = proc2;
                         if (detectedUrl2 is not null) screenshotUrl = detectedUrl2;
-                        ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct);
+                        ready = await WaitForAppReadyAsync(screenshotUrl, config.AppStartupTimeoutSeconds, ct, appProcess);
                     }
                 }
 

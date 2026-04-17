@@ -6609,6 +6609,34 @@ a.ntl-detail-pr-num:hover { text-decoration: underline; color: #79c0ff; }
     animation: rate-pulse 1s ease-in-out infinite;
 }
 
+/* Playwright status badge */
+.playwright-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.75rem;
+    border-radius: 16px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: 1px solid transparent;
+    transition: all var(--transition-fast);
+    cursor: default;
+}
+.playwright-badge-icon { font-size: 0.7rem; }
+.playwright-badge-text { white-space: nowrap; }
+.playwright-badge.pw-ready {
+    background: rgba(63, 185, 80, 0.1);
+    color: var(--accent-green);
+    border-color: rgba(63, 185, 80, 0.2);
+}
+.playwright-badge.pw-not-ready {
+    background: rgba(248, 81, 73, 0.15);
+    color: var(--accent-red);
+    border-color: rgba(248, 81, 73, 0.3);
+    animation: rate-pulse 2s ease-in-out infinite;
+}
+
 @keyframes rate-pulse {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.4; }

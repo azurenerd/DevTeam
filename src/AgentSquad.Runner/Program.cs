@@ -69,6 +69,7 @@ builder.Services.AddSingleton<ConflictResolver>();
 builder.Services.AddSingleton<BuildRunner>();
 builder.Services.AddSingleton<TestRunner>();
 builder.Services.AddSingleton<PlaywrightRunner>();
+builder.Services.AddHostedService<PlaywrightHealthService>();
 builder.Services.AddSingleton<TestStrategyAnalyzer>();
 builder.Services.AddSingleton<AgentSquad.Core.Metrics.BuildTestMetrics>();
 
@@ -201,6 +202,9 @@ api.MapGet("/health/deadlock", (DashboardDataService svc) =>
 
 api.MapGet("/health/diagnostics", (string? agentId, bool? compliant, int? limit, DashboardDataService svc) =>
     Results.Ok(svc.GetDiagnosticHistory(agentId, compliant, limit ?? 200)));
+
+api.MapGet("/health/playwright", (PlaywrightRunner pw) =>
+    Results.Ok(new { pw.IsReady, pw.NotReadyReason, pw.LastValidatedUtc }));
 
 api.MapGet("/models", (DashboardDataService svc) =>
     Results.Ok(svc.GetAvailableModels()));

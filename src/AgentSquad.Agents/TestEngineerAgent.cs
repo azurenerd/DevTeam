@@ -959,28 +959,45 @@ public class TestEngineerAgent : AgentBase
             var uiCommand = wsConfig.UITestCommand;
             if (!string.IsNullOrWhiteSpace(uiCommand) && _playwrightRunner is not null)
             {
-                try
+                if (!_playwrightRunner.IsReady)
                 {
-                    await _playwrightRunner.EnsureBrowsersInstalledAsync(_config.Workspace, _workspace!.RepoPath, ct);
+                    Logger.LogWarning("TestEngineer: Playwright not ready ({Reason}), skipping UI tests for PR #{Number}",
+                        _playwrightRunner.NotReadyReason, pr.Number);
+                    tierResults.Add(new TestResult
+                    {
+                        Success = false,
+                        Output = $"Playwright not ready: {_playwrightRunner.NotReadyReason}",
+                        Passed = 0, Failed = 0, Skipped = 0,
+                        Duration = TimeSpan.Zero,
+                        Tier = TestTier.UI,
+                        FailureDetails = [$"Playwright not ready: {_playwrightRunner.NotReadyReason}. Health service will retry automatically."]
+                    });
+                }
+                else
+                {
+                    try
+                    {
+                        await _playwrightRunner.EnsureBrowsersInstalledAsync(_config.Workspace, _workspace!.RepoPath, ct);
 
                     var uiResult = await _playwrightRunner.RunUITestsAsync(
                         _workspace.RepoPath, _config.Workspace,
                         uiCommand,
                         wsConfig.UITestTimeoutSeconds, ct);
                     tierResults.Add(uiResult);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogWarning(ex, "TestEngineer: UI test execution failed for PR #{Number}", pr.Number);
-                    tierResults.Add(new TestResult
+                    }
+                    catch (Exception ex)
                     {
-                        Success = false,
-                        Output = $"UI test execution error: {ex.Message}",
-                        Passed = 0, Failed = 0, Skipped = 0,
-                        Duration = TimeSpan.Zero,
-                        Tier = TestTier.UI,
-                        FailureDetails = [ex.Message]
-                    });
+                        Logger.LogWarning(ex, "TestEngineer: UI test execution failed for PR #{Number}", pr.Number);
+                        tierResults.Add(new TestResult
+                        {
+                            Success = false,
+                            Output = $"UI test execution error: {ex.Message}",
+                            Passed = 0, Failed = 0, Skipped = 0,
+                            Duration = TimeSpan.Zero,
+                            Tier = TestTier.UI,
+                            FailureDetails = [ex.Message]
+                        });
+                    }
                 }
             }
         }
@@ -3248,6 +3265,22 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             var allPriorPassed = tierResults.All(r => r.Success);
             if (allPriorPassed && wsConfig.EnableUITests && _playwrightRunner is not null && wsConfig.UITestCommand is not null)
             {
+                if (!_playwrightRunner.IsReady)
+                {
+                    Logger.LogWarning("TestEngineer: Playwright not ready ({Reason}), skipping UI tests",
+                        _playwrightRunner.NotReadyReason);
+                    tierResults.Add(new TestResult
+                    {
+                        Success = false,
+                        Output = $"Playwright not ready: {_playwrightRunner.NotReadyReason}",
+                        Passed = 0, Failed = 0, Skipped = 0,
+                        Duration = TimeSpan.Zero,
+                        Tier = TestTier.UI,
+                        FailureDetails = [$"Playwright not ready: {_playwrightRunner.NotReadyReason}. Health service will retry automatically."]
+                    });
+                }
+                else
+                {
                 try
                 {
                     // Ensure Playwright browsers are installed
@@ -3271,6 +3304,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                         Tier = TestTier.UI,
                         FailureDetails = [ex.Message]
                     });
+                }
                 }
             }
 

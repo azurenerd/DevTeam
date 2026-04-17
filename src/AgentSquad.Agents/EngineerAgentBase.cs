@@ -2421,6 +2421,13 @@ public abstract class EngineerAgentBase : AgentBase
         if (ScreenshotRunner is null || Workspace is null || !Config.Workspace.CaptureScreenshots)
             return;
 
+        if (!ScreenshotRunner.IsReady)
+        {
+            Logger.LogDebug("Playwright not ready, skipping screenshot for PR #{PrNumber}: {Reason}",
+                pr.Number, ScreenshotRunner.NotReadyReason);
+            return;
+        }
+
         try
         {
             Logger.LogDebug("{Role} {Name} capturing UI screenshot for PR #{PrNumber} step {Step}/{Total}",
