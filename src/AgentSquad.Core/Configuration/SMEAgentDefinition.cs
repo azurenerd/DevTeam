@@ -36,6 +36,13 @@ public record SMEAgentDefinition
     /// <summary>Message types this agent should subscribe to</summary>
     public List<string> SubscribeTo { get; init; } = [];
 
+    /// <summary>
+    /// Which base agent template to use when spawning this SME.
+    /// "engineer" → SpecialistEngineerAgent (full rework/build/test capabilities).
+    /// "custom" → SmeAgent (lightweight, no engineering loop). Default for backward compat.
+    /// </summary>
+    public string BaseTemplate { get; init; } = "custom";
+
     /// <summary>Agent that created this definition (for audit/lineage)</summary>
     public string? CreatedByAgentId { get; init; }
 

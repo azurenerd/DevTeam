@@ -20,6 +20,12 @@ public record AgentIdentity
     /// </summary>
     public string? CustomAgentName { get; init; }
 
+    /// <summary>
+    /// Skill/domain capabilities for this agent (e.g., "frontend", "react", "azure", "database").
+    /// Used by the leader SE for skill-based task assignment. Empty means generalist.
+    /// </summary>
+    public List<string> Capabilities { get; init; } = [];
+
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
     public string? AssignedPullRequest { get; set; }
 }

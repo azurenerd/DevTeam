@@ -269,14 +269,23 @@ public class AgentSpawnManager
             return null;
         }
 
+        var isEngineerBased = definition.BaseTemplate?.Equals("engineer", StringComparison.OrdinalIgnoreCase) == true;
+        var agentRole = isEngineerBased ? AgentRole.SoftwareEngineer : AgentRole.Custom;
+
+        // For engineer-based specialists, count against SoftwareEngineer pool for rank
+        var rankBase = isEngineerBased
+            ? _registry.GetAgentsByRole(AgentRole.SoftwareEngineer).Count()
+            : existingCount;
+
         var identity = new AgentIdentity
         {
             Id = $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}"[..Math.Min(48, $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}".Length)],
             DisplayName = definition.RoleName,
-            Role = AgentRole.Custom,
+            Role = agentRole,
             ModelTier = definition.ModelTier,
             CustomAgentName = $"sme:{definition.DefinitionId}",
-            Rank = existingCount
+            Rank = rankBase,
+            Capabilities = definition.Capabilities.ToList()
         };
 
         try

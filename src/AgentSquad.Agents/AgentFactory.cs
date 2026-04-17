@@ -34,15 +34,17 @@ public class AgentFactory : IAgentFactory
     }
 
     /// <summary>
-    /// Creates an SME agent from a definition. The definition is passed alongside the identity
-    /// to the DI container for constructor injection.
+    /// Creates an SME agent from a definition. Routes to SpecialistEngineerAgent for
+    /// engineer-based templates (full rework/build/test) or SmeAgent for custom templates.
     /// </summary>
     public IAgent CreateSme(AgentIdentity identity, SMEAgentDefinition definition)
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(definition);
 
-        return ActivatorUtilities.CreateInstance<SmeAgent>(_serviceProvider, identity, definition);
+        return definition.BaseTemplate?.Equals("engineer", StringComparison.OrdinalIgnoreCase) == true
+            ? ActivatorUtilities.CreateInstance<SpecialistEngineerAgent>(_serviceProvider, identity, definition)
+            : ActivatorUtilities.CreateInstance<SmeAgent>(_serviceProvider, identity, definition);
     }
 
     private T CreateWithDI<T>(AgentIdentity identity) where T : AgentBase
