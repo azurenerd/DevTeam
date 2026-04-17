@@ -242,20 +242,13 @@ public class TestEngineerAgent : AgentBase
                 await RecoverTestPRsAsync(ct);
 
                 // Priority 3: Scan for PRs to test (mode-dependent)
-                var scanStepId = _taskTracker.BeginStep(Identity.Id, "te-loop", "Wait for PRs",
-                    isInline ? "Scanning approved PRs for inline testing" : "Scanning merged PRs for test coverage",
-                    Identity.ModelTier);
                 if (isInline)
                     await ScanApprovedPRsForInlineTestingAsync(ct);
                 else
                     await ScanMergedPRsForTestingAsync(ct);
-                _taskTracker.CompleteStep(scanStepId);
 
                 // Check if all code-bearing PRs have been tested → signal completion
-                var reportStepId = _taskTracker.BeginStep(Identity.Id, "te-loop", "Report results",
-                    "Checking test coverage completeness", Identity.ModelTier);
                 await CheckTestCoverageCompleteAsync(ct);
-                _taskTracker.CompleteStep(reportStepId);
 
                 await RefreshDiagnosticWithMemoryAsync(ct);
 

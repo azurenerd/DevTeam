@@ -223,10 +223,14 @@ else
                                 <div class="step-list">
                                     @foreach (var step in group.Steps)
                                     {
-                                        <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
+                                            <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
                                             <span class="step-icon">@GetStepIcon(step.Status)</span>
                                             <span class="step-name @(step.Status == AgentTaskStepStatus.Pending ? "step-name-pending" : "")">@step.Name</span>
                                             <div class="step-meta">
+                                                @if (!string.IsNullOrEmpty(step.ModelUsed) && step.LlmCallCount > 0)
+                                                {
+                                                    <span class="step-model-badge">@step.ModelUsed</span>
+                                                }
                                                 @if (step.Elapsed.HasValue)
                                                 {
                                                     <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
