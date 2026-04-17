@@ -323,9 +323,12 @@ public class AgentTeamComposer
 
     private static string ToSlug(string name)
     {
-        return name.ToLowerInvariant()
-            .Replace(' ', '-')
-            .Replace('_', '-');
+        // Remove URL-unsafe characters that break routing (e.g., "CSS/SVG" → "css-svg")
+        return System.Text.RegularExpressions.Regex.Replace(
+            name.ToLowerInvariant().Replace(' ', '-').Replace('_', '-'),
+            @"[^a-z0-9\-]", "-")
+            .Replace("--", "-")
+            .Trim('-');
     }
 }
 
