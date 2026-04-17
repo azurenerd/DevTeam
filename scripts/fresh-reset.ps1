@@ -24,7 +24,7 @@
     then falls back to appsettings.json.
 
 .PARAMETER PreserveFiles
-    Comma-separated list of files to keep in the repo. Default: OriginalDesignConcept.html,.gitignore
+    Comma-separated list of files to keep in the repo. Default: OriginalDesignConcept.html
 
 .PARAMETER SkipGitHub
     Skip GitHub API operations (issues, PRs). Useful when only local cleanup is needed.
@@ -37,7 +37,7 @@
 param(
     [string]$GitHubRepo = "azurenerd/ReportingDashboard",
     [string]$GitHubToken = "",
-    [string]$PreserveFiles = "OriginalDesignConcept.html,.gitignore",
+    [string]$PreserveFiles = "OriginalDesignConcept.html",
     [string]$WorkspaceRoot = "C:\Agents",
     [string]$RunnerDir = "$PSScriptRoot\..\src\AgentSquad.Runner",
     [switch]$SkipGitHub

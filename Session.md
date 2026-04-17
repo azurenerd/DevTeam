@@ -33,8 +33,8 @@ Before starting a new agent workflow run, fully reset the target GitHub repo:
 # Or with explicit PAT
 .\scripts\fresh-reset.ps1 -GitHubToken $pat
 
-# Preserve the HTML design reference (default preserves .gitignore + OriginalDesignConcept.html)
-.\scripts\fresh-reset.ps1 -PreserveFiles "OriginalDesignConcept.html,.gitignore"
+# Preserve the HTML design reference (scaffold PR creates .gitignore)
+.\scripts\fresh-reset.ps1 -PreserveFiles "OriginalDesignConcept.html"
 ```
 
 ### Option B: Use reset-runner script (reads PAT from user-secrets automatically)
@@ -74,7 +74,7 @@ Write-Host "Open issues+PRs: $total"  # MUST be 0
 $branches = Invoke-RestMethod "https://api.github.com/repos/$repo/branches?per_page=100" -Headers $headers
 Write-Host "Branches: $($branches.Count) ($($branches.name -join ', '))"  # MUST be 1 (main)
 
-# Files: must only be preserved files (.gitignore, OriginalDesignConcept.html)
+# Files: must only be preserved files (OriginalDesignConcept.html — .gitignore created by scaffold PR)
 $contents = Invoke-RestMethod "https://api.github.com/repos/$repo/contents?ref=main" -Headers $headers
 Write-Host "Repo files: $($contents.name -join ', ')"  # MUST only show preserved files
 

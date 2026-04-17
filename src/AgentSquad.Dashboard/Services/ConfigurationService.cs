@@ -416,13 +416,6 @@ public sealed class ConfigurationService : IConfigurationService
                 filesToKeep = files.Where(f => IsFilePreserved(f, preserveFiles)).ToList();
             }
 
-            // Always preserve .gitignore
-            if (!filesToKeep.Any(f => f.Equals(".gitignore", StringComparison.OrdinalIgnoreCase)))
-            {
-                if (files.Any(f => f.Equals(".gitignore", StringComparison.OrdinalIgnoreCase)))
-                    filesToKeep.Add(".gitignore");
-            }
-
             try
             {
                 await _github.CleanRepoToBaselineAsync(filesToKeep, "Clean slate reset via Dashboard", config.DefaultBranch, ct);
