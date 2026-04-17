@@ -537,17 +537,25 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             "- Create ALL service interfaces (e.g., IDataService, IAuthService) as real interfaces with method signatures\n" +
             "- Create the application entry point (Program.cs) with ALL DI registrations as stubs " +
             "(e.g., `builder.Services.AddSingleton<IMyService, MyService>();` even if MyService is a placeholder)\n" +
-            "- Create stub/skeleton component files for EVERY major UI component or page " +
-            "(with placeholder content like `<!-- TODO: Implement header section -->`)\n" +
+            "- Create stub/skeleton component files for EVERY major UI component or page. " +
+            "**CRITICAL FOR WEB/UI PROJECTS**: Each placeholder component MUST be VISUALLY DISTINCT — " +
+            "use colored backgrounds (#f0f0f0, #e8f4fd, #fef3cd, etc.), visible borders (1px solid #ccc), " +
+            "padding, and large bold label text (e.g., '📊 Heatmap Component — Placeholder'). " +
+            "A completely blank white page means the scaffold FAILED. " +
+            "The goal is that when you take a screenshot, every section is clearly visible with its name.\n" +
             "- Create the global CSS file with the full layout structure and clearly marked section boundaries " +
-            "(e.g., `/* === HEADER STYLES === */`, `/* === FOOTER STYLES === */`)\n" +
+            "(e.g., `/* === HEADER STYLES === */`, `/* === FOOTER STYLES === */`). " +
+            "Include a `.placeholder` CSS class with: background-color: #f0f4f8; border: 2px dashed #94a3b8; " +
+            "border-radius: 8px; padding: 2rem; text-align: center; font-size: 1.2rem; color: #475569;\n" +
             "- Create sample data files (e.g., data.json) that EXACTLY match the data model records/classes you define. " +
             "Every property in the C# record must have a corresponding JSON field with the correct casing and structure. " +
             "If DashboardData has a 'milestoneStreams' property of type List<MilestoneStream>, the JSON must have 'milestoneStreams' as an array of matching objects. " +
             "A schema mismatch between data.json and the data model will cause runtime validation errors.\n" +
             "- Create configuration files (launchSettings.json, appsettings.json) with correct ports and settings\n\n" +
             "The goal: after T1 merges, `dotnet build` (or equivalent) succeeds, `dotnet run` starts the app, " +
-            "and the app renders a working shell with placeholder content. " +
+            "and the app renders a working shell with VISUALLY DISTINCT placeholder sections — " +
+            "colored backgrounds, dashed borders, and clear labels for every component area. " +
+            "A Playwright screenshot of the running app should show a clear grid/layout of labeled sections, NOT a blank white page. " +
             "Every subsequent task only FILLS IN existing placeholders — it never creates the skeleton.\n\n" +
 
             "### T1 owns ALL cross-cutting files exclusively:\n" +

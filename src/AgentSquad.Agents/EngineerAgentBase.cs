@@ -1160,7 +1160,16 @@ public abstract class EngineerAgentBase : AgentBase
                 ? "GITIGNORE RULE: If the project does not already have a .gitignore, create one as your FIRST file. " +
                   "Include ALL standard ignores for the project's technology stack (e.g., bin/obj for .NET, " +
                   "node_modules for Node.js, __pycache__ for Python, target for Rust/Java, etc.). " +
-                  "This prevents build artifacts from being committed.\n\n"
+                  "This prevents build artifacts from being committed.\n\n" +
+                  "VISUAL PLACEHOLDER RULE (WEB/UI PROJECTS): Every stub/placeholder component MUST be " +
+                  "VISUALLY DISTINCT when rendered. Use colored backgrounds (#f0f4f8, #e8f4fd, #fef3cd), " +
+                  "dashed borders (2px dashed #94a3b8), padding (2rem), and large bold label text " +
+                  "(e.g., '📊 Heatmap Component — Placeholder'). " +
+                  "Add a `.placeholder` CSS class: { background: #f0f4f8; border: 2px dashed #94a3b8; " +
+                  "border-radius: 8px; padding: 2rem; text-align: center; font-size: 1.2rem; color: #475569; " +
+                  "min-height: 200px; display: flex; align-items: center; justify-content: center; }. " +
+                  "Apply this class to every placeholder component. A Playwright screenshot of the scaffold " +
+                  "MUST show a clear grid of labeled, colored sections — NEVER a blank white page.\n\n"
                 : "") +
             "DEPENDENCY RULE: Before using ANY external library, package, or framework, check the project's " +
             "dependency manifest (e.g., .csproj, package.json, requirements.txt, Cargo.toml, go.mod, pom.xml, etc.). " +
