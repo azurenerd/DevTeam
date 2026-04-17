@@ -763,15 +763,19 @@ public class TestEngineerAgent : AgentBase
     private async Task<bool> AddInlineTestsViaWorkspaceAsync(
         AgentPullRequest pr, IReadOnlyList<string> codeFilePaths, CancellationToken ct)
     {
+        try
+        {
         var wsConfig = _config.Workspace;
 
         // --- Phase 1: Sync workspace to the PR's branch ---
+        LogActivity("testing", "🔍 Checking out PR branch");
         UpdateStatus(AgentStatus.Working, $"Checking out PR #{pr.Number} branch");
         await _workspace!.SyncWithMainAsync(ct);
         await _workspace.CheckoutBranchAsync(pr.HeadBranch, ct);
 
         // --- Phase 2: Verify the PR's code actually builds ---
         // If the base code doesn't build, there's no point adding tests to it
+        LogActivity("testing", "⏳ Verifying PR base code builds");
         UpdateStatus(AgentStatus.Working, $"Verifying PR #{pr.Number} base build");
         var baseBuild = await _buildRunner!.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
@@ -828,6 +832,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // --- Phase 3: Read source files locally (faster than API, no rate limit) ---
+        LogActivity("testing", "📋 Reading source files from PR");
         UpdateStatus(AgentStatus.Working, $"Reading source files from PR #{pr.Number}");
         var sourceFiles = new Dictionary<string, string>();
         foreach (var filePath in codeFilePaths)
@@ -863,6 +868,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // --- Phase 4: Generate test code via AI ---
+        LogActivity("testing", "🤖 Calling AI to generate test code");
         UpdateStatus(AgentStatus.Working, $"Generating tests for PR #{pr.Number} ({sourceFiles.Count} files)");
         var existingTests = await DiscoverExistingTestsAsync(sourceFiles.Keys.ToList(), ct);
         var testOutput = await GenerateTestCodeAsync(pr, sourceFiles, existingTests, ct);
@@ -893,6 +899,7 @@ public class TestEngineerAgent : AgentBase
         await AddTestProjectsToSolutionAsync(testFiles, ct);
 
         // --- Phase 6: Build test code with AI fix retry loop ---
+        LogActivity("testing", "🧪 Building generated test code");
         UpdateStatus(AgentStatus.Working, $"Building tests for PR #{pr.Number}");
         var buildResult = await _buildRunner.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
@@ -921,6 +928,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // --- Phase 7: Run tests by tier ---
+        LogActivity("testing", "🧪 Running test suites");
         UpdateStatus(AgentStatus.Working, $"Running tests for PR #{pr.Number}");
         var tierResults = new List<TestResult>();
 
@@ -1063,6 +1071,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // --- Phase 9: Commit and push to the PR's branch ---
+        LogActivity("testing", "📌 Pushing test results to PR branch");
         UpdateStatus(AgentStatus.Working, $"Pushing tests to PR #{pr.Number}");
         await _workspace.CommitAsync($"test: add tests for PR #{pr.Number}", ct);
         var pushed = true;
@@ -1130,6 +1139,29 @@ public class TestEngineerAgent : AgentBase
         UpdateStatus(AgentStatus.Idle,
             $"Tests added to PR #{pr.Number} — awaiting PE merge");
         return true;
+
+        } // end try
+        catch (OperationCanceledException) { throw; }
+        catch (Exception ex)
+        {
+            Logger.LogError(ex,
+                "TestEngineer: Unexpected error adding tests to PR #{Number} — applying tests-added label to unblock pipeline",
+                pr.Number);
+            try
+            {
+                await _github.AddPullRequestCommentAsync(pr.Number,
+                    $"❌ **Test Engineer:** Encountered an internal error while adding tests. " +
+                    $"Error: {ex.GetType().Name}: {ex.Message}\n\n" +
+                    "The PR can still be merged without automated tests.", ct);
+                await ApplyTestsAddedLabelAsync(pr, ct);
+            }
+            catch (Exception labelEx)
+            {
+                Logger.LogError(labelEx,
+                    "TestEngineer: Also failed to apply tests-added label for PR #{Number}", pr.Number);
+            }
+            return true; // Handled — don't leave PR stuck
+        }
     }
 
     /// <summary>
@@ -1565,6 +1597,7 @@ public class TestEngineerAgent : AgentBase
             try
             {
                 Logger.LogInformation("No test screenshots found — attempting standalone screenshot capture for PR #{PrNumber}", pr.Number);
+                LogActivity("screenshot", $"📸 Attempting standalone screenshot capture for PR #{pr.Number}");
                 var screenshotBytes = await _playwrightRunner.CaptureAppScreenshotAsync(
                     _workspace.RepoPath, _config.Workspace, ct);
 
@@ -1585,16 +1618,19 @@ public class TestEngineerAgent : AgentBase
                         sb.AppendLine("_Standalone screenshot captured by Test Engineer_");
                         sb.AppendLine();
                         Logger.LogInformation("Posted standalone screenshot for PR #{PrNumber}", pr.Number);
+                        LogActivity("screenshot", $"✅ Screenshot captured and uploaded for PR #{pr.Number} ({screenshotBytes.Length} bytes)");
                     }
                 }
                 else
                 {
                     Logger.LogDebug("Standalone screenshot capture returned no data for PR #{PrNumber}", pr.Number);
+                    LogActivity("screenshot", $"⚠️ Screenshot capture returned no data for PR #{pr.Number}");
                 }
             }
             catch (Exception ex)
             {
                 Logger.LogDebug(ex, "Standalone screenshot capture failed for PR #{PrNumber}", pr.Number);
+                LogActivity("screenshot", $"❌ Screenshot capture failed for PR #{pr.Number}: {ex.Message}");
             }
         }
 

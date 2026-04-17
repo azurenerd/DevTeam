@@ -82,12 +82,18 @@ internal sealed partial class EngineeringTaskIssueManager
         foreach (var task in tasks)
         {
             var body = BuildIssueBody(task);
+            var validatedBody = IssueBodyValidator.ValidateAndClean(body, task.Name, _logger);
+            if (validatedBody is null)
+            {
+                _logger.LogWarning("Skipping task {TaskId} — issue body failed validation", task.Id);
+                continue;
+            }
             var labels = new[] { TaskLabel, $"complexity:{task.Complexity.ToLowerInvariant()}", StatusPending };
 
             try
             {
                 var issue = await _github.CreateIssueAsync(
-                    $"[{task.Id}] {task.Name}", body, labels, ct);
+                    $"[{task.Id}] {task.Name}", validatedBody, labels, ct);
 
                 var updatedTask = task with
                 {

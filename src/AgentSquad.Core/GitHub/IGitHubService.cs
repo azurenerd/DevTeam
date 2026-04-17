@@ -125,6 +125,12 @@ public interface IGitHubService
     Task<IReadOnlyList<ReviewThread>> GetPullRequestReviewThreadsAsync(int prNumber, CancellationToken ct = default);
 
     /// <summary>
+    /// Reply to a review comment and optionally resolve the thread.
+    /// Used by reviewers to close threads after rework addresses the feedback.
+    /// </summary>
+    Task ReplyAndResolveReviewThreadAsync(int prNumber, long commentId, string nodeId, string replyBody, CancellationToken ct = default);
+
+    /// <summary>
     /// Get the timestamps of all commits on a PR branch.
     /// Used by reviewers to detect whether new commits were pushed since the last review.
     /// </summary>

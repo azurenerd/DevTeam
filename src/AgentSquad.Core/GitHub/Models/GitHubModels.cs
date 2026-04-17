@@ -82,6 +82,8 @@ public record InlineReviewComment
 public record ReviewThread
 {
     public long Id { get; init; }
+    /// <summary>GraphQL node_id — required for resolveReviewThread mutation.</summary>
+    public string NodeId { get; init; } = "";
     public string FilePath { get; init; } = "";
     public int? Line { get; init; }
     public string Body { get; init; } = "";

@@ -1052,7 +1052,15 @@ public class ProgramManagerAgent : AgentBase
                         ? "**[ProgramManager] APPROVED**"
                         : $"**[ProgramManager] APPROVED**\n\n{reviewBody}";
                     await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
+
+                    // Always submit formal GitHub APPROVE for branch-protection compatibility
+                    await _github.AddPullRequestReviewAsync(pr.Number,
+                        $"**[ProgramManager] APPROVED** — Final PM review passed.", "APPROVE", ct);
+
                     Logger.LogInformation("PM approved PR #{Number} (Phase 3 final approval)", pr.Number);
+
+                    // Resolve any open inline review threads now that the PR is approved
+                    await ResolvePmReviewThreadsAsync(pr.Number, ct);
 
                     // Add pm-approved label — this is the final gate before merge
                     var updatedLabels = pr.Labels
@@ -1108,6 +1116,41 @@ public class ProgramManagerAgent : AgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to review pull requests");
+        }
+    }
+
+    /// <summary>
+    /// After approving a PR, resolve all open inline review threads left by previous reviews.
+    /// Replies with a resolution comment explaining the thread is resolved by the rework.
+    /// </summary>
+    private async Task ResolvePmReviewThreadsAsync(int prNumber, CancellationToken ct)
+    {
+        try
+        {
+            var threads = await _github.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            // Only resolve threads authored by the PM (identified by [ProgramManager] tag in body)
+            var ownThreads = threads
+                .Where(t => !t.IsResolved && t.Body.Contains("[ProgramManager]", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (ownThreads.Count == 0)
+                return;
+
+            Logger.LogInformation("PM resolving {Count} review threads on PR #{Number} after approval",
+                ownThreads.Count, prNumber);
+
+            foreach (var thread in ownThreads)
+            {
+                var replyBody = $"✅ **[ProgramManager] Resolved** — Rework addressed this feedback. Approved.";
+                await _github.ReplyAndResolveReviewThreadAsync(
+                    prNumber, thread.Id, thread.NodeId, replyBody, ct);
+            }
+
+            LogActivity("review", $"🔒 Resolved {ownThreads.Count} PM inline review thread(s) on PR #{prNumber}");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to resolve review threads on PR #{Number} — approval still proceeds", prNumber);
         }
     }
 
@@ -2140,6 +2183,7 @@ public class ProgramManagerAgent : AgentBase
             }
 
             UpdateStatus(AgentStatus.Working, "Creating User Story Issues from PMSpec");
+            LogActivity("planning", "📋 Reading PMSpec.md to extract user stories");
 
             var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
             if (string.IsNullOrWhiteSpace(pmSpec) || pmSpec.Contains("No PM specification has been created yet"))
@@ -2151,6 +2195,7 @@ public class ProgramManagerAgent : AgentBase
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+            LogActivity("planning", "🤖 Calling AI to extract user stories from PMSpec");
             var history = CreateChatHistory();
             history.AddSystemMessage(
                 await _promptService.RenderAsync("pm/story-extraction-system", new Dictionary<string, string>(), ct)
@@ -2173,6 +2218,7 @@ public class ProgramManagerAgent : AgentBase
 
             // Parse the AI output into individual stories
             var storyBlocks = content.Split("---", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            LogActivity("planning", $"📝 AI extracted {storyBlocks.Length} story blocks, creating GitHub issues");
             var issueCount = 0;
 
             foreach (var block in storyBlocks)
@@ -2200,6 +2246,14 @@ public class ProgramManagerAgent : AgentBase
 
                 issueBody += $"---\n_Created by {Identity.DisplayName} from PMSpec.md_";
 
+                // Validate issue body quality
+                var validatedBody = IssueBodyValidator.ValidateAndClean(issueBody, title, Logger);
+                if (validatedBody is null)
+                {
+                    Logger.LogWarning("Skipping user story '{Title}' — issue body failed validation", title);
+                    continue;
+                }
+
                 // Check if an issue with similar title already exists
                 var existingIssue = await _issueWorkflow.FindExistingIssueAsync(title, ct);
                 if (existingIssue is not null)
@@ -2211,7 +2265,7 @@ public class ProgramManagerAgent : AgentBase
                 }
 
                 var issue = await _github.CreateIssueAsync(
-                    title, issueBody,
+                    title, validatedBody,
                     [IssueWorkflow.Labels.Enhancement],
                     ct);
 

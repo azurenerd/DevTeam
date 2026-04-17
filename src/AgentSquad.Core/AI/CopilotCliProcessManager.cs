@@ -277,8 +277,10 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         var model = modelOverride ?? _config.ModelName;
         args.Append($"--model {model} ");
 
-        // Reasoning effort
-        if (!string.IsNullOrEmpty(_config.ReasoningEffort))
+        // Reasoning effort (skip for models that don't support it, e.g. haiku)
+        var effectiveModel = modelOverride ?? _config.ModelName;
+        var supportsReasoning = effectiveModel == null || !effectiveModel.Contains("haiku", StringComparison.OrdinalIgnoreCase);
+        if (!string.IsNullOrEmpty(_config.ReasoningEffort) && supportsReasoning)
             args.Append($"--effort {_config.ReasoningEffort} ");
 
         // Excluded tools

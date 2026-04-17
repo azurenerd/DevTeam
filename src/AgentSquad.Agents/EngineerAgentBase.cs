@@ -1538,6 +1538,27 @@ public abstract class EngineerAgentBase : AgentBase
         var combinedFeedback = string.Join("\n\n---\n\n",
             reworkBatch.Select(r => $"### Feedback from {r.Reviewer}\n{r.Feedback}"));
 
+        // Fetch inline review threads so the SE sees exact file/line feedback
+        var inlineThreadsContext = "";
+        try
+        {
+            var threads = await GitHub.GetPullRequestReviewThreadsAsync(rework.PrNumber, ct);
+            var unresolvedThreads = threads.Where(t => !t.IsResolved && !string.IsNullOrWhiteSpace(t.Body)).ToList();
+            if (unresolvedThreads.Count > 0)
+            {
+                var threadLines = unresolvedThreads.Select((t, i) =>
+                    $"{i + 1}. **{t.FilePath}** (line {t.Line}): {t.Body}");
+                inlineThreadsContext = "\n\n### Inline Review Comments (file-specific)\n" +
+                    "These are the exact file and line locations that reviewers flagged:\n" +
+                    string.Join("\n", threadLines);
+                combinedFeedback += inlineThreadsContext;
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to fetch inline review threads for rework prompt on PR #{PrNumber}", rework.PrNumber);
+        }
+
         UpdateStatus(AgentStatus.Working, $"Addressing feedback on PR #{rework.PrNumber} (attempt {attempts}/{maxCycles})");
         LogActivity("task", $"🔄 Reworking PR #{rework.PrNumber} based on feedback from {allReviewers} (attempt {attempts}/{maxCycles})");
         Logger.LogInformation("{Role} {Name} reworking PR #{PrNumber} based on feedback from {Reviewers} (attempt {Attempt}/{Max})",
@@ -1639,6 +1660,9 @@ public abstract class EngineerAgentBase : AgentBase
                             commentBody += $"**Files updated:** {string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))}";
                         await GitHub.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
 
+                        // Reply to open inline review threads explaining what was addressed
+                        await ReplyToInlineReviewThreadsAsync(pr.Number, changesSummary, codeFiles, ct);
+
                         await SyncBranchWithMainAsync(pr.Number, ct);
                         await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
 
@@ -1701,6 +1725,72 @@ public abstract class EngineerAgentBase : AgentBase
                 ReworkQueue.Enqueue(item);
         }
     }
+
+    /// <summary>
+    /// After rework, reply to each unresolved inline review thread explaining what was addressed.
+    /// The reviewer will later resolve these threads when approving.
+    /// </summary>
+    private async Task ReplyToInlineReviewThreadsAsync(
+        int prNumber, string? changesSummary, List<Core.AI.CodeFileParser.CodeFile> updatedFiles, CancellationToken ct)
+    {
+        try
+        {
+            var threads = await GitHub.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            var unresolvedThreads = threads.Where(t => !t.IsResolved).ToList();
+
+            if (unresolvedThreads.Count == 0) return;
+
+            var changedPaths = updatedFiles.Select(f => f.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var thread in unresolvedThreads)
+            {
+                // Check if the rework touched the file this thread is about
+                var fileWasChanged = changedPaths.Any(p =>
+                    p.EndsWith(thread.FilePath, StringComparison.OrdinalIgnoreCase) ||
+                    thread.FilePath.EndsWith(p, StringComparison.OrdinalIgnoreCase));
+
+                string replyBody;
+                if (fileWasChanged)
+                {
+                    replyBody = $"**[{Identity.DisplayName}]** ✅ Addressed — this file was updated in the rework commit.";
+                    if (!string.IsNullOrWhiteSpace(changesSummary))
+                        replyBody += $"\n\n{changesSummary}";
+                }
+                else
+                {
+                    replyBody = $"**[{Identity.DisplayName}]** ℹ️ This file was not modified in this rework cycle. " +
+                        "The feedback may be addressed by changes in related files, or may need a follow-up.";
+                }
+
+                // Reply via REST (don't resolve — that's the reviewer's job)
+                try
+                {
+                    using var httpClient = new HttpClient();
+                    httpClient.DefaultRequestHeaders.Add("Authorization", $"token {GetGitHubToken()}");
+                    httpClient.DefaultRequestHeaders.Add("User-Agent", "AgentSquad");
+
+                    var payload = System.Text.Json.JsonSerializer.Serialize(new { body = replyBody });
+                    await httpClient.PostAsync(
+                        $"https://api.github.com/repos/{Config.Project.GitHubRepo}/pulls/{prNumber}/comments/{thread.Id}/replies",
+                        new System.Net.Http.StringContent(payload, System.Text.Encoding.UTF8, "application/json"), ct);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Failed to reply to review thread {ThreadId} on PR #{Number}", thread.Id, prNumber);
+                }
+            }
+
+            Logger.LogInformation("{Role} replied to {Count} inline review threads on PR #{PrNumber}",
+                Identity.Role, unresolvedThreads.Count, prNumber);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to reply to inline review threads on PR #{PrNumber} — rework still submitted", prNumber);
+        }
+    }
+
+    /// <summary>Get the GitHub token for raw API calls from config.</summary>
+    private string GetGitHubToken() => Config.Project.GitHubToken;
 
     #endregion
 

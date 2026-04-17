@@ -13,6 +13,7 @@ public class GitHubService : IGitHubService
     private readonly GitHubClient _client;
     private readonly string _owner;
     private readonly string _repo;
+    private readonly string _token;
     private readonly ILogger<GitHubService> _logger;
     private readonly RateLimitManager _rl;
     private readonly DateTime? _runStartedUtc;
@@ -87,6 +88,7 @@ public class GitHubService : IGitHubService
 
         _owner = repoParts[0];
         _repo = repoParts[1];
+        _token = projectConfig.GitHubToken;
 
         _client = new GitHubClient(new ProductHeaderValue("AgentSquad"))
         {
@@ -395,14 +397,6 @@ public class GitHubService : IGitHubService
         {
             try
             {
-                var reviewEvent = eventType.ToUpperInvariant() switch
-                {
-                    "APPROVE" => PullRequestReviewEvent.Approve,
-                    "REQUEST_CHANGES" => PullRequestReviewEvent.RequestChanges,
-                    "COMMENT" => PullRequestReviewEvent.Comment,
-                    _ => PullRequestReviewEvent.Comment
-                };
-
                 // Resolve commit SHA if not provided
                 if (string.IsNullOrEmpty(commitId))
                 {
@@ -411,48 +405,73 @@ public class GitHubService : IGitHubService
                     TrackRateLimit();
                 }
 
-                // Get file patches to map line numbers to diff positions
+                // Get the set of files in the diff so we only comment on valid files
                 var files = await _client.PullRequest.Files(_owner, _repo, prNumber);
                 TrackRateLimit();
-                var patchesByFile = files.ToDictionary(f => f.FileName, f => f.Patch, StringComparer.OrdinalIgnoreCase);
+                var diffFileNames = new HashSet<string>(files.Select(f => f.FileName), StringComparer.OrdinalIgnoreCase);
 
-                var review = new PullRequestReviewCreate
-                {
-                    Body = body,
-                    Event = reviewEvent,
-                    CommitId = commitId
-                };
-
-                // Map each inline comment to a diff position
-                var mappedCount = 0;
+                // Build comments using the line-based API (no position mapping needed)
+                var mappedComments = new List<object>();
                 foreach (var comment in comments)
                 {
-                    if (!patchesByFile.TryGetValue(comment.FilePath, out var patch))
+                    if (!diffFileNames.Contains(comment.FilePath))
                     {
                         _logger.LogDebug("Inline comment on {File}:{Line} skipped — file not in PR diff",
                             comment.FilePath, comment.Line);
                         continue;
                     }
 
-                    var position = DiffPositionMapper.MapLineToPosition(patch, comment.Line);
-                    if (position is null)
+                    mappedComments.Add(new
                     {
-                        _logger.LogDebug("Inline comment on {File}:{Line} skipped — line not in diff",
-                            comment.FilePath, comment.Line);
-                        continue;
-                    }
-
-                    review.Comments.Add(new DraftPullRequestReviewComment(
-                        comment.Body, comment.FilePath, position.Value));
-                    mappedCount++;
+                        path = comment.FilePath,
+                        line = comment.Line,
+                        side = "RIGHT",
+                        body = comment.Body
+                    });
                 }
 
                 _logger.LogInformation(
-                    "Submitting {Event} review on PR #{Number} with {Mapped}/{Total} inline comments",
-                    eventType, prNumber, mappedCount, comments.Count);
+                    "Submitting {Event} review on PR #{Number} with {Mapped}/{Total} inline comments (line-based API)",
+                    eventType, prNumber, mappedComments.Count, comments.Count);
 
-                await _client.PullRequest.Review.Create(_owner, _repo, prNumber, review);
-                TrackRateLimit();
+                // Use raw HTTP with the line-based API which accepts file line numbers directly
+                // instead of the old position-based API that requires diff position mapping
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_token}");
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "AgentSquad");
+                httpClient.DefaultRequestHeaders.Add("Accept", "application/vnd.github.v3+json");
+
+                var payload = new
+                {
+                    body,
+                    @event = eventType.ToUpperInvariant(),
+                    commit_id = commitId,
+                    comments = mappedComments
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(payload);
+                var response = await httpClient.PostAsync(
+                    $"https://api.github.com/repos/{_owner}/{_repo}/pulls/{prNumber}/reviews",
+                    new StringContent(json, Encoding.UTF8, "application/json"), ct);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    var errorBody = await response.Content.ReadAsStringAsync(ct);
+                    _logger.LogWarning(
+                        "Line-based review API returned {StatusCode} on PR #{Number}: {Error}. Falling back to body-only review.",
+                        (int)response.StatusCode, prNumber, errorBody);
+
+                    // Fallback: submit review without inline comments
+                    var reviewEvent = eventType.ToUpperInvariant() switch
+                    {
+                        "APPROVE" => PullRequestReviewEvent.Approve,
+                        "REQUEST_CHANGES" => PullRequestReviewEvent.RequestChanges,
+                        _ => PullRequestReviewEvent.Comment
+                    };
+                    var fallbackReview = new PullRequestReviewCreate { Body = body, Event = reviewEvent };
+                    await _client.PullRequest.Review.Create(_owner, _repo, prNumber, fallbackReview);
+                    TrackRateLimit();
+                }
             }
             catch (Exception ex)
             {
@@ -468,28 +487,172 @@ public class GitHubService : IGitHubService
         {
             try
             {
-                var comments = await _client.PullRequest.ReviewComment.GetAll(_owner, _repo, prNumber);
-                TrackRateLimit();
+                // Use GraphQL to get real thread state (isResolved) — REST API doesn't expose this
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_token}");
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "AgentSquad");
 
-                // Group by InReplyToId to form threads — root comments have InReplyToId == 0
-                // For simplicity, return each root comment as a thread
-                return comments
-                    .Where(c => c.InReplyToId == null || c.InReplyToId == 0)
-                    .Select(c => new ReviewThread
+                var query = new
+                {
+                    query = @"query($owner: String!, $repo: String!, $prNumber: Int!) {
+                        repository(owner: $owner, name: $repo) {
+                            pullRequest(number: $prNumber) {
+                                reviewThreads(first: 100) {
+                                    nodes {
+                                        id
+                                        isResolved
+                                        path
+                                        line
+                                        comments(first: 1) {
+                                            nodes {
+                                                id
+                                                databaseId
+                                                body
+                                                author { login }
+                                                createdAt
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }",
+                    variables = new { owner = _owner, repo = _repo, prNumber }
+                };
+
+                var json = System.Text.Json.JsonSerializer.Serialize(query);
+                var response = await httpClient.PostAsync(
+                    "https://api.github.com/graphql",
+                    new StringContent(json, Encoding.UTF8, "application/json"), ct);
+
+                if (!response.IsSuccessStatusCode)
+                {
+                    _logger.LogWarning("GraphQL query for review threads on PR #{Number} failed: {Status}",
+                        prNumber, response.StatusCode);
+                    return Array.Empty<ReviewThread>() as IReadOnlyList<ReviewThread>;
+                }
+
+                var body = await response.Content.ReadAsStringAsync(ct);
+                using var doc = System.Text.Json.JsonDocument.Parse(body);
+
+                var threads = doc.RootElement
+                    .GetProperty("data")
+                    .GetProperty("repository")
+                    .GetProperty("pullRequest")
+                    .GetProperty("reviewThreads")
+                    .GetProperty("nodes");
+
+                var result = new List<ReviewThread>();
+                foreach (var thread in threads.EnumerateArray())
+                {
+                    var threadId = thread.GetProperty("id").GetString() ?? "";
+                    var isResolved = thread.GetProperty("isResolved").GetBoolean();
+                    var path = thread.TryGetProperty("path", out var pathProp) ? pathProp.GetString() ?? "" : "";
+                    var line = thread.TryGetProperty("line", out var lineProp) && lineProp.ValueKind == System.Text.Json.JsonValueKind.Number
+                        ? lineProp.GetInt32() : (int?)null;
+
+                    var comments = thread.GetProperty("comments").GetProperty("nodes");
+                    long dbId = 0;
+                    string commentBody = "";
+                    string author = "";
+                    DateTime createdAt = default;
+
+                    foreach (var comment in comments.EnumerateArray())
                     {
-                        Id = c.Id,
-                        FilePath = c.Path ?? "",
-                        Line = c.OriginalPosition,
-                        Body = c.Body ?? "",
-                        Author = c.User?.Login ?? "",
-                        CreatedAt = c.CreatedAt.UtcDateTime
-                    })
-                    .ToList() as IReadOnlyList<ReviewThread>;
+                        dbId = comment.TryGetProperty("databaseId", out var dbProp) ? dbProp.GetInt64() : 0;
+                        commentBody = comment.TryGetProperty("body", out var bodyProp) ? bodyProp.GetString() ?? "" : "";
+                        author = comment.TryGetProperty("author", out var authorProp)
+                            && authorProp.ValueKind != System.Text.Json.JsonValueKind.Null
+                            && authorProp.TryGetProperty("login", out var loginProp)
+                                ? loginProp.GetString() ?? "" : "";
+                        createdAt = comment.TryGetProperty("createdAt", out var dateProp)
+                            && DateTime.TryParse(dateProp.GetString(), out var dt) ? dt : default;
+                        break; // Only need first comment (root of thread)
+                    }
+
+                    result.Add(new ReviewThread
+                    {
+                        Id = dbId,
+                        NodeId = threadId,
+                        FilePath = path,
+                        Line = line,
+                        Body = commentBody,
+                        Author = author,
+                        IsResolved = isResolved,
+                        CreatedAt = createdAt
+                    });
+                }
+
+                return result as IReadOnlyList<ReviewThread>;
             }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to get review threads for PR #{Number}", prNumber);
                 return Array.Empty<ReviewThread>();
+            }
+        }, ct);
+    }
+
+    public async Task ReplyAndResolveReviewThreadAsync(
+        int prNumber, long commentId, string nodeId, string replyBody, CancellationToken ct = default)
+    {
+        await _rl.ExecuteAsync(async _ =>
+        {
+            try
+            {
+                using var httpClient = new HttpClient();
+                httpClient.DefaultRequestHeaders.Add("Authorization", $"token {_token}");
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "AgentSquad");
+
+                // Step 1: Reply to the review comment via REST API
+                var replyPayload = System.Text.Json.JsonSerializer.Serialize(new { body = replyBody });
+                var replyResponse = await httpClient.PostAsync(
+                    $"https://api.github.com/repos/{_owner}/{_repo}/pulls/{prNumber}/comments/{commentId}/replies",
+                    new StringContent(replyPayload, Encoding.UTF8, "application/json"), ct);
+
+                if (!replyResponse.IsSuccessStatusCode)
+                {
+                    var err = await replyResponse.Content.ReadAsStringAsync(ct);
+                    _logger.LogWarning("Failed to reply to review comment {CommentId} on PR #{Number}: {Status} {Error}",
+                        commentId, prNumber, replyResponse.StatusCode, err);
+                }
+                else
+                {
+                    TrackRateLimit();
+                }
+
+                // Step 2: Resolve the thread via GraphQL (nodeId is the GraphQL thread ID from GetPullRequestReviewThreadsAsync)
+                if (!string.IsNullOrEmpty(nodeId))
+                {
+                    var resolveMutation = new
+                    {
+                        query = @"mutation($threadId: ID!) {
+                            resolveReviewThread(input: {threadId: $threadId}) {
+                                thread { id isResolved }
+                            }
+                        }",
+                        variables = new { threadId = nodeId }
+                    };
+
+                    var resolveJson = System.Text.Json.JsonSerializer.Serialize(resolveMutation);
+                    var resolveResponse = await httpClient.PostAsync(
+                        "https://api.github.com/graphql",
+                        new StringContent(resolveJson, Encoding.UTF8, "application/json"), ct);
+
+                    if (resolveResponse.IsSuccessStatusCode)
+                    {
+                        _logger.LogInformation("Resolved review thread for comment {CommentId} on PR #{Number}", commentId, prNumber);
+                    }
+                    else
+                    {
+                        var resolveError = await resolveResponse.Content.ReadAsStringAsync(ct);
+                        _logger.LogDebug("Failed to resolve thread via GraphQL: {Error}", resolveError);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to reply/resolve review thread comment {CommentId} on PR #{Number}", commentId, prNumber);
             }
         }, ct);
     }

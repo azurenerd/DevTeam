@@ -243,16 +243,16 @@ public class AgentSpawnManager
     {
         ArgumentNullException.ThrowIfNull(definition);
 
-        // Check per-definition instance limit
-        var existingCount = _registry.GetAllAgents()
-            .Count(a => a.Identity.Role == AgentRole.Custom
-                     && a.Identity.CustomAgentName != null
-                     && a.Identity.CustomAgentName.StartsWith($"sme:{definition.DefinitionId}", StringComparison.OrdinalIgnoreCase));
+        // Count existing agents with the same RoleName (not DefinitionId, which is unique per spawn)
+        var sameRoleCount = _registry.GetAllAgents()
+            .Count(a => a.Identity.DisplayName != null
+                     && (a.Identity.DisplayName.Equals(definition.RoleName, StringComparison.OrdinalIgnoreCase)
+                         || a.Identity.DisplayName.StartsWith(definition.RoleName + " ", StringComparison.OrdinalIgnoreCase)));
 
-        if (existingCount >= definition.MaxInstances)
+        if (sameRoleCount >= definition.MaxInstances)
         {
-            _logger.LogWarning("SME agent '{RoleName}' at max instances ({Max})",
-                definition.RoleName, definition.MaxInstances);
+            _logger.LogWarning("SME agent '{RoleName}' at max instances ({Count}/{Max})",
+                definition.RoleName, sameRoleCount, definition.MaxInstances);
             return null;
         }
 
@@ -275,12 +275,12 @@ public class AgentSpawnManager
         // For engineer-based specialists, count against SoftwareEngineer pool for rank
         var rankBase = isEngineerBased
             ? _registry.GetAgentsByRole(AgentRole.SoftwareEngineer).Count()
-            : existingCount;
+            : sameRoleCount;
 
         var identity = new AgentIdentity
         {
             Id = $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}"[..Math.Min(48, $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}".Length)],
-            DisplayName = definition.RoleName,
+            DisplayName = $"{definition.RoleName} {sameRoleCount + 1}",
             Role = agentRole,
             ModelTier = definition.ModelTier,
             CustomAgentName = $"sme:{definition.DefinitionId}",

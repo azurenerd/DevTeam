@@ -109,6 +109,19 @@ public class AgentConfigs
     /// Each custom agent gets a unique name and the same configuration options as built-in agents.
     /// </summary>
     public List<CustomAgentConfig> CustomAgents { get; set; } = new();
+
+    /// <summary>
+    /// When true, engineers produce all code in a single commit per PR instead of
+    /// step-by-step commits. Faster but less granular PR history.
+    /// </summary>
+    public bool SingleCommitMode { get; set; } = false;
+
+    /// <summary>
+    /// When true, excludes Architecture.md and PMSpec.md from per-PR implementation
+    /// prompts to reduce context size. The linked issue's acceptance criteria already
+    /// contain the relevant info.
+    /// </summary>
+    public bool SlimEngineerContext { get; set; } = false;
 }
 
 public class AgentConfig

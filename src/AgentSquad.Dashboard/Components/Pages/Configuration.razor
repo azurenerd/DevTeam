@@ -408,6 +408,20 @@ else if (_config is not null)
                         }
                     </div>
 
+                    @* ── Implementation Mode ── *@
+                    <div class="config-section-divider">
+                        <span>Implementation Mode</span>
+                    </div>
+                    <div class="config-field-row">
+                        <div class="config-field" title="When enabled, engineers produce all code in a single commit per PR instead of step-by-step commits. Faster, less context bloat, but less granular PR history.">
+                            <label>Single Commit Mode</label>
+                            <label class="config-toggle">
+                                <input type="checkbox" @bind="_config.Agents.SingleCommitMode" />
+                                <span class="config-toggle-slider"></span>
+                            </label>
+                        </div>
+                    </div>
+
                     @* ── Custom Agents ── *@
                     <div class="config-custom-agents-section">
                         <div class="config-section-divider">

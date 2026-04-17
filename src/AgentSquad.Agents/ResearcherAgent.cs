@@ -186,6 +186,7 @@ public class ResearcherAgent : AgentBase
                         // Commit document to PR so reviewers can see it before the gate
                         if (updatedDoc is not null && !pr.IsMerged)
                         {
+                            LogActivity("task", "📝 Committing Research.md to PR");
                             UpdateStatus(AgentStatus.Working, "Committing Research.md for review");
                             string? commitStepId = null;
                             try { commitStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Commit Research.md", "Committing research findings to PR"); } catch { }
@@ -251,6 +252,7 @@ public class ResearcherAgent : AgentBase
                         // Merge after gate approval (skip if PR already merged)
                         if (!pr.IsMerged)
                         {
+                            LogActivity("task", "🔗 Merging Research.md PR");
                             UpdateStatus(AgentStatus.Working, "Merging Research.md PR");
                             await _prWorkflow.MergeDocumentPRAsync(
                                 pr, Identity.DisplayName, "Research.md", ct);
@@ -361,6 +363,7 @@ public class ResearcherAgent : AgentBase
         // Quick mode: produce a minimal 1-paragraph research summary for fast testing
         if (_config.Project.QuickDocumentCreation)
         {
+            LogActivity("research", "🤖 Quick-mode research generation");
             Logger.LogInformation("QuickDocumentCreation: producing minimal Research.md for '{Topic}'", directive.Topic);
             var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var qChat = qKernel.GetRequiredService<IChatCompletionService>();
@@ -397,6 +400,7 @@ public class ResearcherAgent : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Scan for design reference files FIRST so we can include them in research context
+        LogActivity("research", "🔍 Scanning for design reference files");
         var designContext = await ScanForDesignReferencesAsync(ct);
         _lastDesignSection = designContext; // Cache for appending to Research.md later
 
@@ -462,6 +466,7 @@ public class ResearcherAgent : AgentBase
         if (useSinglePass)
         {
             // Single-pass: one comprehensive prompt instead of 3 turns
+            LogActivity("research", "🤖 Calling AI for research (single-pass)");
             UpdateStatus(AgentStatus.Working, "Researching (single-pass)");
             var singlePassPrompt = await _promptService.RenderAsync("researcher/single-pass-research", researchVars, ct)
                 ?? $"Research the following topic for our software project.\n\n" +
@@ -489,6 +494,7 @@ public class ResearcherAgent : AgentBase
         else
         {
         // Turn 1: Break down the research topic into sub-questions
+        LogActivity("research", "🤖 AI turn 1/3: Identifying sub-questions");
         UpdateStatus(AgentStatus.Working, "Researching (1/3): Identifying sub-questions");
         var turn1Prompt = await _promptService.RenderAsync("researcher/multi-turn-subquestions", researchVars, ct)
             ?? $"I need you to research the following topic for our software project.\n\n" +
@@ -508,6 +514,7 @@ public class ResearcherAgent : AgentBase
         Logger.LogDebug("Research sub-questions identified for {Topic}", directive.Topic);
 
         // Turn 2: Deep-dive analysis of each sub-question
+        LogActivity("research", "🤖 AI turn 2/3: Deep-dive analysis");
         UpdateStatus(AgentStatus.Working, "Researching (2/3): Deep-dive analysis");
         var turn2Prompt = await _promptService.RenderAsync("researcher/multi-turn-deepdive", new Dictionary<string, string>(), ct)
             ?? "Now provide a detailed, in-depth analysis for each sub-question you identified. " +
@@ -530,6 +537,7 @@ public class ResearcherAgent : AgentBase
         Logger.LogDebug("Detailed analysis complete for {Topic}", directive.Topic);
 
         // Turn 3: Synthesize into structured Research.md output
+        LogActivity("research", "🤖 AI turn 3/3: Synthesizing findings");
         UpdateStatus(AgentStatus.Working, "Researching (3/3): Synthesizing findings");
         var turn3Prompt = await _promptService.RenderAsync("researcher/multi-turn-synthesis", new Dictionary<string, string>(), ct)
             ?? "Now synthesize all your research into a comprehensive, structured document with these sections:\n\n" +

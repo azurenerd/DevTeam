@@ -269,7 +269,31 @@ public class LocalWorkspace
         await _gitLock.WaitAsync(ct);
         try
         {
-            await RunGitAsync("push", "origin", branchName, "--force-with-lease", ct: ct);
+            // Fetch remote state first — screenshots and other API-committed files may have
+            // advanced the remote branch beyond our local tracking ref, causing --force-with-lease
+            // to reject with "stale info". Fetching updates the tracking ref so the push succeeds.
+            try
+            {
+                await RunGitAsync("fetch", "origin", branchName, null!, ct: ct, throwOnError: false);
+            }
+            catch
+            {
+                // Fetch failure is non-fatal — branch may not exist on remote yet (first push)
+            }
+
+            try
+            {
+                await RunGitAsync("push", "origin", branchName, "--force-with-lease", ct: ct);
+            }
+            catch
+            {
+                // If --force-with-lease still fails after fetch (e.g., API commit race),
+                // rebase onto the remote and retry once.
+                _logger.LogWarning("[{Agent}] Push --force-with-lease failed for {Branch}, rebasing and retrying",
+                    _agentId, branchName);
+                await RunGitAsync("pull", "--rebase", "origin", branchName, ct: ct, throwOnError: false);
+                await RunGitAsync("push", "origin", branchName, "--force-with-lease", ct: ct);
+            }
             _logger.LogInformation("[{Agent}] Pushed branch {Branch} to origin", _agentId, branchName);
         }
         finally

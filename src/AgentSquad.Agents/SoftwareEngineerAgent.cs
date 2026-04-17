@@ -154,6 +154,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             "Produce detailed, production-quality code. " +
             "Ensure the implementation fulfills the business goals from the PM spec. " +
             "Be thorough — this is the most critical part of the system.\n\n" +
+            "RUNNABLE RULE: The application MUST compile and be runnable after your changes. " +
+            "Do not leave stub methods that throw NotImplementedException, do not reference types " +
+            "or services that don't exist yet, and do not break the build. If a feature depends on " +
+            "code from another task that hasn't been implemented yet, use graceful fallbacks " +
+            "(e.g., return empty collections, show placeholder text) instead of throwing exceptions. " +
+            "After your implementation, `dotnet build` must succeed and `dotnet run` must start without errors.\n\n" +
             "DEPENDENCY RULE: Before using ANY external library, package, or framework, check the project's " +
             "dependency manifest (e.g., .csproj, package.json, requirements.txt, etc.). " +
             "If a dependency is not already listed, add it to the manifest and include that file in your output. " +
@@ -475,6 +481,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var decompStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Task decomposition",
             "Decomposing enhancement issues into engineering tasks", Identity.ModelTier);
 
+        LogActivity("planning", "📋 Reading architecture doc and PM spec for engineering planning");
         var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
         var pmSpec = await ProjectFiles.GetPMSpecAsync(ct);
         var teamComposition = await ProjectFiles.GetTeamCompositionAsync(ct);
@@ -737,11 +744,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         history.AddUserMessage(userPromptBuilder.ToString());
 
+        LogActivity("planning", "🤖 Calling AI to generate engineering plan from user stories");
         var response = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         var structuredText = response.Content ?? "";
         _taskTracker.RecordLlmCall(decompStepId);
         _taskTracker.CompleteStep(decompStepId);
+
+        LogActivity("planning", "📝 AI generated plan, parsing tasks...");
 
         // Self-assessment: assess and refine the engineering plan
         var assessStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Self-assessment & impact classification",
@@ -756,6 +766,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             Iteration = 0,
         });
 
+        LogActivity("planning", "🔍 Self-assessing engineering plan quality");
         var criteria = AssessmentCriteria.GetForRole(Identity.Role);
         AgentSquad.Core.Agents.Reasoning.AssessmentResult? peAssessmentResult = null;
         if (criteria is not null)
@@ -815,10 +826,25 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Parse typed dependencies: "T1(files),T3(api)" → {T1:files, T3:api}
             var (plainDeps, depTypes) = ParseTypedDependencies(deps);
 
+            // Validate task name — if AI put a wave identifier (W1, W2, etc.) as the name,
+            // fall back to the description (truncated) or the parent issue title
+            var taskName = parts[3].Trim();
+            if (System.Text.RegularExpressions.Regex.IsMatch(taskName, @"^W\d+$"))
+            {
+                Logger.LogWarning("Task {TaskId} has wave identifier '{Name}' as name — falling back to description",
+                    parts[1].Trim(), taskName);
+                var desc = parts[4].Trim();
+                taskName = desc.Length > 80 ? desc[..80] : desc;
+                if (string.IsNullOrWhiteSpace(taskName) && issueNum > 0 && issueMap.TryGetValue(issueNum, out var parentIssue))
+                    taskName = parentIssue.Title;
+                if (string.IsNullOrWhiteSpace(taskName))
+                    taskName = $"Task {parts[1].Trim()}";
+            }
+
             parsedTasks.Add(new EngineeringTask
             {
                 Id = parts[1].Trim(),
-                Name = parts[3].Trim(),
+                Name = taskName,
                 Description = parts[4].Trim() + (string.IsNullOrEmpty(filePlan) ? "" :
                     $"\n\n### File Plan\n{FormatFilePlan(filePlan)}"),
                 Complexity = NormalizeComplexity(parts[5].Trim()),
@@ -1009,6 +1035,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         RecomputeWavesFromDependencies(parsedTasks);
 
         // Create GitHub issues for each task (the single source of truth)
+        LogActivity("planning", $"📌 Creating {parsedTasks.Count} task issues on GitHub");
         var createIssuesStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
             $"Creating {parsedTasks.Count} engineering task issues on GitHub", Identity.ModelTier);
         var createdTasks = await _taskManager.CreateTaskIssuesAsync(parsedTasks, ct);
@@ -1042,6 +1069,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // Reload to pick up dependency info from updated issue bodies, then create GitHub links
         await _taskManager.LoadTasksAsync(ct);
 
+        LogActivity("planning", "🔗 Establishing task dependencies");
         // Create native GitHub blocked-by dependency links between tasks
         await _taskManager.LinkTaskDependenciesAsync(_taskManager.Tasks.ToList(), ct);
         _taskTracker.CompleteStep(createIssuesStepId);
@@ -1418,9 +1446,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 freeEngineers.Add(engineer);
             }
 
-            // Get all assignable tasks (pending with dependencies met, excluding integration)
+            // Get all assignable tasks (pending with dependencies met, excluding integration and foundation)
+            // Foundation tasks (T1/W0) are excluded — the SE Lead handles them directly.
             var assignableTasks = _taskManager.Tasks
-                .Where(t => t.Status == "Pending" && _taskManager.AreDependenciesMet(t) && t.Id != IntegrationTaskId && t.IssueNumber.HasValue)
+                .Where(t => t.Status == "Pending" && _taskManager.AreDependenciesMet(t) && t.Id != IntegrationTaskId && t.IssueNumber.HasValue && !IsFoundationTask(t))
                 .ToList();
 
             // LLM-based semantic skill matching: single call matches all tasks to all engineers
@@ -1587,7 +1616,28 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 // ── LEADER PE: refresh cache from GitHub to see latest assignments, then pick ──
                 await _taskManager.LoadTasksAsync(ct);
-                task = _taskManager.FindNextAssignableTask("High", "Medium", "Low");
+
+                // Prioritize foundation task (T1/W0) for self-implementation — it sets the
+                // project structure that all other tasks depend on, so the Lead handles it directly.
+                var foundationTask = _taskManager.Tasks
+                    .FirstOrDefault(t => t.Status == "Pending"
+                        && _taskManager.AreDependenciesMet(t)
+                        && t.Id != IntegrationTaskId
+                        && t.IssueNumber.HasValue
+                        && IsFoundationTask(t));
+
+                if (foundationTask is not null)
+                {
+                    task = foundationTask;
+                    LogActivity("task", $"🏗️ SE Lead taking foundation task #{task.IssueNumber} for self-implementation");
+                    Logger.LogInformation(
+                        "SE Lead claiming foundation task {TaskId} (#{IssueNumber}: {Name}) for self-implementation",
+                        task.Id, task.IssueNumber, task.Name);
+                }
+                else
+                {
+                    task = _taskManager.FindNextAssignableTask("High", "Medium", "Low");
+                }
 
                 // Never pick up the integration task through normal assignment — it's handled
                 // by CheckAllTasksCompleteAsync → CreateIntegrationPRAsync
@@ -4365,6 +4415,22 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         if (wave.StartsWith('W') && int.TryParse(wave.AsSpan(1), out var num))
             return num;
         return 1;
+    }
+
+    /// <summary>
+    /// Determines if a task is a foundation/scaffolding task that the SE Lead should handle itself.
+    /// Heuristic: task ID is "T1", wave is "W0", title contains foundation keywords,
+    /// or the task has zero dependencies.
+    /// </summary>
+    private static bool IsFoundationTask(EngineeringTask task)
+    {
+        var foundationKeywords = new[] { "foundation", "scaffolding", "scaffold", "setup", "initial" };
+        var hasFoundationTitle = foundationKeywords.Any(k =>
+            task.Name.Contains(k, StringComparison.OrdinalIgnoreCase));
+
+        return string.Equals(task.Id, "T1", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(task.Wave, "W0", StringComparison.OrdinalIgnoreCase)
+            || (hasFoundationTitle && task.DependencyIssueNumbers.Count == 0);
     }
 
     private void EnsureFoundationFirstPattern(List<EngineeringTask> tasks)

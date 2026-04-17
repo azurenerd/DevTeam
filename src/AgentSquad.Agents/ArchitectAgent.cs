@@ -411,12 +411,14 @@ public class ArchitectAgent : AgentBase
         LogActivity("task", $"🏗️ Starting architecture design: {directive.Title}");
 
         // 1. Read PM specs and Research.md
+        LogActivity("planning", "📋 Reading PMSpec and Research inputs");
         string? readCtxStepId = null;
         try { readCtxStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Read context (PMSpec, Research)", "Reading PM specification and research findings"); } catch { }
         var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
         var research = await _projectFiles.GetResearchDocAsync(ct);
 
         // 1b. Read visual design reference files directly for architecture decisions
+        LogActivity("planning", "🔍 Scanning design reference files");
         var designContext = await ReadDesignReferencesAsync(ct);
         try { if (readCtxStepId is not null) _taskTracker.CompleteStep(readCtxStepId); } catch { }
 
@@ -476,6 +478,7 @@ public class ArchitectAgent : AgentBase
         if (useSinglePass)
         {
             // Single-pass mode: one comprehensive prompt instead of 5 conversational turns
+            LogActivity("planning", "🤖 Calling AI for architecture (single-pass)");
             UpdateStatus(AgentStatus.Working, "Designing architecture (single-pass)");
 
             var singlePassVars = new Dictionary<string, string>
@@ -518,6 +521,7 @@ public class ArchitectAgent : AgentBase
         else
         {
         // Turn 1: Identify key architectural decisions
+        LogActivity("planning", "🤖 AI turn 1/5: Key architectural decisions");
         var turnVars = new Dictionary<string, string>
         {
             ["task_title"] = directive.Title,
@@ -551,6 +555,7 @@ public class ArchitectAgent : AgentBase
             TruncateForMemory(decisionsResponse.Content ?? ""), ct);
 
         // Turn 2: Design system components and interactions
+        LogActivity("planning", "🤖 AI turn 2/5: Components & interactions");
         UpdateStatus(AgentStatus.Working, "Designing (2/5): Components & interactions");
         var turn2Prompt = await _promptService.RenderAsync("architect/multi-turn-components",
             new Dictionary<string, string>(), ct)
@@ -570,6 +575,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("System components designed for {TaskId}", directive.TaskId);
 
         // Turn 3: Data model, API contracts, and infrastructure
+        LogActivity("planning", "🤖 AI turn 3/5: Data model & APIs");
         UpdateStatus(AgentStatus.Working, "Designing (3/5): Data model & APIs");
         var turn3Prompt = await _promptService.RenderAsync("architect/multi-turn-data-model",
             new Dictionary<string, string>(), ct)
@@ -588,6 +594,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("Data model and contracts defined for {TaskId}", directive.TaskId);
 
         // Turn 4: Security, scaling, and risk mitigation
+        LogActivity("planning", "🤖 AI turn 4/5: Security & scaling");
         UpdateStatus(AgentStatus.Working, "Designing (4/5): Security & scaling");
         var turn4Prompt = await _promptService.RenderAsync("architect/multi-turn-cross-cutting",
             new Dictionary<string, string>(), ct)
@@ -606,6 +613,7 @@ public class ArchitectAgent : AgentBase
         Logger.LogDebug("Cross-cutting concerns addressed for {TaskId}", directive.TaskId);
 
         // Turn 5: Compile into structured Architecture.md
+        LogActivity("planning", "🤖 AI turn 5/5: Compiling Architecture.md");
         UpdateStatus(AgentStatus.Working, "Designing (5/5): Compiling Architecture.md");
         var turn5Prompt = await _promptService.RenderAsync("architect/multi-turn-compile",
             new Dictionary<string, string>(), ct)
@@ -736,6 +744,7 @@ public class ArchitectAgent : AgentBase
         // Commit document to PR so reviewers can see it before the gate
         if (architectureDoc is not null && !pr.IsMerged)
         {
+            LogActivity("task", "📝 Committing Architecture.md to PR");
             UpdateStatus(AgentStatus.Working, "Committing Architecture.md for review");
             string? commitStepId = null;
             try { commitStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Commit Architecture.md", "Committing architecture document to PR"); } catch { }
@@ -786,6 +795,7 @@ public class ArchitectAgent : AgentBase
         string? mergeStepId = null;
         if (!pr.IsMerged)
         {
+            LogActivity("task", "🔗 Merging Architecture.md PR");
             UpdateStatus(AgentStatus.Working, "Merging Architecture.md PR");
             try { mergeStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Merge PR", "Merging Architecture.md PR"); } catch { }
             await _prWorkflow.MergeDocumentPRAsync(
@@ -974,11 +984,19 @@ public class ArchitectAgent : AgentBase
                     var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
                     await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
 
-                    // Submit inline comments as a GitHub review
+                    // Always submit a formal GitHub APPROVE review for branch-protection compatibility
                     if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
                     {
                         await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "APPROVE", ct);
                     }
+                    else
+                    {
+                        await _github.AddPullRequestReviewAsync(pr.Number,
+                            $"🏗️ **[Architect] APPROVED**\n\n{reasoning}", "APPROVE", ct);
+                    }
+
+                    // Resolve previously-opened inline review threads now that rework is accepted
+                    await ResolveArchitectReviewThreadsAsync(pr.Number, ct);
 
                     Logger.LogInformation("Architect approved PR #{Number}", pr.Number);
 
@@ -1065,11 +1083,18 @@ public class ArchitectAgent : AgentBase
             var maxComments = _config.Review.MaxInlineCommentsPerReview;
             var comments = reviewResult.Comments
                 .Take(maxComments)
+                // Tag each comment with [Architect] so agents know who authored it
+                .Select(c => new InlineReviewComment
+                {
+                    FilePath = c.FilePath,
+                    Line = c.Line,
+                    Body = $"**[Architect]** {c.Body}"
+                })
                 .ToList();
 
             if (comments.Count == 0) return;
 
-            var reviewBody = $"🏗️ **Architect Inline Review** — {reviewResult.Verdict}\n\n" +
+            var reviewBody = $"🏗️ **[Architect] Inline Review** — {reviewResult.Verdict}\n\n" +
                 $"{reviewResult.Summary}\n\n" +
                 $"_{comments.Count} inline comment(s) below_";
 
@@ -1088,6 +1113,44 @@ public class ArchitectAgent : AgentBase
         }
     }
 
+    /// <summary>
+    /// After approving a PR, resolve all open inline review threads that were left by previous reviews.
+    /// Replies with a resolution comment explaining the thread is resolved by the rework.
+    /// </summary>
+    private async Task ResolveArchitectReviewThreadsAsync(int prNumber, CancellationToken ct)
+    {
+        try
+        {
+            var threads = await _github.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            // Only resolve threads authored by this agent (identified by [Architect] tag in comment body)
+            var ownThreads = threads
+                .Where(t => !t.IsResolved && t.Body.Contains("[Architect]", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (ownThreads.Count == 0)
+            {
+                Logger.LogDebug("No unresolved Architect review threads on PR #{Number}", prNumber);
+                return;
+            }
+
+            Logger.LogInformation("Resolving {Count} Architect review threads on PR #{Number} after approval",
+                ownThreads.Count, prNumber);
+
+            foreach (var thread in ownThreads)
+            {
+                var replyBody = $"✅ **[Architect] Resolved** — Rework addressed this feedback. Approved.";
+                await _github.ReplyAndResolveReviewThreadAsync(
+                    prNumber, thread.Id, thread.NodeId, replyBody, ct);
+            }
+
+            LogActivity("review", $"🔒 Resolved {ownThreads.Count} Architect inline review thread(s) on PR #{prNumber}");
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to resolve review threads on PR #{Number} — approval still proceeds", prNumber);
+        }
+    }
+
     private async Task<StructuredReviewResult> EvaluateArchitecturalAlignmentAsync(
         AgentPullRequest pr, CancellationToken ct)
     {
@@ -1096,6 +1159,7 @@ public class ArchitectAgent : AgentBase
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+            LogActivity("review", "📋 Reading architecture doc and PR context");
             var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
             var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
 
@@ -1117,6 +1181,7 @@ public class ArchitectAgent : AgentBase
             }
 
             // Read actual code files from the PR branch
+            LogActivity("review", "🔍 Reading PR code for architecture review");
             var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Get screenshot images for vision-based review
@@ -1238,12 +1303,14 @@ public class ArchitectAgent : AgentBase
                     (string.IsNullOrEmpty(screenshotContext) ? "" : $"\n\n{screenshotContext}"));
             }
 
+            LogActivity("review", "🤖 Calling AI for architecture alignment review");
             var response = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
 
             var text = response.Content?.Trim() ?? "";
 
             // Try to parse as structured JSON first
+            LogActivity("review", "📌 Parsing architecture review result");
             var structuredResult = TryParseStructuredReview(text);
             if (structuredResult != null)
             {
