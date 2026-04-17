@@ -2431,7 +2431,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             if (screenshotBytes is null || screenshotBytes.Length == 0)
             {
-                Logger.LogDebug("No screenshot captured (app may not be a web project)");
+                Logger.LogWarning("No screenshot captured for PR #{PrNumber} (app may not be a web project)", pr.Number);
                 return;
             }
 
@@ -2458,7 +2458,7 @@ public abstract class EngineerAgentBase : AgentBase
         catch (Exception ex)
         {
             // Never let screenshot failures block the pipeline
-            Logger.LogDebug(ex, "Screenshot capture failed for PR #{PrNumber} — continuing", pr.Number);
+            Logger.LogWarning(ex, "Screenshot capture failed for PR #{PrNumber} — continuing", pr.Number);
         }
     }
 

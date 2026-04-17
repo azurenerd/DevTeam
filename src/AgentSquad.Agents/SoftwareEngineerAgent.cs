@@ -1602,12 +1602,20 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             Logger.LogInformation("Software Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
+            // Track step: Generate PR description
+            var descStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Generate PR description",
+                $"Creating description for {task.Name}", Identity.ModelTier);
             UpdateStatus(AgentStatus.Working, $"Generating PR description: {task.Name}");
             var prDescription = await GenerateTaskDescriptionAsync(task, ct);
+            _taskTracker.RecordLlmCall(descStepId);
+            _taskTracker.CompleteStep(descStepId);
 
             if (task.IssueNumber.HasValue)
                 prDescription = $"Closes #{task.IssueNumber}\n\n{prDescription}";
 
+            // Track step: Create branch & PR
+            var createPrStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Create branch & PR",
+                $"Creating branch and PR for {task.Name}", Identity.ModelTier);
             UpdateStatus(AgentStatus.Working, $"Creating branch & PR: {task.Name}");
             var branchName = await PrWorkflow.CreateTaskBranchAsync(
                 Identity.DisplayName,
@@ -1623,6 +1631,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 "",
                 branchName,
                 ct);
+            _taskTracker.CompleteStep(createPrStepId);
 
             // Mark task in-progress via the task manager
             if (task.IssueNumber.HasValue)
@@ -1667,9 +1676,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             if (!useSinglePass)
             {
                 // Multi-step path: generate steps then implement each one
+                var genStepsStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Generate implementation steps",
+                    $"Planning implementation steps for {task.Name}", Identity.ModelTier);
                 UpdateStatus(AgentStatus.Working, $"Generating implementation steps: {task.Name}");
                 var steps = await GenerateImplementationStepsAsync(
                     chat, pr, syntheticIssue, pmSpecDoc, architectureDoc, techStack, ct);
+                _taskTracker.RecordLlmCall(genStepsStepId);
+                _taskTracker.CompleteStep(genStepsStepId);
 
                 if (steps.Count > 0)
                 {
@@ -1684,6 +1697,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         var step = steps[i];
                         var stepNumber = i + 1;
 
+                        var execStepId = _taskTracker.BeginStep(Identity.Id, task.Id,
+                            $"Implement step {stepNumber}/{steps.Count}",
+                            Truncate(step, 120), Identity.ModelTier);
                         UpdateStatus(AgentStatus.Working,
                             $"Implementing step {stepNumber}/{steps.Count}: {Truncate(step, 60)}");
                         Logger.LogInformation(
@@ -1725,6 +1741,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                         var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
                         var stepImpl = stepResponse.Content?.Trim() ?? "";
+                        _taskTracker.RecordLlmCall(execStepId);
 
                         var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(stepImpl);
                         if (codeFiles.Count > 0)
@@ -1736,6 +1753,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                     stepNumber, steps.Count, step, chat, ct);
                                 if (!committed)
                                 {
+                                    _taskTracker.FailStep(execStepId, "Blocked by build errors");
                                     Logger.LogWarning("SE step {Step}/{Total} blocked by build errors on PR #{PrNumber}",
                                         stepNumber, steps.Count, pr.Number);
                                     await GitHub.AddPullRequestCommentAsync(pr.Number,
@@ -1753,6 +1771,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                 codeFiles.Count, stepNumber, steps.Count, pr.Number);
                         }
 
+                        _taskTracker.CompleteStep(execStepId);
                         completedSteps.Add(step);
                     }
                 }
@@ -1765,6 +1784,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             if (useSinglePass)
             {
                 // Single-pass: complete implementation in one AI call
+                var implStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Implement (single-pass)",
+                    $"Generating complete implementation for {task.Name}", Identity.ModelTier);
                 UpdateStatus(AgentStatus.Working, $"Generating code: {task.Name}");
                 Logger.LogInformation("SE using single-pass implementation for task {TaskId}", task.Id);
 
@@ -1803,6 +1824,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var implementation = response.Content?.Trim() ?? "";
+                _taskTracker.RecordLlmCall(implStepId);
 
                 var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
                 if (codeFiles.Count > 0)
@@ -1813,6 +1835,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                             $"Implement {task.Name}", 1, 1, task.Name, chat, ct);
                         if (!committed)
                         {
+                            _taskTracker.FailStep(implStepId, "Blocked by build errors");
                             Logger.LogWarning("SE single-pass implementation blocked by build errors on PR #{PrNumber}", pr.Number);
                             await GitHub.AddPullRequestCommentAsync(pr.Number,
                                 $"❌ **Build Blocked:** Single-pass implementation could not produce a buildable commit.", ct);
@@ -1824,11 +1847,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, $"Implement {task.Name}", ct);
                     }
                 }
+                _taskTracker.CompleteStep(implStepId);
             }
+
+            // Track step: Mark ready for review
+            var readyStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Mark ready for review",
+                $"Syncing branch and marking PR #{pr.Number} ready", Identity.ModelTier);
 
             // Sync branch with main before marking ready — ensures PR is merge-clean
             await SyncBranchWithMainAsync(pr.Number, ct);
             await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+            _taskTracker.CompleteStep(readyStepId);
 
             await MessageBus.PublishAsync(new ReviewRequestMessage
             {
