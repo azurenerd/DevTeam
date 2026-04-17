@@ -42,9 +42,9 @@ public abstract class EngineerAgentBase : AgentBase
     protected readonly ConcurrentQueue<IssueAssignmentMessage> AssignmentQueue = new();
     protected readonly ConcurrentQueue<ClarificationResponseMessage> ClarificationResponses = new();
     protected readonly List<IDisposable> Subscriptions = new();
-    // Track rework attempts per PR to enforce MaxReworkCycles limit.
-    // Counts per review ROUND (not per individual reviewer feedback).
-    protected readonly Dictionary<int, int> ReworkAttemptCounts = new();
+    // Track rework attempts per PR per reviewer to enforce per-reviewer MaxReworkCycles.
+    // Key: (prNumber, reviewerName) → attempt count.
+    protected readonly Dictionary<(int PrNumber, string Reviewer), int> ReworkAttemptCounts = new();
     // Separate counter for TE source-bug rework — tracked independently so TE feedback
     // isn't blocked by exhausted peer review cycles.
     protected readonly Dictionary<int, int> TeReworkAttemptCounts = new();
@@ -949,7 +949,10 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
-            var reworkJson = System.Text.Json.JsonSerializer.Serialize(ReworkAttemptCounts);
+            var reworkJson = System.Text.Json.JsonSerializer.Serialize(
+                ReworkAttemptCounts.ToDictionary(
+                    kvp => $"{kvp.Key.PrNumber}|{kvp.Key.Reviewer}",
+                    kvp => kvp.Value));
             await StateStore.SaveAgentTaskCheckpointAsync(
                 Identity.Role.ToString(),
                 currentTaskId: null,
@@ -1349,24 +1352,51 @@ public abstract class EngineerAgentBase : AgentBase
         var isTeSourceBug = reworkBatch.Any(r =>
             r.Feedback.Contains(TeSourceBugMarker, StringComparison.OrdinalIgnoreCase));
 
+        // Per-reviewer rework tracking: each reviewer gets their own cycle limit.
+        // Check if ANY reviewer in this batch has exhausted their limit.
+        var reviewers = reworkBatch.Select(r => r.Reviewer).Distinct().ToList();
         int attempts;
         int maxCycles;
+        bool anyExhausted = false;
+
         if (isTeSourceBug)
         {
             attempts = TeReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
             TeReworkAttemptCounts[rework.PrNumber] = attempts;
             maxCycles = Config.Limits.MaxTestReworkCycles;
+            anyExhausted = attempts >= maxCycles;
         }
         else
         {
-            // Enforce max rework cycles per PR. Counts per ROUND (all reviewer feedback
-            // in one cycle = one attempt) to prevent premature exhaustion with dual reviewers.
-            attempts = ReworkAttemptCounts.GetValueOrDefault(rework.PrNumber, 0) + 1;
-            ReworkAttemptCounts[rework.PrNumber] = attempts;
+            // Track per (PR, reviewer) and use reviewer-specific limits
+            attempts = 0;
             maxCycles = Config.Limits.MaxReworkCycles;
+            foreach (var reviewer in reviewers)
+            {
+                var key = (rework.PrNumber, reviewer);
+                var reviewerAttempts = ReworkAttemptCounts.GetValueOrDefault(key, 0) + 1;
+                ReworkAttemptCounts[key] = reviewerAttempts;
+
+                // Use reviewer-specific limit if available
+                var reviewerMax = reviewer.Contains("ProgramManager", StringComparison.OrdinalIgnoreCase)
+                    ? Config.Limits.MaxPmReworkCycles
+                    : reviewer.Contains("Architect", StringComparison.OrdinalIgnoreCase)
+                        ? Config.Limits.MaxArchitectReworkCycles
+                        : Config.Limits.MaxReworkCycles;
+
+                if (reviewerAttempts >= reviewerMax)
+                    anyExhausted = true;
+
+                // Track highest attempt count for logging
+                if (reviewerAttempts > attempts)
+                {
+                    attempts = reviewerAttempts;
+                    maxCycles = reviewerMax;
+                }
+            }
         }
 
-        if (attempts >= maxCycles)
+        if (anyExhausted)
         {
             var cycleType = isTeSourceBug ? "test rework" : "rework";
             Logger.LogWarning(

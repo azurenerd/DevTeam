@@ -557,7 +557,7 @@ public class AgentStateStore : IDisposable
     }
 
     /// <summary>Load rework attempt counts for an agent role.</summary>
-    public async Task<Dictionary<int, int>> LoadReworkAttemptsAsync(string agentRole, CancellationToken ct = default)
+    public async Task<Dictionary<(int PrNumber, string Reviewer), int>> LoadReworkAttemptsAsync(string agentRole, CancellationToken ct = default)
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = "SELECT rework_attempts_json FROM agent_task_checkpoint WHERE agent_role = @role;";
@@ -565,10 +565,23 @@ public class AgentStateStore : IDisposable
 
         var result = await cmd.ExecuteScalarAsync(ct);
         if (result is null or DBNull)
-            return new Dictionary<int, int>();
+            return new Dictionary<(int, string), int>();
 
-        return System.Text.Json.JsonSerializer.Deserialize<Dictionary<int, int>>((string)result)
-               ?? new Dictionary<int, int>();
+        // New format: "prNumber|reviewer" → count
+        var raw = System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, int>>((string)result)
+               ?? new Dictionary<string, int>();
+
+        var parsed = new Dictionary<(int PrNumber, string Reviewer), int>();
+        foreach (var kvp in raw)
+        {
+            var parts = kvp.Key.Split('|', 2);
+            if (parts.Length == 2 && int.TryParse(parts[0], out var prNum))
+                parsed[(prNum, parts[1])] = kvp.Value;
+            else if (int.TryParse(kvp.Key, out var legacyPr))
+                // Legacy format: just PR number → count (treat as unknown reviewer)
+                parsed[(legacyPr, "Unknown")] = kvp.Value;
+        }
+        return parsed;
     }
 
     // ── Processed Items (dedup) ──────────────────────────────────────
