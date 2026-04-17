@@ -41,6 +41,9 @@ public abstract class EngineerAgentBase : AgentBase
     protected readonly ConcurrentQueue<ReworkItem> ReworkQueue = new();
     protected readonly ConcurrentQueue<IssueAssignmentMessage> AssignmentQueue = new();
     protected readonly ConcurrentQueue<ClarificationResponseMessage> ClarificationResponses = new();
+    // Track issues explicitly assigned to THIS agent via message bus.
+    // Prevents multiple same-name agents from racing on the same PR via Priority 5 recovery.
+    protected readonly HashSet<int> BusAssignedIssues = new();
     protected readonly List<IDisposable> Subscriptions = new();
     // Track rework attempts per PR per reviewer to enforce per-reviewer MaxReworkCycles.
     // Key: (prNumber, reviewerName) → attempt count.
@@ -263,16 +266,37 @@ public abstract class EngineerAgentBase : AgentBase
 
                     if (activePR != null && Identity.AssignedPullRequest != activePR.Number.ToString())
                     {
-                        // Sync branch with main before resuming work (picks up changes merged since last run)
-                        await SyncBranchWithMainAsync(activePR.Number, ct);
-                        await WorkOnExistingPrAsync(activePR, ct);
+                        // Guard: only resume PRs that were assigned to THIS agent.
+                        // Check 1: agent-id metadata in PR body (durable, survives restarts)
+                        // Check 2: linked issue in BusAssignedIssues (volatile, in-memory only)
+                        // A PR is ours if the embedded agent-id matches, OR if we have the linked issue assigned via bus.
+                        var prAgentId = ExtractAgentIdFromPrBody(activePR.Body);
+                        var linkedIssue = ExtractLinkedIssueFromPrBody(activePR.Body);
+                        var isOurPr = string.Equals(prAgentId, Identity.Id, StringComparison.OrdinalIgnoreCase)
+                            || (linkedIssue.HasValue && BusAssignedIssues.Contains(linkedIssue.Value));
+
+                        if (!isOurPr)
+                        {
+                            Logger.LogDebug(
+                                "{Role} {Name} skipping PR #{PrNumber} — agent-id '{PrAgentId}' != '{OurId}' and issue #{IssueNumber} not in bus assignments",
+                                Identity.Role, Identity.DisplayName, activePR.Number,
+                                prAgentId ?? "none", Identity.Id, linkedIssue);
+                        }
+                        else
+                        {
+                            // Sync branch with main before resuming work (picks up changes merged since last run)
+                            await SyncBranchWithMainAsync(activePR.Number, ct);
+                            await WorkOnExistingPrAsync(activePR, ct);
+                        }
                     }
                     else
                     {
                         // Track ready-for-review PRs and check for unaddressed feedback
+                        // Filter to PRs that belong to THIS agent (by agent-id in body or bus assignment)
                         var reviewPRs = myTasks.Where(pr =>
                             string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
-                            && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                            && pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase)
+                            && IsOurPullRequest(pr))
                             .ToList();
 
                         if (reviewPRs.Count > 0)
@@ -535,7 +559,11 @@ public abstract class EngineerAgentBase : AgentBase
                         .ToList();
                     var overlapping = normalizedOwned.Count(f => mergedFileSet.Contains(f));
 
-                    if (overlapping > 0 && overlapping * 2 >= normalizedOwned.Count)
+                    // Only skip when ALL files overlap AND none are marked as shared/multi-task.
+                    // Stub files created by foundation tasks should not cause downstream tasks to be skipped.
+                    var descLower = (issue.Body ?? "").ToLowerInvariant();
+                    var hasSharedFiles = descLower.Contains("shared") || descLower.Contains("multi-task") || descLower.Contains("stub");
+                    if (overlapping == normalizedOwned.Count && !hasSharedFiles)
                     {
                         Logger.LogWarning(
                             "{Role} {Name}: Task #{IssueNumber} has {Overlap}/{Total} files already in merged PRs — skipping as duplicate",
@@ -561,6 +589,9 @@ public abstract class EngineerAgentBase : AgentBase
 
             Logger.LogInformation("{Role} {Name} starting work on issue #{Number}: {Title}",
                 Identity.Role, Identity.DisplayName, issue.Number, issue.Title);
+
+            // Best-effort: post clarifying questions on ambiguous acceptance criteria before implementation
+            await PostClarifyingQuestionsAsync(issue.Number, issue.Body ?? "", ct);
 
             var pmSpecDoc = await GetPMSpecForContextAsync(ct);
             var architectureDoc = await GetArchitectureForContextAsync(ct);
@@ -622,12 +653,13 @@ public abstract class EngineerAgentBase : AgentBase
             var createPrStepId = _taskTracker.BeginStep(Identity.Id, taskId, "Create PR",
                 $"Creating PR for issue #{issue.Number}", Identity.ModelTier);
             var prDescription = $"Closes #{issue.Number}\n\n" +
+                $"<!-- agent-id: {Identity.Id} -->\n" +
                 $"## Understanding\n{ExtractSection(planContent, "summary", "understand")}\n\n" +
                 $"## Acceptance Criteria\n{ExtractSection(planContent, "acceptance", "criteria")}\n\n" +
                 $"## Implementation Steps\n{ExtractSection(planContent, "task", "plan", "step")}";
 
             var branchName = await PrWorkflow.CreateTaskBranchAsync(
-                Identity.DisplayName,
+                Identity.Id,
                 $"issue-{issue.Number}-{Slugify(issue.Title)}",
                 ct);
 
@@ -686,6 +718,15 @@ public abstract class EngineerAgentBase : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Step 1: Generate ordered implementation steps from the PR description
+        // If SingleCommitMode is enabled, skip step generation and produce all code in one pass
+        if (Config.Agents.SingleCommitMode)
+        {
+            Logger.LogInformation("{Role} {Name} using single-commit mode for PR #{Number}",
+                Identity.Role, Identity.DisplayName, pr.Number);
+            await ImplementSinglePassAsync(pr, issue, pmSpecDoc, architectureDoc, techStack, chat, ct);
+            return;
+        }
+
         UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating implementation steps");
         var genStepsStepId = _taskTracker.BeginStep(Identity.Id, implTaskId, "Generate implementation steps",
             $"Breaking PR #{pr.Number} into discrete implementation steps", Identity.ModelTier);
@@ -1063,7 +1104,10 @@ public abstract class EngineerAgentBase : AgentBase
             "Include all source code files, configuration, and tests. " +
             "Every file MUST use the FILE: marker format. " +
             "File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
-            "Do NOT put code, directives, brackets, or instructions in the file path.");
+            "Do NOT put code, directives, brackets, or instructions in the file path.\n\n" +
+            "CRITICAL: The app must compile and run after your changes. " +
+            "Use graceful fallbacks for missing dependencies from other tasks — " +
+            "never throw NotImplementedException or reference types that don't exist yet.");
 
         history.AddUserMessage(promptBuilder.ToString());
 
@@ -1073,6 +1117,43 @@ public abstract class EngineerAgentBase : AgentBase
 
         var finalOutput = await RunSelfReviewAsync(history, implementation, ct);
         await CommitAndNotifyAsync(pr, issue, finalOutput, implementation, ct);
+    }
+
+    /// <summary>
+    /// Uses a quick AI call to identify ambiguities in the issue's acceptance criteria
+    /// and posts clarifying questions as a comment. Best-effort — never blocks implementation.
+    /// </summary>
+    private async Task PostClarifyingQuestionsAsync(int issueNumber, string issueBody, CancellationToken ct)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(issueBody))
+                return;
+
+            var kernel = Models.GetKernel("budget", Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+            var history = CreateChatHistory();
+            history.AddSystemMessage(
+                "You are a software engineer reviewing a task before implementation. " +
+                "Identify 1-3 clarifying questions about ambiguous acceptance criteria. " +
+                "If everything is clear, respond with just 'CLEAR'. " +
+                "Keep questions concise and actionable.");
+            history.AddUserMessage($"Task:\n{issueBody}");
+            var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+            var content = response.Content?.Trim() ?? "";
+
+            if (!content.Contains("CLEAR", StringComparison.OrdinalIgnoreCase) && content.Length > 10)
+            {
+                await GitHub.AddIssueCommentAsync(issueNumber,
+                    $"**[{Identity.DisplayName}] Pre-Implementation Questions:**\n\n{content}\n\n" +
+                    "_Proceeding with implementation based on current understanding._", ct);
+                LogActivity("task", $"❓ Posted clarifying questions on issue #{issueNumber}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Failed to post clarifying questions on issue #{Number}", issueNumber);
+        }
     }
 
     /// <summary>
@@ -1136,7 +1217,11 @@ public abstract class EngineerAgentBase : AgentBase
                   "node_modules for Node.js, __pycache__ for Python, target for Rust/Java, etc.). " +
                   "This prevents build artifacts from being committed. " +
                   "IMPORTANT: Do NOT gitignore data files like data.json, sample-data.json, etc. " +
-                  "These must be committed so the app works when cloned.\n\n"
+                  "These must be committed so the app works when cloned.\n\n" +
+                  "DATA FILE RULE: Do NOT create 'example' or 'template' data files (e.g., data.example.json, " +
+                  "data.template.json). Create the ACTUAL data file (e.g., data.json) with sample data directly. " +
+                  "The app must compile and run immediately after this PR is cloned — no manual file renaming steps. " +
+                  "Never gitignore data files that the app needs to start.\n\n"
                 : "";
             var rendered = PromptService.RenderAsync("engineer-base/step-implementation-system", new Dictionary<string, string>
             {
@@ -1168,6 +1253,10 @@ public abstract class EngineerAgentBase : AgentBase
                   "This prevents build artifacts from being committed. " +
                   "IMPORTANT: Do NOT gitignore data files like data.json, sample-data.json, etc. " +
                   "These must be committed so the app works when cloned.\n\n" +
+                  "DATA FILE RULE: Do NOT create 'example' or 'template' data files (e.g., data.example.json, " +
+                  "data.template.json). Create the ACTUAL data file (e.g., data.json) with sample data directly. " +
+                  "The app must compile and run immediately after this PR is cloned — no manual file renaming steps. " +
+                  "Never gitignore data files that the app needs to start.\n\n" +
                   "VISUAL PLACEHOLDER RULE (WEB/UI PROJECTS): Every stub/placeholder component MUST be " +
                   "VISUALLY DISTINCT when rendered. Use colored backgrounds (#f0f4f8, #e8f4fd, #fef3cd), " +
                   "dashed borders (2px dashed #94a3b8), padding (2rem), and large bold label text " +
@@ -1714,6 +1803,7 @@ public abstract class EngineerAgentBase : AgentBase
         Logger.LogInformation("{Role} {Name} received issue assignment: #{IssueNumber} {Title}",
             Identity.Role, Identity.DisplayName, message.IssueNumber, message.IssueTitle);
         LogActivity("message", $"Received issue assignment: #{message.IssueNumber} {message.IssueTitle}");
+        BusAssignedIssues.Add(message.IssueNumber);
         AssignmentQueue.Enqueue(message);
         return Task.CompletedTask;
     }
@@ -2104,11 +2194,15 @@ public abstract class EngineerAgentBase : AgentBase
 
     /// <summary>Get PMSpec content. Junior overrides to truncate for budget models.</summary>
     protected virtual Task<string> GetPMSpecForContextAsync(CancellationToken ct)
-        => ProjectFiles.GetPMSpecAsync(ct);
+        => Config.Agents.SlimEngineerContext
+            ? Task.FromResult("See linked issue for acceptance criteria and architecture context.")
+            : ProjectFiles.GetPMSpecAsync(ct);
 
     /// <summary>Get Architecture content. Junior overrides to truncate for budget models.</summary>
     protected virtual Task<string> GetArchitectureForContextAsync(CancellationToken ct)
-        => ProjectFiles.GetArchitectureDocAsync(ct);
+        => Config.Agents.SlimEngineerContext
+            ? Task.FromResult("See linked issue for acceptance criteria and architecture context.")
+            : ProjectFiles.GetArchitectureDocAsync(ct);
 
     /// <summary>
     /// Read visual design reference files from the repository for UI implementation context.
@@ -2147,7 +2241,10 @@ public abstract class EngineerAgentBase : AgentBase
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("## Visual Design Reference");
             sb.AppendLine("The following design files define the EXACT UI to be built. " +
-                "Match the layout, colors, typography, and component structure precisely.\n");
+                "You MUST match the layout, colors, typography, spacing, and component structure precisely. " +
+                "Copy CSS values (hex colors, font sizes, margins, paddings, grid templates) DIRECTLY from the design HTML. " +
+                "Do NOT simplify, generalize, or 'improve' the design — reproduce it pixel-for-pixel. " +
+                "The final rendered page must look identical to the design reference at 1920×1080.\n");
 
             // Include screenshot image references for visual context
             if (designScreenshots.Count > 0)
@@ -2169,7 +2266,7 @@ public abstract class EngineerAgentBase : AgentBase
 
                 sb.AppendLine($"### `{file}`");
                 sb.AppendLine("```html");
-                sb.AppendLine(content.Length > 6000 ? content[..6000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine(content.Length > 15000 ? content[..15000] + "\n<!-- truncated -->" : content);
                 sb.AppendLine("```");
                 sb.AppendLine();
             }
@@ -2555,6 +2652,22 @@ public abstract class EngineerAgentBase : AgentBase
 
             Logger.LogWarning("{Role} {Name} build failed (attempt {Attempt}/{Max}): {ErrorCount} errors",
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxBuildRetries + 1, buildResult.ParsedErrors.Count);
+
+            // Escalate model tier after 2 failed fix attempts to break out of repetitive failures
+            var effectiveChat = chat;
+            if (attempt >= 2 && Models is not null)
+            {
+                var escalatedTier = GetEscalatedTier(Identity.ModelTier);
+                if (escalatedTier != Identity.ModelTier)
+                {
+                    var escalatedKernel = Models.GetKernel(escalatedTier, Identity.Id);
+                    effectiveChat = escalatedKernel.GetRequiredService<IChatCompletionService>();
+                    Logger.LogInformation("{Role} {Name} escalating build-fix model from {Current} to {Escalated} tier on attempt {Attempt}",
+                        Identity.Role, Identity.DisplayName, Identity.ModelTier, escalatedTier, attempt + 1);
+                    LogActivity("model-escalation", $"⬆️ Escalating to {escalatedTier} tier for build-fix attempt {attempt + 1}");
+                }
+            }
+
             LogActivity("build", $"🔧 Build failed (attempt {attempt + 1}), asking AI to fix {buildResult.ParsedErrors.Count} errors");
 
             var fixPrompt = PromptService is not null
@@ -2622,7 +2735,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             var fixHistory = CreateChatHistory();
             fixHistory.AddUserMessage(fixPrompt);
-            var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+            var fixResponse = await effectiveChat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
             var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
 
             // Apply scope filter to build-fix output — prevents scope creep during error recovery
@@ -2651,6 +2764,18 @@ public abstract class EngineerAgentBase : AgentBase
 
         return (false, lastErrorSummary);
     }
+
+    /// <summary>
+    /// Returns the next higher model tier for escalation during build/test fix retries.
+    /// Escalation path: local → budget → standard → premium (premium stays at premium).
+    /// </summary>
+    private static string GetEscalatedTier(string currentTier) => currentTier switch
+    {
+        "local" => "budget",
+        "budget" => "standard",
+        "standard" => "premium",
+        _ => "premium"  // premium and unknown tiers stay at premium
+    };
 
     /// <summary>
     /// Extract relative file paths from build error messages.
@@ -2794,6 +2919,21 @@ public abstract class EngineerAgentBase : AgentBase
                 testResult.Failed, testResult.Passed);
             LogActivity("test", $"🧪 Tests failed (attempt {attempt + 1}/{wsConfig.MaxTestRetries}): {testResult.Failed} failed, asking AI to fix");
 
+            // Escalate model tier after 2 failed test-fix attempts
+            var effectiveChat = chat;
+            if (attempt >= 2 && Models is not null)
+            {
+                var escalatedTier = GetEscalatedTier(Identity.ModelTier);
+                if (escalatedTier != Identity.ModelTier)
+                {
+                    var escalatedKernel = Models.GetKernel(escalatedTier, Identity.Id);
+                    effectiveChat = escalatedKernel.GetRequiredService<IChatCompletionService>();
+                    Logger.LogInformation("{Role} {Name} escalating test-fix model from {Current} to {Escalated} tier on attempt {Attempt}",
+                        Identity.Role, Identity.DisplayName, Identity.ModelTier, escalatedTier, attempt + 1);
+                    LogActivity("model-escalation", $"⬆️ Escalating to {escalatedTier} tier for test-fix attempt {attempt + 1}");
+                }
+            }
+
             var failureSummary = testResult.FailureDetails.Count > 0
                 ? string.Join("\n", testResult.FailureDetails.Take(10))
                 : testResult.Output.Length > 2000 ? testResult.Output[^2000..] : testResult.Output;
@@ -2828,7 +2968,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             var fixHistory = CreateChatHistory();
             fixHistory.AddUserMessage(fixPrompt);
-            var fixResponse = await chat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
+            var fixResponse = await effectiveChat.GetChatMessageContentAsync(fixHistory, cancellationToken: ct);
             var fixedFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(fixResponse.Content ?? "");
 
             foreach (var file in fixedFiles)
@@ -3063,14 +3203,15 @@ public abstract class EngineerAgentBase : AgentBase
         {
             var trimmed = line.Trim();
 
-            // Markdown format: "- ➕ **Create:** `path`" or "- ✏️ **Modify:** `path`"
-            if (trimmed.Contains("**Create:**") || trimmed.Contains("**Modify:**"))
+            // Markdown format: "- ➕ **Create:** `path`" or "- ✏️ **Modify:** `path`" or "- 🔗 **Shared (multi-task):** `path`"
+            if (trimmed.Contains("**Create:**") || trimmed.Contains("**Modify:**") || trimmed.Contains("**Shared"))
             {
                 var backtickStart = trimmed.IndexOf('`');
                 var backtickEnd = trimmed.LastIndexOf('`');
                 if (backtickStart >= 0 && backtickEnd > backtickStart)
                 {
                     var path = trimmed[(backtickStart + 1)..backtickEnd].Trim();
+                    path = StripParentheticalSuffix(path);
                     if (!string.IsNullOrEmpty(path))
                         allowed.Add(NormalizePath(path));
                 }
@@ -3082,12 +3223,73 @@ public abstract class EngineerAgentBase : AgentBase
             {
                 var colonIdx = trimmed.IndexOf(':');
                 var path = trimmed[(colonIdx + 1)..].Trim();
+                path = StripParentheticalSuffix(path);
                 if (!string.IsNullOrEmpty(path))
                     allowed.Add(NormalizePath(path));
             }
         }
 
         return allowed;
+    }
+
+    /// <summary>
+    /// Strips parenthetical namespace suffixes from file paths.
+    /// The SE Lead sometimes appends namespace hints like "Program.cs(ReportingDashboard)"
+    /// or "App.razor(ReportingDashboard.Components)" which break path matching.
+    /// </summary>
+    private static string StripParentheticalSuffix(string path)
+    {
+        // Match pattern: path ending with "(SomeNamespace)" after a file extension
+        var parenIdx = path.LastIndexOf('(');
+        if (parenIdx > 0 && path.EndsWith(')'))
+        {
+            var beforeParen = path[..parenIdx];
+            // Only strip if the part before '(' looks like a file path (has an extension)
+            if (beforeParen.Contains('.'))
+                return beforeParen;
+        }
+        return path;
+    }
+
+    /// <summary>
+    /// Extracts the linked issue number from a PR body (e.g., "Closes #1626").
+    /// Returns null if no linked issue is found.
+    /// </summary>
+    protected static int? ExtractLinkedIssueFromPrBody(string? body)
+    {
+        if (string.IsNullOrEmpty(body)) return null;
+        // Match patterns like "Closes #123", "Fixes #456", "Resolves #789"
+        var match = System.Text.RegularExpressions.Regex.Match(body,
+            @"(?:Closes|Fixes|Resolves)\s+#(\d+)", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return match.Success && int.TryParse(match.Groups[1].Value, out var num) ? num : null;
+    }
+
+    /// <summary>
+    /// Extracts the agent ID from a PR body's metadata comment (e.g., "&lt;!-- agent-id: frontend-engineer-1 --&gt;").
+    /// Returns null if no agent ID is found. Used to prevent multi-agent collision on same PR.
+    /// </summary>
+    protected static string? ExtractAgentIdFromPrBody(string? body)
+    {
+        if (string.IsNullOrEmpty(body)) return null;
+        var match = System.Text.RegularExpressions.Regex.Match(body,
+            @"<!--\s*agent-id:\s*(\S+)\s*-->", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        return match.Success ? match.Groups[1].Value : null;
+    }
+
+    /// <summary>
+    /// Checks if a PR belongs to this agent. Uses agent-id metadata in PR body (durable)
+    /// or linked issue in BusAssignedIssues (volatile). For PRs without agent-id metadata
+    /// (legacy PRs created before this check), falls back to bus assignment check.
+    /// </summary>
+    protected bool IsOurPullRequest(AgentPullRequest pr)
+    {
+        var prAgentId = ExtractAgentIdFromPrBody(pr.Body);
+        if (prAgentId is not null)
+            return string.Equals(prAgentId, Identity.Id, StringComparison.OrdinalIgnoreCase);
+
+        // Fallback for legacy PRs without agent-id metadata
+        var linkedIssue = ExtractLinkedIssueFromPrBody(pr.Body);
+        return linkedIssue.HasValue && BusAssignedIssues.Contains(linkedIssue.Value);
     }
 
     /// <summary>
@@ -3163,7 +3365,14 @@ public abstract class EngineerAgentBase : AgentBase
             || fileName.Equals("Directory.Build.props", StringComparison.OrdinalIgnoreCase)
             || fileName.Equals("Directory.Build.targets", StringComparison.OrdinalIgnoreCase)
             || fileName.Equals("global.json", StringComparison.OrdinalIgnoreCase)
-            || fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase);
+            || fileName.Equals("nuget.config", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals(".gitignore", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("Routes.razor", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("_Imports.razor", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("appsettings.json", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("appsettings.Development.json", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("launchSettings.json", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("Program.cs", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsFileAllowed(string normalizedPath, HashSet<string> allowed)
