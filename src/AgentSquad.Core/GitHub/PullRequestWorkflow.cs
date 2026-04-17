@@ -16,7 +16,9 @@ public enum MergeAttemptResult
     /// <summary>Code approved but waiting for Test Engineer to add tests (inline test workflow).</summary>
     AwaitingTests,
     /// <summary>All reviewers approved and PR is ready to merge, but merge was deferred (e.g. for a human gate).</summary>
-    ReadyToMerge
+    ReadyToMerge,
+    /// <summary>PR is null, already closed, or already merged — no action needed.</summary>
+    NotOpen
 }
 
 /// <summary>
@@ -907,7 +909,7 @@ public partial class PullRequestWorkflow
     {
         var pr = await _github.GetPullRequestAsync(prNumber, ct);
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
-            return MergeAttemptResult.ConflictBlocked;
+            return MergeAttemptResult.NotOpen;
 
         var approvedReviewers = await GetApprovedReviewersAsync(prNumber, ct);
         return await AttemptMergeAsync(prNumber, mergerAgent, approvedReviewers, pr, ct);
@@ -937,18 +939,35 @@ public partial class PullRequestWorkflow
 
             if (updated)
             {
-                await Task.Delay(5000, ct);
-                try
+                // Poll with exponential backoff — GitHub needs time to recompute mergeable status
+                const int maxMergeRetries = 3;
+                Exception? lastException = null;
+                for (int attempt = 0; attempt < maxMergeRetries; attempt++)
                 {
-                    await _github.MergePullRequestAsync(prNumber,
-                        $"Merged by {mergerAgent} after branch sync and approval from {string.Join(" and ", approvedReviewers)}", ct);
+                    var delayMs = (attempt + 1) * 5000; // 5s, 10s, 15s
+                    await Task.Delay(delayMs, ct);
+                    try
+                    {
+                        await _github.MergePullRequestAsync(prNumber,
+                            $"Merged by {mergerAgent} after branch sync and approval from {string.Join(" and ", approvedReviewers)}", ct);
+                        lastException = null;
+                        break;
+                    }
+                    catch (Octokit.PullRequestNotMergeableException retryEx)
+                    {
+                        lastException = retryEx;
+                        _logger.LogDebug(retryEx,
+                            "PR #{Number} not yet mergeable after branch update (attempt {Attempt}/{Max})",
+                            prNumber, attempt + 1, maxMergeRetries);
+                    }
                 }
-                catch (Exception retryEx)
+
+                if (lastException is not null)
                 {
-                    _logger.LogWarning(retryEx, "PR #{Number} still not mergeable after branch update", prNumber);
+                    _logger.LogWarning(lastException, "PR #{Number} still not mergeable after branch update and {Max} retries", prNumber, maxMergeRetries);
                     await _github.AddPullRequestCommentAsync(prNumber,
                         $"⚠️ **Merge blocked** — PR has conflicts with `main` that could not be auto-resolved. " +
-                        $"Branch update was attempted but merge still failed.", ct);
+                        $"Branch update was attempted but merge still failed after {maxMergeRetries} retries.", ct);
                     return MergeAttemptResult.ConflictBlocked;
                 }
             }

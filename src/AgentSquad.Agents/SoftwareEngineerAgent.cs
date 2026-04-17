@@ -66,7 +66,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// Value is (agentId, claimedAtUtc) for debugging stale claims.
     /// </summary>
     private static readonly ConcurrentDictionary<int, (string AgentId, DateTime ClaimedAt)> s_activeReviews = new();
-    private readonly Dictionary<int, int> _conflictRetryCount = new();
+    private readonly Dictionary<int, int> _conflictRetryByIssue = new();
     private string? _currentTaskName; // Human-readable name for dashboard display
     private DateTime _lastReviewDiscovery = DateTime.MinValue;
     private static readonly TimeSpan ReviewDiscoveryInterval = TimeSpan.FromMinutes(2);
@@ -3166,66 +3166,69 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// <summary>
     /// Close a PR that has unresolvable merge conflicts and reset the associated task
     /// so it can be re-implemented from a clean branch off latest main.
-    /// Max 1 retry per task to prevent infinite close-and-recreate loops.
+    /// Max retries per task (keyed by issue number) to prevent infinite close-and-recreate loops.
     /// </summary>
     private async Task TryCloseAndRecreatePRAsync(AgentPullRequest pr, CancellationToken ct)
     {
-        const int MaxConflictRetries = 1;
+        const int MaxConflictRetries = 2;
 
-        _conflictRetryCount.TryGetValue(pr.Number, out var retries);
+        // Resolve the associated task FIRST so we can key retry count by issue number
+        EngineeringTask? task = null;
+
+        // Search by task name from PR title
+        var taskTitle = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title);
+        if (taskTitle is not null)
+        {
+            // Handle doubled agent prefix: "Agent: Agent: TaskName"
+            var innerName = PullRequestWorkflow.ParseTaskTitleFromTitle(taskTitle);
+            if (innerName is not null) taskTitle = innerName;
+            task = _taskManager.FindByName(taskTitle);
+        }
+
+        // Fallback: search by issue number from agent assignments
+        if (task is null)
+        {
+            foreach (var issueNum in _agentAssignments.Values)
+            {
+                var candidate = _taskManager.FindByIssueNumber(issueNum);
+                if (candidate is not null && pr.Title.Contains(candidate.Name, StringComparison.OrdinalIgnoreCase))
+                {
+                    task = candidate;
+                    break;
+                }
+            }
+        }
+
+        // Key retry count by issue number (stable across PR close/recreate cycles)
+        var retryKey = task?.IssueNumber ?? -pr.Number; // negative PR# as fallback key
+        _conflictRetryByIssue.TryGetValue(retryKey, out var retries);
         if (retries >= MaxConflictRetries)
         {
             Logger.LogWarning(
-                "PR #{PrNumber} already retried {Retries} time(s) for conflicts — giving up",
-                pr.Number, retries);
+                "Task (issue {IssueKey}) already retried {Retries} time(s) for conflicts — giving up",
+                retryKey, retries);
             await GitHub.AddPullRequestCommentAsync(pr.Number,
-                $"⛔ **Permanently blocked** — This PR has been closed and recreated {retries} time(s) " +
+                $"⛔ **Permanently blocked** — This task has been closed and recreated {retries} time(s) " +
                 $"but continues to hit merge conflicts. Requires manual intervention.", ct);
             return;
         }
 
         try
         {
-            // Find the associated task via the task manager
-            EngineeringTask? task = null;
-
-            // Search by task name from PR title
-            var taskTitle = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title);
-            if (taskTitle is not null)
-            {
-                // Handle doubled agent prefix: "Agent: Agent: TaskName"
-                var innerName = PullRequestWorkflow.ParseTaskTitleFromTitle(taskTitle);
-                if (innerName is not null) taskTitle = innerName;
-                task = _taskManager.FindByName(taskTitle);
-            }
-
-            // Fallback: search by issue number from agent assignments
-            if (task is null)
-            {
-                foreach (var issueNum in _agentAssignments.Values)
-                {
-                    var candidate = _taskManager.FindByIssueNumber(issueNum);
-                    if (candidate is not null && pr.Title.Contains(candidate.Name, StringComparison.OrdinalIgnoreCase))
-                    {
-                        task = candidate;
-                        break;
-                    }
-                }
-            }
-
             // Close the conflicted PR with an explanation
             var closeComment =
                 $"🔄 **Closing due to unresolvable merge conflicts.**\n\n" +
                 $"This PR's branch has conflicts with `main` that cannot be auto-resolved. " +
-                $"The task will be re-implemented on a fresh branch from latest `main`.";
+                $"The task will be re-implemented on a fresh branch from latest `main`." +
+                $" (retry {retries + 1}/{MaxConflictRetries})";
 
             await GitHub.AddPullRequestCommentAsync(pr.Number, closeComment, ct);
             await GitHub.ClosePullRequestAsync(pr.Number, ct);
 
             Logger.LogInformation(
-                "Closed conflicted PR #{PrNumber} ({Title}), will recreate from clean main",
-                pr.Number, pr.Title);
-            LogActivity("task", $"🔄 Closed conflicted PR #{pr.Number} — will recreate from clean branch");
+                "Closed conflicted PR #{PrNumber} ({Title}), will recreate from clean main (retry {Retry}/{Max})",
+                pr.Number, pr.Title, retries + 1, MaxConflictRetries);
+            LogActivity("task", $"🔄 Closed conflicted PR #{pr.Number} — will recreate from clean branch (retry {retries + 1}/{MaxConflictRetries})");
 
             if (!string.IsNullOrEmpty(pr.HeadBranch))
             {
@@ -3236,7 +3239,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 }
             }
 
-            _conflictRetryCount[pr.Number] = retries + 1;
+            _conflictRetryByIssue[retryKey] = retries + 1;
 
             if (CurrentPrNumber == pr.Number)
             {
