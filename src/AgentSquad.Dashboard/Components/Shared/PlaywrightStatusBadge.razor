@@ -1,6 +1,6 @@
 @using AgentSquad.Core.Workspace
+@using System.Net.Http.Json
 @inject IServiceProvider ServiceProvider
-@inject HttpClient Http
 @implements IDisposable
 
 <div class="playwright-badge @StatusClass" title="@TooltipText">
@@ -14,6 +14,7 @@
     private DateTime? _lastValidated;
     private Timer? _refreshTimer;
     private PlaywrightRunner? _runner;
+    private HttpClient? _http;
 
     private string StatusClass => _isReady ? "pw-ready" : "pw-not-ready";
     private string StatusIcon => _isReady ? "🟢" : "🔴";
@@ -24,6 +25,7 @@
     protected override void OnInitialized()
     {
         _runner = ServiceProvider.GetService<PlaywrightRunner>();
+        _http = ServiceProvider.GetService<HttpClient>();
 
         if (_runner is not null)
         {
@@ -48,10 +50,10 @@
                 _reason = _runner.NotReadyReason;
                 _lastValidated = _runner.LastValidatedUtc;
             }
-            else
+            else if (_http is not null)
             {
                 // Standalone mode — fetch from Runner API
-                var result = await Http.GetFromJsonAsync<PlaywrightStatusDto>("/api/dashboard/health/playwright");
+                var result = await _http.GetFromJsonAsync<PlaywrightStatusDto>("/api/dashboard/health/playwright");
                 if (result is not null)
                 {
                     _isReady = result.IsReady;
