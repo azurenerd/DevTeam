@@ -382,18 +382,34 @@ else
             }
             else if (_stepHttp is not null)
             {
-                var groups = await _stepHttp.GetFromJsonAsync<List<AgentTaskGroup>>($"/api/steps/{AgentId}/grouped");
-                if (groups is not null) _taskGroups = groups;
-                var progress = await _stepHttp.GetFromJsonAsync<StepProgressDto>($"/api/steps/{AgentId}/progress");
-                if (progress is not null)
+                var options = new System.Text.Json.JsonSerializerOptions
                 {
-                    _stepCompleted = progress.Completed;
-                    _stepTotal = progress.Total;
+                    PropertyNameCaseInsensitive = true
+                };
+                var groupResp = await _stepHttp.GetAsync($"/api/steps/{AgentId}/grouped");
+                if (groupResp.IsSuccessStatusCode)
+                {
+                    var groups = await groupResp.Content.ReadFromJsonAsync<List<AgentTaskGroup>>(options);
+                    if (groups is not null) _taskGroups = groups;
+                }
+
+                var progResp = await _stepHttp.GetAsync($"/api/steps/{AgentId}/progress");
+                if (progResp.IsSuccessStatusCode)
+                {
+                    var progress = await progResp.Content.ReadFromJsonAsync<StepProgressDto>(options);
+                    if (progress is not null)
+                    {
+                        _stepCompleted = progress.Completed;
+                        _stepTotal = progress.Total;
+                    }
                 }
             }
             await InvokeAsync(StateHasChanged);
         }
-        catch { /* Steps not available */ }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"LoadStepsAsync failed for {AgentId}: {ex.Message}");
+        }
     }
 
     private record StepProgressDto(int Completed, int Total);
