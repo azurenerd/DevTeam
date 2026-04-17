@@ -2073,7 +2073,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     }
                     else
                     {
-                        (approved, reviewBody) = await EvaluatePrQualityAsync(pr, ct);
+                        IReadOnlyList<InlineReviewComment> inlineComments;
+                        (approved, reviewBody, inlineComments) = await EvaluatePrQualityAsync(pr, ct);
+
+                        // Submit inline file comments if we have any and the feature is enabled
+                        if (inlineComments.Count > 0 && Config.Review.EnableInlineComments)
+                        {
+                            await SubmitInlineReviewCommentsAsync(prNumber, reviewBody ?? "", approved, inlineComments, ct);
+                        }
                     }
                 }
 
@@ -3559,7 +3566,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
     #region AI-Assisted Methods
 
-    private async Task<(bool Approved, string? ReviewBody)> EvaluatePrQualityAsync(
+    private async Task<(bool Approved, string? ReviewBody, IReadOnlyList<InlineReviewComment> InlineComments)> EvaluatePrQualityAsync(
         AgentPullRequest pr, CancellationToken ct)
     {
         try
@@ -3594,60 +3601,60 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Tier 4: Get repo structure for duplicate detection during review
             var repoStructure = await GetRepoStructureForContextAsync(ct);
 
+            var useInlineComments = Config.Review.EnableInlineComments;
+
             var history = CreateChatHistory();
             var reviewSys = PromptService is not null
                 ? await PromptService.RenderAsync("software-engineer/code-review-system",
                     new Dictionary<string, string>(), ct)
                 : null;
-            history.AddSystemMessage(reviewSys ??
+
+            // Build JSON-structured review system prompt (same pattern as Architect)
+            var systemPrompt = reviewSys ??
                 "You are a Software Engineer doing a technical code review.\n\n" +
                 "SCOPE: You are reviewing EXACTLY ONE PR. Do NOT mention or review other PRs, " +
                 "other tasks, or other engineers' work. Every issue you raise MUST reference a " +
-                "file that appears in THIS PR's diff. If a file is not in the diff, do not comment on it.\n\n" +
+                "file that appears in THIS PR's diff. If a file is not in the diff, do not comment on it.\n\n";
+
+            // Append JSON format instructions
+            systemPrompt +=
                 "CHECK: architecture compliance, implementation completeness, code quality, " +
                 "bugs/logic errors, missing validation, test coverage.\n\n" +
                 "ACCEPTANCE CRITERIA FILE COMPLETENESS CHECK (critical):\n" +
                 "- Compare the ACTUAL files in this PR against the acceptance criteria and file plan " +
                 "in the linked issue and PR description.\n" +
                 "- If the acceptance criteria specify files/components that should be created " +
-                "(e.g., Models, Interfaces, Layouts, CSS, config files, data files) and those files " +
-                "are MISSING from the PR, this is a REQUEST_CHANGES issue.\n" +
-                "- A PR that delivers only a fraction of expected files is INCOMPLETE. " +
-                "For example, if acceptance criteria list 15 files but only 3 are present, that's a blocker.\n" +
+                "and those files are MISSING from the PR, this is a REQUEST_CHANGES issue.\n" +
                 "- List each missing file/component by name.\n\n" +
                 "DUPLICATE/CONFLICT CHECKS (critical for multi-agent projects):\n" +
                 "- Does this PR create types/classes that ALREADY EXIST in the main branch file listing?\n" +
                 "- Does this PR use the CORRECT namespace consistent with existing code structure?\n" +
-                "- Should any new files instead be MODIFICATIONS to existing files?\n" +
-                "- Are there naming conflicts (e.g., a class named 'Task' that collides with System.Threading.Tasks.Task)?\n" +
-                "- Do all using/import statements reference namespaces that actually exist?\n" +
-                "If you detect duplication or namespace conflicts, mark as REQUEST_CHANGES with specific fix instructions.\n\n" +
-                "EXCESSIVE MODIFICATION CHECK (prevents UI/styling regressions):\n" +
-                "- If this PR modifies an existing file (especially .razor, .css, .html, .jsx), check " +
-                "whether the changes are SURGICAL (targeted additions/edits) or a FULL REWRITE.\n" +
-                "- A PR that renames existing CSS classes, reorganizes HTML structure, or removes existing " +
-                "styling/functionality that was NOT mentioned in the task scope is a REQUEST_CHANGES issue.\n" +
-                "- The diff should show mostly ADDITIONS for new features. Large-scale modifications to " +
-                "existing lines that aren't related to the task indicate an unnecessary rewrite.\n" +
-                "- Flag with: 'Excessive modification of existing code — rewrite detected. Only the " +
-                "[specific feature] should be added; existing [component] structure must be preserved.'\n\n" +
-                "CRITICAL RULE: NEVER mention truncated code, incomplete code display, or " +
-                "inability to see full implementations. If you cannot see a method body, " +
-                "ASSUME it is correctly implemented. Do NOT request changes based on code you " +
-                "cannot verify — only flag issues you can CONCRETELY identify in the visible code.\n\n" +
-                "Only request changes for issues that are significant AND fixable. " +
-                "Minor style preferences → APPROVE. Complete rewrites needed → APPROVE with caveat.\n\n" +
-                "RESPONSE FORMAT — your ENTIRE response must be ONLY:\n" +
-                "- If requesting changes: a **numbered list** (1. 2. 3.) starting on the FIRST line. " +
-                "Each item states the issue with **bold** file/method names. Nothing before the list. " +
-                "No preamble, no thinking, no analysis narration, no 'Let me check', no descriptions of " +
-                "what you examined.\n" +
-                "- If approving: one sentence only.\n" +
-                "- Last line: VERDICT: APPROVE or VERDICT: REQUEST_CHANGES\n\n" +
-                "WRONG: 'Let me review the code... Based on my analysis... 1. Issue'\n" +
-                "WRONG: '2. **Dashboard.razor** — helper methods truncated, cannot verify'\n" +
-                "RIGHT: '1. **AuthController.cs** — missing null check on user parameter'\n" +
-                "RIGHT: '2. Missing **Models/ReportData.cs**, **Models/Milestone.cs** listed in acceptance criteria'");
+                "If you detect duplication or namespace conflicts, mark as REQUEST_CHANGES.\n\n" +
+                "EXCESSIVE MODIFICATION CHECK:\n" +
+                "- If this PR modifies an existing file, check whether the changes are SURGICAL or a FULL REWRITE.\n" +
+                "- A PR that rewrites existing CSS/HTML structure beyond the task scope is REQUEST_CHANGES.\n\n" +
+                "CRITICAL RULE: NEVER mention truncated code or inability to see full implementations. " +
+                "If you cannot see a method body, ASSUME it is correctly implemented.\n\n" +
+                "Only request changes for significant AND fixable issues. Minor style → APPROVE.\n\n" +
+                "RESPONSE FORMAT — you MUST respond with ONLY a JSON object, nothing else.\n" +
+                "Do NOT include any text before or after the JSON. Do NOT wrap in markdown fences.\n" +
+                "The JSON schema is:\n" +
+                "- \"verdict\": string, either \"APPROVE\" or \"REQUEST_CHANGES\"\n" +
+                "- \"summary\": string, brief 1-2 sentence assessment\n" +
+                (useInlineComments
+                    ? "- \"comments\": array of objects with:\n" +
+                      "  - \"file\": string, relative file path (e.g. \"ReportingDashboard/Services/MyService.cs\")\n" +
+                      "  - \"line\": integer, line number in the new file where the comment applies\n" +
+                      "  - \"priority\": string, one of \"🔴 Critical\", \"🟠 Important\", \"🟡 Suggestion\", \"🟢 Nit\"\n" +
+                      "  - \"body\": string, description of the issue\n"
+                    : "") +
+                "\nExample response:\n" +
+                "{\"verdict\":\"REQUEST_CHANGES\",\"summary\":\"Missing null validation in service layer.\"" +
+                (useInlineComments ? ",\"comments\":[{\"file\":\"src/Services/MyService.cs\",\"line\":42,\"priority\":\"🔴 Critical\",\"body\":\"Missing null check on user parameter\"}]" : "") +
+                "}\n\n" +
+                "Your entire response must be parseable as JSON. Start with { and end with }.";
+
+            history.AddSystemMessage(systemPrompt);
 
             var reviewContextBuilder = new System.Text.StringBuilder();
             reviewContextBuilder.AppendLine($"## Architecture\n{architectureDoc}\n");
@@ -3744,68 +3751,81 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 Logger.LogWarning("SE review of PR #{Number} returned garbage AI response, retrying once", pr.Number);
 
-                // Retry with a more direct prompt
                 history.AddAssistantMessage(result);
                 history.AddUserMessage(
-                    "That response was not a code review. I need you to review the actual code files above.\n" +
-                    "Output ONLY a numbered list of code issues, or 'LGTM' if the code is acceptable.\n" +
-                    "End with VERDICT: APPROVE or VERDICT: REQUEST_CHANGES");
+                    "That response was not valid JSON. Respond with ONLY a JSON object.\n" +
+                    "Example: {\"verdict\":\"APPROVE\",\"summary\":\"Code looks good.\"}\n" +
+                    "Or: {\"verdict\":\"REQUEST_CHANGES\",\"summary\":\"Issues found.\",\"comments\":[]}");
 
                 response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 result = response.Content?.Trim() ?? "";
 
-                // If still garbage after retry, auto-approve to avoid posting nonsense
                 if (PullRequestWorkflow.IsGarbageAIResponse(result))
                 {
                     Logger.LogWarning("SE review of PR #{Number} still garbage after retry — auto-approving", pr.Number);
-                    return (true, "Code review passed. Implementation looks reasonable for the task scope.");
+                    return (true, "Code review passed. Implementation looks reasonable for the task scope.", []);
                 }
             }
 
-            var approved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase);
+            // Try to parse as structured JSON (reuse Architect's pattern)
+            var structured = TryParseStructuredSeReview(result);
+            if (structured is not null)
+            {
+                var approved = structured.Value.Approved;
+                var summary = structured.Value.Summary;
+                var inlineComments = structured.Value.Comments;
 
-            // Strip VERDICT markers AND any stray approval/rejection keywords the AI may
-            // have echoed to prevent contradictory text in the posted comment.
-            var reviewBody = result
+                Logger.LogInformation(
+                    "SE structured review of PR #{Number}: {Verdict}, {CommentCount} inline comments",
+                    pr.Number, approved ? "APPROVE" : "REQUEST_CHANGES", inlineComments.Count);
+
+                // Build a clean review body from the summary
+                var reviewBody = summary;
+                if (!approved && inlineComments.Count > 0)
+                {
+                    reviewBody += $"\n\n_{inlineComments.Count} inline comment(s) on specific files below._";
+                }
+
+                // Filter truncation complaints from inline comments
+                var filteredComments = inlineComments
+                    .Where(c => !IsTruncationComplaint(c.Body))
+                    .ToList();
+
+                // If all comments were truncation complaints, approve instead
+                if (!approved && filteredComments.Count == 0 && string.IsNullOrWhiteSpace(summary))
+                {
+                    Logger.LogInformation("SE review of PR #{Number} only had truncation complaints — auto-approving", pr.Number);
+                    return (true, "Code review passed. Implementation meets requirements for the task scope.", []);
+                }
+
+                return (approved, reviewBody, filteredComments);
+            }
+
+            // Fallback: plain text parsing (backward compat if JSON fails)
+            Logger.LogDebug("SE review of PR #{Number} did not parse as JSON, falling back to text parsing", pr.Number);
+            var textApproved = result.Contains("VERDICT: APPROVE", StringComparison.OrdinalIgnoreCase)
+                || result.Contains("\"verdict\":\"APPROVE\"", StringComparison.OrdinalIgnoreCase);
+
+            var fallbackBody = result
                 .Replace("VERDICT: APPROVE", "", StringComparison.OrdinalIgnoreCase)
                 .Replace("VERDICT: REQUEST_CHANGES", "", StringComparison.OrdinalIgnoreCase)
                 .Trim();
 
-            // Remove lines that are just standalone decision keywords the AI echoed
-            var cleanedLines = reviewBody.Split('\n')
-                .Where(line =>
-                {
-                    var trimmed = line.Trim().TrimStart('*', '#', ' ');
-                    return !string.Equals(trimmed, "APPROVED", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(trimmed, "CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
-                        && !string.Equals(trimmed, "CHANGES_REQUESTED", StringComparison.OrdinalIgnoreCase)
-                        && !trimmed.StartsWith("[ProgramManager] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
-                        && !trimmed.StartsWith("[ProgramManager] APPROVED", StringComparison.OrdinalIgnoreCase)
-                        && !trimmed.StartsWith("[SoftwareEngineer] CHANGES REQUESTED", StringComparison.OrdinalIgnoreCase)
-                        && !trimmed.StartsWith("[SoftwareEngineer] APPROVED", StringComparison.OrdinalIgnoreCase);
-                })
-                .ToList();
-            reviewBody = string.Join('\n', cleanedLines).Trim();
+            fallbackBody = PullRequestWorkflow.StripReviewPreamble(fallbackBody);
+            fallbackBody = FilterTruncationComplaints(fallbackBody);
 
-            // Strip any preamble/thinking the AI may have included before the numbered list
-            reviewBody = PullRequestWorkflow.StripReviewPreamble(reviewBody);
-
-            // Filter out truncation-related review items (the AI sometimes flags code it can't see as incomplete)
-            reviewBody = FilterTruncationComplaints(reviewBody);
-
-            // If all review items were truncation complaints, approve instead
-            if (!approved && string.IsNullOrWhiteSpace(reviewBody))
+            if (!textApproved && string.IsNullOrWhiteSpace(fallbackBody))
             {
                 Logger.LogInformation("SE review of PR #{Number} only had truncation complaints — auto-approving", pr.Number);
-                return (true, "Code review passed. Implementation meets requirements for the task scope.");
+                return (true, "Code review passed. Implementation meets requirements for the task scope.", []);
             }
 
-            return (approved, reviewBody);
+            return (textApproved, fallbackBody, []);
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to evaluate PR #{Number} quality with AI", pr.Number);
-            return (false, null);
+            return (false, null, []);
         }
     }
 
@@ -3935,6 +3955,144 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         }
 
         return result.ToString().Trim();
+    }
+
+    /// <summary>
+    /// Checks if a single review comment body is a truncation complaint.
+    /// </summary>
+    private static bool IsTruncationComplaint(string body)
+    {
+        string[] truncationKeywords =
+        [
+            "truncated", "cut off", "cannot verify", "cannot see",
+            "can't verify", "can't see", "not visible", "not shown",
+            "implementation not visible", "unable to verify", "unable to see"
+        ];
+        return truncationKeywords.Any(kw => body.Contains(kw, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>
+    /// Parses SE review JSON response into structured components.
+    /// Returns null if the response isn't valid JSON.
+    /// </summary>
+    private static (bool Approved, string Summary, IReadOnlyList<InlineReviewComment> Comments)? TryParseStructuredSeReview(string text)
+    {
+        try
+        {
+            var json = text.Trim();
+
+            // Strip markdown fences if present
+            if (json.Contains("```"))
+            {
+                var fenceStart = json.IndexOf("```");
+                var afterFence = json.IndexOf('\n', fenceStart);
+                if (afterFence >= 0)
+                {
+                    var fenceEnd = json.IndexOf("```", afterFence);
+                    json = fenceEnd > afterFence
+                        ? json[(afterFence + 1)..fenceEnd].Trim()
+                        : json[(afterFence + 1)..].Trim();
+                }
+            }
+
+            // Find JSON object boundaries with proper nesting
+            var startBrace = json.IndexOf('{');
+            if (startBrace < 0) return null;
+
+            var depth = 0;
+            var endBrace = -1;
+            var inString = false;
+            var escape = false;
+            for (var i = startBrace; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escape) { escape = false; continue; }
+                if (c == '\\' && inString) { escape = true; continue; }
+                if (c == '"') { inString = !inString; continue; }
+                if (inString) continue;
+                if (c == '{') depth++;
+                else if (c == '}') { depth--; if (depth == 0) { endBrace = i; break; } }
+            }
+            if (endBrace < 0) return null;
+            json = json[startBrace..(endBrace + 1)];
+
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            var verdict = root.TryGetProperty("verdict", out var v)
+                ? v.GetString()?.Trim().ToUpperInvariant() ?? "REQUEST_CHANGES"
+                : "REQUEST_CHANGES";
+
+            var approved = verdict.Contains("APPROVE") && !verdict.Contains("REQUEST");
+
+            var summary = root.TryGetProperty("summary", out var s)
+                ? s.GetString()?.Trim() ?? ""
+                : "";
+
+            var comments = new List<InlineReviewComment>();
+            if (root.TryGetProperty("comments", out var commentsArr)
+                && commentsArr.ValueKind == System.Text.Json.JsonValueKind.Array)
+            {
+                foreach (var c in commentsArr.EnumerateArray())
+                {
+                    var file = c.TryGetProperty("file", out var f) ? f.GetString() : null;
+                    var line = c.TryGetProperty("line", out var l) ? l.GetInt32() : 0;
+                    var priority = c.TryGetProperty("priority", out var p) ? p.GetString() ?? "" : "";
+                    var body = c.TryGetProperty("body", out var b) ? b.GetString() ?? "" : "";
+
+                    if (!string.IsNullOrEmpty(file) && !string.IsNullOrEmpty(body) && line > 0)
+                    {
+                        comments.Add(new InlineReviewComment
+                        {
+                            FilePath = file,
+                            Line = line,
+                            Body = $"{priority}: {body}".Trim()
+                        });
+                    }
+                }
+            }
+
+            return (approved, summary, comments);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Submits inline review comments as a GitHub PR review.
+    /// Falls back gracefully if the GitHub API call fails.
+    /// </summary>
+    private async Task SubmitInlineReviewCommentsAsync(
+        int prNumber, string summary, bool approved,
+        IReadOnlyList<InlineReviewComment> comments, CancellationToken ct)
+    {
+        try
+        {
+            var maxComments = Config.Review.MaxInlineCommentsPerReview;
+            var toSubmit = comments.Take(maxComments).ToList();
+
+            if (toSubmit.Count == 0) return;
+
+            var eventType = approved ? "APPROVE" : "REQUEST_CHANGES";
+            var reviewBody = $"🔧 **SE Inline Review** — {(approved ? "APPROVED" : "CHANGES REQUESTED")}\n\n" +
+                $"{summary}\n\n" +
+                $"_{toSubmit.Count} inline comment(s) below_";
+
+            await GitHub.CreatePullRequestReviewWithCommentsAsync(
+                prNumber, reviewBody, eventType, toSubmit, ct: ct);
+
+            Logger.LogInformation(
+                "Submitted {Count} SE inline review comments on PR #{Number}",
+                toSubmit.Count, prNumber);
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex,
+                "Failed to submit SE inline review comments on PR #{Number} — review body was still posted as comment",
+                prNumber);
+        }
     }
 
     /// <summary>

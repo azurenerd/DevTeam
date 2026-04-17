@@ -5,48 +5,35 @@ namespace AgentSquad.Dashboard.Tests;
 
 /// <summary>
 /// Playwright-based UI scenario tests for the AgentSquad Dashboard.
+/// Self-hosting: spins up the dashboard automatically — no external process needed.
+/// Auto-installs Playwright browsers if missing (fast check, ~5s if already installed).
 /// Each test navigates to a dashboard page, validates key elements, and captures a screenshot.
-/// Video recording is enabled per browser context.
 /// </summary>
-public class DashboardScenarioTests : IAsyncLifetime
+public class DashboardScenarioTests : IClassFixture<DashboardWebAppFixture>, IClassFixture<PlaywrightFixture>, IAsyncDisposable
 {
-    private IPlaywright _playwright = null!;
-    private IBrowser _browser = null!;
-    private readonly string _baseUrl = "http://localhost:5051";
+    private readonly DashboardWebAppFixture _app;
+    private readonly PlaywrightFixture _pw;
     private readonly string _screenshotDir;
     private readonly string _videoDir;
-    private readonly List<ScenarioResult> _results = new();
 
-    public DashboardScenarioTests()
+    public DashboardScenarioTests(DashboardWebAppFixture app, PlaywrightFixture pw)
     {
+        _app = app;
+        _pw = pw;
         _screenshotDir = Path.Combine(Directory.GetCurrentDirectory(), "test-results", "scenarios", "screenshots");
         _videoDir = Path.Combine(Directory.GetCurrentDirectory(), "test-results", "scenarios", "videos");
         Directory.CreateDirectory(_screenshotDir);
         Directory.CreateDirectory(_videoDir);
     }
 
-    public async Task InitializeAsync()
-    {
-        _playwright = await Playwright.CreateAsync();
-        _browser = await _playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-        {
-            Headless = true,
-            SlowMo = 200
-        });
-    }
-
-    public async Task DisposeAsync()
-    {
-        await _browser.CloseAsync();
-        _playwright.Dispose();
-    }
+    public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
     private async Task<IBrowserContext> CreateContextAsync(string scenarioName)
     {
         var scenarioVideoDir = Path.Combine(_videoDir, scenarioName);
         Directory.CreateDirectory(scenarioVideoDir);
 
-        return await _browser.NewContextAsync(new BrowserNewContextOptions
+        return await _pw.Browser.NewContextAsync(new BrowserNewContextOptions
         {
             ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
             RecordVideoDir = scenarioVideoDir,
@@ -54,10 +41,6 @@ public class DashboardScenarioTests : IAsyncLifetime
         });
     }
 
-    /// <summary>
-    /// Renames the random-hash video file to a scenario-named file after context disposal.
-    /// Must be called after DisposeAsync on the context.
-    /// </summary>
     private void RenameVideo(string scenarioName)
     {
         var scenarioVideoDir = Path.Combine(_videoDir, scenarioName);
@@ -66,19 +49,13 @@ public class DashboardScenarioTests : IAsyncLifetime
 
         var dest = Path.Combine(_videoDir, $"{scenarioName}.webm");
         File.Move(videoFile, dest, overwrite: true);
-
-        // Clean up the per-scenario subdirectory
         try { Directory.Delete(scenarioVideoDir, recursive: true); } catch { }
     }
 
     private async Task<string> CaptureScreenshotAsync(IPage page, string scenarioId)
     {
         var path = Path.Combine(_screenshotDir, $"{scenarioId}.png");
-        await page.ScreenshotAsync(new PageScreenshotOptions
-        {
-            Path = path,
-            FullPage = true
-        });
+        await page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = true });
         return path;
     }
 
@@ -88,18 +65,15 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S01");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync(_baseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
-        await page.WaitForTimeoutAsync(2000); // Allow Blazor to render
+        await page.GotoAsync(_app.BaseUrl, new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.WaitForTimeoutAsync(2000);
 
-        // Verify the page loaded with the dark theme
         var body = await page.QuerySelectorAsync("body");
         Assert.NotNull(body);
 
-        // Check for main content area
         var content = await page.QuerySelectorAsync(".content, main, article");
         Assert.NotNull(content);
 
-        // Check page has text content (not blank)
         var text = await page.InnerTextAsync("body");
         Assert.False(string.IsNullOrWhiteSpace(text), "Page body should have text content");
 
@@ -114,13 +88,12 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S02");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/pullrequests", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/pullrequests", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
         Assert.False(string.IsNullOrWhiteSpace(text), "PR page should have content");
 
-        // Look for typical PR page elements (filter tabs or PR cards)
         var hasFilters = text.Contains("Open", StringComparison.OrdinalIgnoreCase)
                       || text.Contains("Closed", StringComparison.OrdinalIgnoreCase)
                       || text.Contains("Pull Request", StringComparison.OrdinalIgnoreCase);
@@ -137,7 +110,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S03");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/issues", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/issues", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -158,7 +131,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S04");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/reasoning", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/reasoning", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -175,7 +148,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S05");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/timeline", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/timeline", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -192,7 +165,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S06");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/configuration", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/configuration", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -214,7 +187,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S08");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/health", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/health", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -231,7 +204,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S09");
         var page = await context.NewPageAsync();
 
-        var response = await page.GotoAsync($"{_baseUrl}/metrics", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        var response = await page.GotoAsync($"{_app.BaseUrl}/metrics", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         Assert.NotNull(response);
@@ -250,7 +223,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S10");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/team", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/team", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
@@ -267,7 +240,7 @@ public class DashboardScenarioTests : IAsyncLifetime
         var context = await CreateContextAsync("S11");
         var page = await context.NewPageAsync();
 
-        await page.GotoAsync($"{_baseUrl}/approvals", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
+        await page.GotoAsync($"{_app.BaseUrl}/approvals", new PageGotoOptions { WaitUntil = WaitUntilState.Load, Timeout = 15000 });
         await page.WaitForTimeoutAsync(2000);
 
         var text = await page.InnerTextAsync("body");
