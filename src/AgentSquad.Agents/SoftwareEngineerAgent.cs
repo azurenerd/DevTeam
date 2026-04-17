@@ -955,7 +955,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         }
         _taskTracker.CompleteStep(decisionStepId);
 
-        // Programmatic safety: remove tasks whose files are already in merged PRs
+        // Informational check: log overlap with already-merged PRs from this run.
+        // We do NOT auto-drop tasks — overlap is common (shared files, scaffolding) and
+        // does not mean the task is complete. The AI planner was already told about merged files.
         try
         {
             var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
@@ -969,7 +971,6 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         allMergedFiles.Add(f.ToLowerInvariant().Replace('\\', '/'));
                 }
 
-                var tasksToRemove = new List<EngineeringTask>();
                 foreach (var task in parsedTasks)
                 {
                     if (task.Id == IntegrationTaskId || task.OwnedFiles.Count == 0)
@@ -980,36 +981,19 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         .ToList();
                     var overlap = normalizedFiles.Count(f => allMergedFiles.Contains(f));
 
-                    if (overlap > 0 && overlap * 2 >= normalizedFiles.Count)
+                    if (overlap > 0)
                     {
-                        Logger.LogWarning(
-                            "Removing task {TaskId} from plan: {Overlap}/{Total} files already exist in merged PRs",
+                        Logger.LogInformation(
+                            "Task {TaskId} has {Overlap}/{Total} files overlapping with merged PRs — task retained, overlap is expected for shared files",
                             task.Id, overlap, normalizedFiles.Count);
-                        LogActivity("warning",
-                            $"⚠️ Dropped task {task.Id} ({task.Name}) — {overlap}/{normalizedFiles.Count} files already merged");
-                        tasksToRemove.Add(task);
                     }
-                }
-
-                if (tasksToRemove.Count > 0)
-                {
-                    var removedIds = tasksToRemove.Select(t => t.Id).ToHashSet();
-                    parsedTasks.RemoveAll(t => removedIds.Contains(t.Id));
-                    // Clean up dependency references to removed tasks
-                    foreach (var task in parsedTasks)
-                    {
-                        task.Dependencies.RemoveAll(d => removedIds.Contains(d));
-                        task.DependencyTypes = task.DependencyTypes
-                            .Where(kv => !removedIds.Contains(kv.Key))
-                            .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
-                    }
-                    Logger.LogInformation("Removed {Count} duplicate tasks from plan", tasksToRemove.Count);
                 }
             }
         }
+
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Merged PR deduplication check failed — proceeding with full plan");
+            Logger.LogWarning(ex, "Merged PR overlap check failed — proceeding with full plan");
         }
 
         // Recompute waves from dependency graph to eliminate gaps after task removal.
@@ -1628,39 +1612,36 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // the work is already done — mark the task complete and skip.
             if (task.OwnedFiles.Count > 0)
             {
-                var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
-                var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                foreach (var mergedPr in mergedPRs.Take(10)) // Check last 10 merged PRs
+                // Informational: log file overlap with merged PRs from this run.
+                // We do NOT auto-skip — overlap is expected for shared files (models, config, etc.).
+                // The AI code generator is told about existing files and will modify rather than recreate.
+                try
                 {
-                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
-                    foreach (var f in prFiles)
-                        mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
-                }
-
-                var taskFilesNormalized = task.OwnedFiles
-                    .Select(f => f.ToLowerInvariant().Replace('\\', '/'))
-                    .ToList();
-                var overlapping = taskFilesNormalized
-                    .Count(f => mergedFileSet.Contains(f));
-
-                if (overlapping > 0 && overlapping * 2 >= taskFilesNormalized.Count)
-                {
-                    Logger.LogWarning(
-                        "Task {TaskId} (#{IssueNumber}): {Overlap}/{Total} owned files already exist in merged PRs — skipping as duplicate",
-                        task.Id, task.IssueNumber, overlapping, taskFilesNormalized.Count);
-                    LogActivity("warning",
-                        $"⚠️ Skipping task {task.Id} — {overlapping}/{taskFilesNormalized.Count} files already created by a merged PR");
-
-                    // Mark the task as done so no other agent picks it up
-                    if (task.IssueNumber.HasValue)
+                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                    var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var mergedPr in mergedPRs.Take(10))
                     {
-                        await GitHub.AddIssueCommentAsync(task.IssueNumber.Value,
-                            $"⚠️ **Duplicate detected**: {overlapping}/{taskFilesNormalized.Count} files from this task " +
-                            $"already exist in merged PRs. Closing as duplicate to avoid overlapping work.",
-                            ct);
-                        await _taskManager.MarkDoneAsync(task.IssueNumber.Value, prNumber: null, ct);
+                        var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
+                        foreach (var f in prFiles)
+                            mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
                     }
-                    return;
+
+                    var taskFilesNormalized = task.OwnedFiles
+                        .Select(f => f.ToLowerInvariant().Replace('\\', '/'))
+                        .ToList();
+                    var overlapping = taskFilesNormalized
+                        .Count(f => mergedFileSet.Contains(f));
+
+                    if (overlapping > 0)
+                    {
+                        Logger.LogInformation(
+                            "Task {TaskId} (#{IssueNumber}): {Overlap}/{Total} files overlap with merged PRs — proceeding (shared files are expected)",
+                            task.Id, task.IssueNumber, overlapping, taskFilesNormalized.Count);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogDebug(ex, "Could not check merged PR file overlap for task {TaskId}", task.Id);
                 }
             }
 

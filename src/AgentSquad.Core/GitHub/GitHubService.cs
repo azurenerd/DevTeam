@@ -301,10 +301,16 @@ public class GitHubService : IGitHubService
                 var prs = await _client.PullRequest.GetAllForRepository(_owner, _repo,
                     new PullRequestRequest { State = ItemStateFilter.Closed, SortDirection = SortDirection.Descending });
                 TrackRateLimit();
-                return (IReadOnlyList<AgentPullRequest>)prs
+                var mapped = prs
                     .Where(pr => pr.Merged)
                     .Select(pr => MapPullRequest(pr, pr.Labels.Select(l => l.Name).ToList()))
                     .ToList();
+
+                // Scope to current run — exclude stale PRs from previous runs
+                if (_runStartedUtc.HasValue)
+                    mapped = mapped.Where(pr => pr.CreatedAt >= _runStartedUtc.Value).ToList();
+
+                return (IReadOnlyList<AgentPullRequest>)mapped;
             }, ct);
 
             _mergedPrsCache = result;

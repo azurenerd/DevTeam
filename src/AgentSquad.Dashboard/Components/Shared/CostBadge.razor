@@ -1,5 +1,7 @@
 @using AgentSquad.Dashboard.Services
+@using System.Net.Http.Json
 @inject IServiceProvider ServiceProvider
+@inject DashboardMode Mode
 @implements IDisposable
 
 <div class="cost-badge" title="@TooltipText">
@@ -13,35 +15,61 @@
     private int _totalCalls;
     private Timer? _refreshTimer;
     private IDashboardDataService? _dataService;
+    private HttpClient? _http;
 
     protected override void OnInitialized()
     {
-        _dataService = ServiceProvider.GetService<DashboardDataService>() as IDashboardDataService
-            ?? ServiceProvider.GetService<HttpDashboardDataService>() as IDashboardDataService;
-
-        if (_dataService is not null)
+        if (Mode.IsStandalone)
         {
-            _dataService.OnChange += HandleChange;
-            RefreshData();
+            // Standalone: poll Runner API directly for cost data
+            var factory = ServiceProvider.GetService<IHttpClientFactory>();
+            _http = factory?.CreateClient("RunnerApi");
+        }
+        else
+        {
+            _dataService = ServiceProvider.GetService<IDashboardDataService>();
+            if (_dataService is not null)
+                _dataService.OnChange += HandleChange;
         }
 
-        _refreshTimer = new Timer(_ => InvokeAsync(() =>
-        {
-            RefreshData();
-            StateHasChanged();
-        }), null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        _refreshTimer = new Timer(async _ => await RefreshAsync(), null,
+            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(10));
     }
 
     private void HandleChange()
     {
         InvokeAsync(() =>
         {
-            RefreshData();
+            RefreshFromService();
             StateHasChanged();
         });
     }
 
-    private void RefreshData()
+    private async Task RefreshAsync()
+    {
+        try
+        {
+            if (_http is not null)
+            {
+                // Standalone: fetch from Runner API
+                var result = await _http.GetFromJsonAsync<CostSummaryDto>("/api/dashboard/cost-summary");
+                if (result is not null)
+                {
+                    _totalCost = result.TotalCost;
+                    _totalCalls = result.TotalCalls;
+                }
+            }
+            else
+            {
+                RefreshFromService();
+            }
+
+            await InvokeAsync(StateHasChanged);
+        }
+        catch { /* Runner not reachable yet */ }
+    }
+
+    private void RefreshFromService()
     {
         if (_dataService is null) return;
         _totalCost = _dataService.GetTotalEstimatedCost();
@@ -63,4 +91,6 @@
         if (_dataService is not null)
             _dataService.OnChange -= HandleChange;
     }
+
+    private record CostSummaryDto(decimal TotalCost, int TotalCalls);
 }
