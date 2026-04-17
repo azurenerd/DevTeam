@@ -2,7 +2,7 @@
 
 > **Author:** Ben Humphrey (azurenerd) with Copilot CLI  
 > **Project:** AgentSquad — a .NET 8 multi-agent system where 7 AI agents (PM, Researcher, Architect, Software Engineer, Software Engineers, Test Engineer) collaborate through GitHub PRs/Issues to build software.  
-> **Purpose:** This document captures hard-won lessons from ~85+ iterative build-run-fix cycles over multiple sessions. It's intended for engineering teams considering AI agent-based development pipelines, to help them avoid the same pitfalls and build better agent orchestration from day one.
+> **Purpose:** This document captures hard-won lessons from ~90+ iterative build-run-fix cycles over multiple sessions. It's intended for engineering teams considering AI agent-based development pipelines, to help them avoid the same pitfalls and build better agent orchestration from day one.
 
 ---
 
@@ -34,6 +34,10 @@
 24. [SE Parallelism Enhancements](#24-se-parallelism-enhancements)
 25. [Decision Impact Classification & Gating](#25-decision-impact-classification--gating)
 26. [Agent Task Steps — Real-Time Workflow Visibility](#26-agent-task-steps--real-time-workflow-visibility)
+27. [Stale Merged PRs Cause False Task Drops](#27-stale-merged-prs-cause-false-task-drops)
+28. [Standalone Dashboard Must Use HTTP-Based Data Service](#28-standalone-dashboard-must-use-http-based-data-service)
+29. [Persisted SME Definitions Auto-Respawn on Startup](#29-persisted-sme-definitions-auto-respawn-on-startup)
+30. [JSON Case Sensitivity Breaks Dashboard Polling](#30-json-case-sensitivity-breaks-dashboard-polling)
 
 ---
 
@@ -723,7 +727,7 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 
 ---
 
-## 22. Always Start the Standalone Dashboard
+## 27. Always Start the Standalone Dashboard
 
 **Lesson:** The standalone dashboard (port 5051) must ALWAYS be started alongside the Runner (port 5050). The embedded dashboard inside the Runner cannot be rebuilt without stopping the Runner process (file locks on DLLs). The standalone dashboard can be restarted independently for UI iterations without disrupting running agents.
 
@@ -738,4 +742,64 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 
 ---
 
-*This document was compiled from 80+ checkpoints, 400+ conversation turns, and 85+ end-to-end test runs across six Copilot CLI sessions building the AgentSquad system.*
+## 28. Stale Merged PRs Cause False Task Drops
+
+**Lesson:** `GetMergedPullRequestsAsync` returned ALL-TIME merged PRs instead of scoping to the current run. This caused the Leader SE to detect false file overlap between stale PRs from previous runs and current engineering tasks, triggering automatic task drops (closing issues, marking tasks complete when they hadn't been started).
+
+**What happened:**
+- The SE's post-plan dedup logic and worker-level pre-execution check both called `GetMergedPullRequestsAsync` to detect file overlap with already-completed work.
+- A 50% file overlap threshold would auto-drop tasks and close their GitHub issues.
+- Small tasks that touch shared files (Program.cs, .csproj) easily hit 50% overlap against any historical PR.
+- Task T5 was auto-dropped because a stale PR from a previous run had modified the same files.
+
+**The fix (two-part):**
+1. **Scope merged PRs to current run**: Added `_runStartedUtc` filter to `GetMergedPullRequestsAsync` in `GitHubService.cs` — matching the filter already applied to open PRs and open issues.
+2. **Change auto-drop to warning-only**: Both the post-plan dedup (~line 958) and worker-level pre-execution check (~line 1627) in `SoftwareEngineerAgent.cs` now log warnings instead of auto-dropping tasks or closing issues. Overlap detection is still passed as context to the AI code generator.
+
+**Key insight:** File overlap ≠ task completion. Multiple tasks legitimately modify the same files (Program.cs, .csproj, shared models). Never auto-close issues based on file overlap analysis alone.
+
+---
+
+## 29. Standalone Dashboard Must Use HTTP-Based Data Service
+
+**Lesson:** The standalone dashboard (port 5051) must use `HttpDashboardDataService` — never `DashboardDataService`. The in-process `DashboardDataService` reads from the local `AgentRegistry` which is always empty in standalone mode because agents run in the Runner process, not the Dashboard process.
+
+**What happened:**
+- Dashboard `Program.cs` registered `DashboardDataService` (the in-process implementation) instead of `HttpDashboardDataService` for standalone mode.
+- Result: the standalone dashboard showed zero agents, no activity, no data.
+- Same pattern affected `CostBadge.razor` (read from in-process `UsageTracker`, always $0.00) and `PlaywrightStatusBadge` (used bare `HttpClient` with no base address).
+
+**The fix:**
+1. **Dashboard/Program.cs**: Register `HttpDashboardDataService` as `IDashboardDataService` in standalone mode. It polls the Runner API at `/api/dashboard/*` for all data.
+2. **CostBadge.razor**: In standalone mode, polls `/api/dashboard/cost-summary` via the `RunnerApi` named `HttpClient`.
+3. **PlaywrightStatusBadge**: Switched from bare `HttpClient` to `IHttpClientFactory.CreateClient("RunnerApi")`.
+
+**Audit rule:** Grep for `ServiceProvider.GetService<DashboardDataService>()` or any component using in-process services directly — these are standalone bugs. Every dashboard component must work via HTTP polling when running standalone.
+
+---
+
+## 30. Persisted SME Definitions Auto-Respawn on Startup
+
+**Lesson:** SME (Subject Matter Expert) agents persist their definitions to `sme-definitions.json`. Definitions marked as `Continuous` mode auto-respawn on startup. If this file isn't cleaned up during reset, stale specialists from previous runs load before the PM creates new ones for the current project.
+
+**The fix:**
+- Added deletion of `sme-definitions*` files during cleanup Phase 3 in `ConfigurationService.cs`.
+- Added SME definitions check to the mandatory verification block in `Session.md`.
+
+**Rule:** Any file that causes agent behavior changes on startup must be cleaned during reset.
+
+---
+
+## 31. JSON Case Sensitivity Breaks Dashboard Polling
+
+**Lesson:** `System.Text.Json` is case-sensitive by default. The standalone dashboard polls the Runner's REST API, which returns camelCase JSON. Without `PropertyNameCaseInsensitive = true`, deserialization silently returns default/null values instead of throwing, causing subtle data display bugs.
+
+**What happened:**
+- Step tracking data deserialized from the Runner API with all properties null/default.
+- Dashboard showed empty step timelines despite the Runner having valid step data.
+
+**Fix:** Always use `PropertyNameCaseInsensitive = true` in `JsonSerializerOptions` when deserializing API responses. This is a one-line fix but easy to forget on every new polling endpoint.
+
+---
+
+*This document was compiled from 80+ checkpoints, 400+ conversation turns, and 90+ end-to-end test runs across seven Copilot CLI sessions building the AgentSquad system.*

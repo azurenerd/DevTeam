@@ -466,6 +466,33 @@ public sealed class ConfigurationService : IConfigurationService
                 result.Errors.Add($"DB cleanup failed: {ex.Message}");
             }
 
+            // ⚠️ CRITICAL: Delete persisted SME agent definitions so stale specialists don't auto-respawn
+            try
+            {
+                var runnerDir = Path.GetDirectoryName(_appSettingsPath) ?? ".";
+                var smeFiles = Directory.GetFiles(runnerDir, "sme-definitions*");
+                foreach (var f in smeFiles)
+                {
+                    File.Delete(f);
+                    _logger.LogInformation("Deleted SME definitions file: {File}", Path.GetFileName(f));
+                }
+                // Also check bin output directory
+                var binDir = Path.Combine(runnerDir, "bin");
+                if (Directory.Exists(binDir))
+                {
+                    foreach (var f in Directory.GetFiles(binDir, "sme-definitions*", SearchOption.AllDirectories))
+                    {
+                        File.Delete(f);
+                        _logger.LogInformation("Deleted SME definitions file: {File}", f);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete SME definition files");
+                result.Errors.Add($"SME definitions cleanup failed: {ex.Message}");
+            }
+
             // Clean agent workspace directories
             var workspaceRoot = _config.CurrentValue.Workspace.RootPath;
             if (!string.IsNullOrEmpty(workspaceRoot) && Directory.Exists(workspaceRoot))

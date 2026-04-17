@@ -82,6 +82,11 @@ Write-Host "Repo files: $($contents.name -join ', ')"  # MUST only show preserve
 $dbs = Get-ChildItem src\AgentSquad.Runner -Filter "agentsquad_*.db*" -ErrorAction SilentlyContinue
 Write-Host "Stale DBs: $($dbs.Count)"  # MUST be 0 — stale DBs cause ghost notifications
 
+# ⚠️ CRITICAL: SME definitions file — persisted SME agents auto-respawn on startup if this exists!
+$smeDefs = Get-ChildItem src\AgentSquad.Runner -Filter "sme-definitions*" -Recurse -ErrorAction SilentlyContinue
+Write-Host "SME definition files: $($smeDefs.Count)"  # MUST be 0 — stale definitions auto-spawn old specialists
+if ($smeDefs) { $smeDefs | Remove-Item -Force; Write-Host "  → DELETED stale SME definitions" }
+
 # Workspaces: must be empty
 $ws = Get-ChildItem C:\Agents -Directory -ErrorAction SilentlyContinue
 Write-Host "Agent workspaces: $($ws.Count)"  # MUST be 0
@@ -110,7 +115,7 @@ The system runs as two independent processes:
 
 The **Runner** hosts an embedded Blazor dashboard at port 5050 that has full functionality (including Configuration page and cleanup).
 
-The **Dashboard.Host** is an optional standalone process that connects to the Runner's REST API. It can be restarted independently without disrupting running agents. Some features (Configuration, Engineering Plan) are hidden in standalone mode.
+The **Dashboard.Host** is an optional standalone process that connects to the Runner's REST API via `HttpDashboardDataService`. It retrieves ALL data (agents, activity, cost, status) via HTTP polling — no in-process access needed. It can be restarted independently without disrupting running agents. Only the Configuration settings editor and Engineering Plan page require embedded mode (port 5050).
 
 ### Starting the Runner
 
@@ -187,6 +192,8 @@ Read `docs/MonitorPrompt.md` for the full checklist. Key points:
 | Health Monitor | `/health` | Deadlock detection, health checks |
 | Repository | `/repository` | Combined PR + Issue tabs |
 | Configuration | `/configuration` | Settings editor, GitHub cleanup (embedded mode only) |
+| Agent Reasoning | `/reasoning` | Agent decision logs, reasoning events, step tracking |
+| Approvals | `/approvals` | Human gate approval queue (decisions require in-process access, not available in standalone) |
 
 ### SQL monitoring tables
 ```sql
@@ -272,14 +279,15 @@ Key settings:
 4. **Agent workspaces**: TE and engineers clone repos to `C:\Agents\`. These persist across runs — delete for fresh start.
 5. **PM issue ordering**: The PM extraction prompt instructs dependency-ordered issue creation (scaffolding first). If issues come out in wrong order, check the extraction prompt in `ProgramManagerAgent.CreateUserStoryIssuesAsync()`.
 6. **DLL locks during build**: Runner/Dashboard must be stopped before rebuilding. Use `.\scripts\stop-runner.ps1` first.
-7. **Standalone dashboard limitations**: Configuration page and Engineering Plan page are hidden. Use embedded dashboard (port 5050) or `fresh-reset.ps1` script for cleanup.
+7. **Standalone dashboard limitations**: Configuration settings editor and Engineering Plan page are embedded-only (require in-process access). All other pages work in standalone mode via HTTP polling to the Runner API. Configuration cleanup IS available in standalone. CostBadge, PlaywrightBadge, and all status indicators poll the Runner API correctly.
 8. **Vision review requires network access**: Screenshot download in PR reviews needs the runner to reach GitHub's raw content URLs. If behind a proxy, images fall back to URL-only text context.
 9. **Gate config hot-reload**: Gate settings are hot-reloaded via `IOptionsMonitor`. Other config sections (Models, Agents, Limits) still require restart.
-10. **Port conflicts between agents**: SE screenshots and TE UI tests both start the app under test. Each agent now uses a unique port derived from its workspace path (range 5100–5899). If you see "App did not respond" errors, check for port conflicts.
-11. **Standalone dashboard stale agents**: The DB accumulates agent records across restarts. `RecordBoot()` writes `last_boot_utc` to filter to current-run agents only. If dashboard shows old agents, restart the Runner to update the boot timestamp.
-12. **TE data.json**: Blazor apps that depend on `wwwroot/data.json` may fail on fresh clones. `EnsureSampleDataExists()` auto-creates a sample data file if missing.
+10. **⚠️ CRITICAL — Stale SME definitions auto-respawn**: SME agents persist their definitions to `sme-definitions.json` in the Runner directory. On startup, any `Continuous` mode definitions auto-respawn. **This file MUST be deleted during reset** or old specialists will load before the PM creates them. The dashboard Config page cleanup now handles this automatically.
+11. **Port conflicts between agents**: SE screenshots and TE UI tests both start the app under test. Each agent now uses a unique port derived from its workspace path (range 5100–5899). If you see "App did not respond" errors, check for port conflicts.
+12. **Standalone dashboard stale agents**: The DB accumulates agent records across restarts. `RecordBoot()` writes `last_boot_utc` to filter to current-run agents only. If dashboard shows old agents, restart the Runner to update the boot timestamp.
+13. **TE data.json**: Blazor apps that depend on `wwwroot/data.json` may fail on fresh clones. `EnsureSampleDataExists()` auto-creates a sample data file if missing.
 
 Note: Don't do any long pauses that are more than 1 minute long in the Copilot chat, as that makes it so you ignore me for X minutes--always keep checking back no more than a minute so the chat
 thread isn't blocked to get instructions from me. 
 
-*Last updated: 2026-04-15*
+*Last updated: 2026-04-17*

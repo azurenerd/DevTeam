@@ -43,7 +43,9 @@
 31. [SE Parallelism Enhancements Requirements](#31-se-parallelism-enhancements-requirements)
 32. [Decision Impact Classification & Gating Requirements](#32-decision-impact-classification--gating-requirements)
 33. [Agent Task Steps — Real-Time Workflow Visibility](#33-agent-task-steps--real-time-workflow-visibility)
-34. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
+34. [Standalone Dashboard Requirements](#34-standalone-dashboard-requirements)
+35. [Run Scoping Requirements](#35-run-scoping-requirements)
+36. [Appendix: Known Bugs Fixed](#appendix-known-bugs-fixed)
 
 ---
 
@@ -2046,6 +2048,147 @@ These requirements govern how agents classify decisions by impact level and gate
 4. PM starts spec → BeginStep("Creating PMSpec") → RecordSubStep("Creating PMSpec", "Drafting Executive Summary")
 5. Dashboard shows: [✅ Reading Project Description (12s)] [🔄 Creating PMSpec — Drafting Executive Summary] [⏳ Generating User Stories] ...
 6. User navigates to Agent Detail → sees full step timeline with LLM call counts and cost per step
+```
+
+---
+
+## 34. Standalone Dashboard Requirements
+
+### REQ-STANDALONE-001: All Dashboard Components Must Work in Standalone Mode
+
+- **REQ-STANDALONE-001a**: Every dashboard page and component MUST function correctly when the Dashboard runs as a standalone process (port 5051), separate from the Runner process (port 5050). Data must be retrieved via HTTP polling to the Runner's REST API.
+- **REQ-STANDALONE-001b**: Standalone mode is the PRIMARY mode for end users. All new dashboard features must be validated in standalone mode before being considered complete.
+
+**Scenario: Standalone Dashboard Displays Agent Data**
+```
+1. Runner starts on port 5050 with agents running
+2. Standalone dashboard starts on port 5051
+3. User opens http://localhost:5051 → sees all active agents, their statuses, activity logs
+4. Agent status changes in Runner → standalone dashboard reflects changes within polling interval
+5. No components show empty/zero/default data due to reading from in-process services
+```
+
+### REQ-STANDALONE-002: Named HttpClient for All HTTP Calls
+
+- **REQ-STANDALONE-002a**: All dashboard components making HTTP calls to the Runner API must use `IHttpClientFactory.CreateClient("RunnerApi")`. The "RunnerApi" named client has the correct base address configured.
+- **REQ-STANDALONE-002b**: Components must NEVER use bare `HttpClient` instances (no base address → requests fail silently or hit wrong endpoint).
+
+**Scenario: Component Uses Named HttpClient**
+```
+1. Developer adds a new dashboard component that needs Runner data
+2. Component injects IHttpClientFactory, calls CreateClient("RunnerApi")
+3. HTTP calls automatically target the Runner's base URL (http://localhost:5050)
+4. Component works identically in both embedded and standalone mode
+```
+
+### REQ-STANDALONE-003: HttpDashboardDataService Registration
+
+- **REQ-STANDALONE-003a**: In standalone mode, `HttpDashboardDataService` MUST be registered as the implementation of `IDashboardDataService` in the DI container.
+- **REQ-STANDALONE-003b**: The in-process `DashboardDataService` (which reads from local `AgentRegistry`) must NOT be registered in standalone mode — it will always return empty data since agents run in the Runner process.
+
+**Scenario: Standalone DI Registration Validation**
+```
+1. Dashboard Program.cs detects standalone mode (no embedded Runner)
+2. Registers HttpDashboardDataService as IDashboardDataService
+3. HttpDashboardDataService polls Runner API at /api/dashboard/* endpoints
+4. All pages that inject IDashboardDataService receive data from the Runner via HTTP
+5. Agent overview, timeline, metrics — all populated from HTTP responses
+```
+
+### REQ-STANDALONE-004: Status Indicators Must Poll Runner API
+
+- **REQ-STANDALONE-004a**: `CostBadge` must poll `/api/dashboard/cost-summary` via the RunnerApi named HttpClient in standalone mode, not read from in-process `UsageTracker`.
+- **REQ-STANDALONE-004b**: `PlaywrightStatusBadge` must use `IHttpClientFactory.CreateClient("RunnerApi")` for HTTP calls.
+- **REQ-STANDALONE-004c**: All status indicators, badges, and health displays must retrieve their data via HTTP polling when running in standalone mode.
+
+**Scenario: CostBadge in Standalone Mode**
+```
+1. Standalone dashboard starts, CostBadge component initializes
+2. CostBadge detects standalone mode
+3. Polls /api/dashboard/cost-summary via RunnerApi HttpClient
+4. Displays actual cost and call count from Runner's UsageTracker
+5. Previously showed "$0.00 · 0 calls" due to reading from empty in-process UsageTracker
+```
+
+### REQ-STANDALONE-005: Dashboard Cleanup Must Delete SME Definitions
+
+- **REQ-STANDALONE-005a**: The dashboard Configuration page cleanup (and reset scripts) must delete `sme-definitions*.json` files from the Runner directory during reset.
+- **REQ-STANDALONE-005b**: This prevents stale SME agent definitions from auto-respawning on the next Runner startup with specialists from previous project runs.
+
+**Scenario: Reset Cleans SME Definitions**
+```
+1. Previous run created 3 SME specialists (security auditor, DB specialist, UI expert)
+2. Their definitions persisted to sme-definitions.json
+3. User triggers cleanup from Configuration page or reset script
+4. Cleanup Phase 3 deletes sme-definitions*.json files
+5. Next Runner startup begins with no pre-existing SME definitions
+6. PM agent analyzes new project and creates fresh, appropriate specialists
+```
+
+---
+
+## 35. Run Scoping Requirements
+
+### REQ-SCOPE-001: Merged PRs Scoped to Current Run
+
+- **REQ-SCOPE-001a**: `GetMergedPullRequestsAsync` in `GitHubService` must filter results by `_runStartedUtc` to return only PRs merged during the current run.
+- **REQ-SCOPE-001b**: This matches the existing scoping applied to `GetOpenPullRequestsAsync` and `GetOpenIssuesAsync`.
+- **REQ-SCOPE-001c**: Without this filter, stale PRs from previous runs cause false file overlap detection, leading to incorrect task management decisions.
+
+**Scenario: Merged PR Scoping Prevents False Overlap**
+```
+1. Previous run merged PR #10 that modified Program.cs and .csproj
+2. New run starts → _runStartedUtc recorded
+3. SE calls GetMergedPullRequestsAsync to check for file overlap
+4. PR #10 was merged before _runStartedUtc → excluded from results
+5. Current task T5 (which also modifies Program.cs) proceeds without false overlap detection
+6. Previously: T5 would be auto-dropped due to 50% overlap with stale PR #10
+```
+
+### REQ-SCOPE-002: No Auto-Drop on File Overlap
+
+- **REQ-SCOPE-002a**: Task overlap detection in `SoftwareEngineerAgent` must NEVER automatically drop tasks or close GitHub issues based on file overlap analysis.
+- **REQ-SCOPE-002b**: The post-plan dedup check and worker-level pre-execution check must log warnings only, not take automated actions.
+- **REQ-SCOPE-002c**: Overlap information should be passed as context to the AI code generator so it can make informed decisions about how to implement the task.
+
+**Scenario: Overlap Detected but Task Continues**
+```
+1. SE detects 60% file overlap between task T5 and merged PR #10
+2. SE logs warning: "Task T5 has 60% file overlap with PR #10 — files: Program.cs, .csproj"
+3. Overlap context passed to AI prompt: "Note: these files were modified by PR #10..."
+4. AI generates implementation that accounts for existing changes
+5. Task T5 proceeds to PR creation and review pipeline
+6. Previously: T5 would be auto-dropped, issue closed, task marked complete without work done
+```
+
+### REQ-SCOPE-003: Overlap as Context, Not Action
+
+- **REQ-SCOPE-003a**: File overlap detection results must be included in the AI prompt context for code generation, giving the model awareness of related changes.
+- **REQ-SCOPE-003b**: The AI should use overlap information to avoid redundant work and ensure compatibility, but the decision to proceed or skip is never automated.
+
+**Scenario: AI Uses Overlap Context**
+```
+1. Engineer picks up task T5: "Add authentication middleware"
+2. Overlap check finds PR #8 (merged) modified Program.cs with DI registration
+3. AI prompt includes: "PR #8 already added service registrations to Program.cs — build on existing setup"
+4. AI generates code that extends Program.cs rather than duplicating DI setup
+5. Result: cleaner implementation that integrates with existing code
+```
+
+### REQ-SCOPE-004: All GitHub Queries Scoped to Current Run
+
+- **REQ-SCOPE-004a**: `GetMergedPullRequestsAsync`, `GetOpenPullRequestsAsync`, and `GetOpenIssuesAsync` must all filter by `_runStartedUtc` to return only current-run data.
+- **REQ-SCOPE-004b**: Any new GitHub query methods added to `IGitHubService` that retrieve PRs or issues must also apply run-scoping filters.
+- **REQ-SCOPE-004c**: This prevents cross-run contamination where artifacts from previous runs affect current-run agent decisions.
+
+**Scenario: Cross-Run Isolation**
+```
+1. Run 1 creates issues #1-#10, PRs #1-#5, merges PR #1-#3
+2. Run 1 completes or is stopped
+3. Run 2 starts → new _runStartedUtc recorded
+4. Run 2 agents query for open issues → see only issues created after _runStartedUtc
+5. Run 2 agents query for merged PRs → see only PRs merged after _runStartedUtc
+6. Run 2 task management is completely isolated from Run 1 artifacts
 ```
 
 ---
