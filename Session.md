@@ -48,7 +48,9 @@ Navigate to the **Configuration** page (http://localhost:5050/configuration) in 
 Use the "Scan Repository" button to preview, then "Clean & Restart" to execute.
 This is only available in embedded mode (Runner-hosted dashboard on port 5050).
 
-### Verify reset before proceeding
+### ⚠️ MANDATORY: Verify reset before proceeding
+
+> **After ANY reset (scripted or manual), you MUST run the verification block below and confirm ALL checks pass before starting services. Do NOT skip this step. Do NOT start the Runner or Dashboard until every check shows the expected value.**
 ```powershell
 # Get PAT from user-secrets
 $patLine = dotnet user-secrets list --project src\AgentSquad.Runner 2>&1 | Where-Object { $_ -match 'GitHubToken' }
@@ -156,6 +158,7 @@ Stop-Process -Id <PID>
 ```
 
 ### Critical runner rules
+- **ALWAYS** verify reset before starting (run Section 2 verification block) — never start services on a dirty repo
 - **NEVER** use `dotnet run | Tee-Object` — it kills the runner during Copilot CLI subprocess calls
 - **NEVER** kill processes by name (`Stop-Process -Name`, `taskkill /IM`) — it kills your own CLI session
 - **Always** stop the runner before building (file locks on DLLs)

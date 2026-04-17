@@ -93,6 +93,14 @@ public class AgentSquadWorker : BackgroundService
 
         foreach (var role in roles)
         {
+            var agentConfig = _config.Agents.GetConfigForRole(role);
+            if (!agentConfig.Enabled || !agentConfig.AutoSpawn)
+            {
+                _logger.LogInformation("{Role} agent skipped (Enabled={Enabled}, AutoSpawn={AutoSpawn})",
+                    role, agentConfig.Enabled, agentConfig.AutoSpawn);
+                continue;
+            }
+
             var identity = await _spawnManager.SpawnAgentAsync(role, ct);
             if (identity == null)
             {

@@ -477,6 +477,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
         var pmSpec = await ProjectFiles.GetPMSpecAsync(ct);
+        var teamComposition = await ProjectFiles.GetTeamCompositionAsync(ct);
 
         var enhancementIssues = await GitHub.GetIssuesByLabelAsync(
             IssueWorkflow.Labels.Enhancement, ct);
@@ -620,6 +621,16 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var userPromptBuilder = new System.Text.StringBuilder();
         userPromptBuilder.AppendLine($"## PM Specification\n{pmSpec}\n");
         userPromptBuilder.AppendLine($"## Architecture Document\n{architectureDoc}\n");
+
+        if (!string.IsNullOrWhiteSpace(teamComposition))
+        {
+            userPromptBuilder.AppendLine("## Team Composition");
+            userPromptBuilder.AppendLine("The PM has analyzed the project and composed a team with specialist engineers. ");
+            userPromptBuilder.AppendLine("When assigning SkillTags to tasks, align them with the specialist capabilities listed below ");
+            userPromptBuilder.AppendLine("so the skill-based assignment algorithm can match tasks to the right engineers.");
+            userPromptBuilder.AppendLine(teamComposition);
+            userPromptBuilder.AppendLine();
+        }
 
         if (!string.IsNullOrEmpty(repoStructure))
         {
@@ -1432,8 +1443,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     bestTask = FindBestMatchingTask(assignableTasks, engineer.Capabilities);
                     if (bestTask is null)
                     {
-                        // No matching tasks — specialist can still take general work
+                        // No matching tasks — specialist takes general work (lifecycle: repurposed)
                         bestTask = assignableTasks.FirstOrDefault();
+                        if (bestTask is not null)
+                        {
+                            Logger.LogInformation(
+                                "Specialist {Name} has no matching tasks — repurposing to general task {TaskId}",
+                                engineer.Name, bestTask.Id);
+                        }
                     }
                 }
                 else
@@ -2990,7 +3007,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 var poolConfig = Config.Limits.EngineerPool;
 
                 AgentRole? neededRole = null;
-                var seCapacity = poolConfig.SoftwareEngineerPool
+                var seCapacity = poolConfig.EffectiveMaxAdditional
                     - (_registry.GetAgentsByRole(AgentRole.SoftwareEngineer).Count() - 1); // -1 for leader
                 if (seCapacity > 0)
                 {

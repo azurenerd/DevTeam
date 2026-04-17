@@ -534,7 +534,7 @@ public class AgentSpawnManager
         {
             return role switch
             {
-                AgentRole.SoftwareEngineer => pool.SoftwareEngineerPool - _spawnedSEs,
+                AgentRole.SoftwareEngineer => pool.EffectiveMaxAdditional - _spawnedSEs,
                 _ => 0
             };
         }
@@ -562,7 +562,7 @@ public class AgentSpawnManager
             var existingSEs = _registry.GetAgentsByRole(AgentRole.SoftwareEngineer);
             if (existingSEs.Count == 0)
                 return true; // First SE (the leader) can always spawn
-            return _spawnedSEs < _config.Limits.EngineerPool.SoftwareEngineerPool;
+            return _spawnedSEs < _config.Limits.EngineerPool.EffectiveMaxAdditional;
         }
 
         return false;

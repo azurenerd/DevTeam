@@ -312,6 +312,15 @@ else if (_config is not null)
                                 @if (isExpanded)
                                 {
                                     <div class="config-agent-details" @onclick:stopPropagation="true">
+                                        @* Auto-Spawn Toggle *@
+                                        <div class="config-field" style="display: flex; align-items: center; gap: 0.75rem;">
+                                            <label class="config-toggle config-toggle-sm" title="When enabled, this agent is automatically spawned at startup. When disabled, the agent is available but only spawned when the PM activates it via team composition.">
+                                                <input type="checkbox" @bind="agent.Config.AutoSpawn" />
+                                                <span class="config-toggle-slider"></span>
+                                            </label>
+                                            <span style="font-size: 0.8rem; color: var(--text-secondary);">Auto-spawn at startup</span>
+                                        </div>
+
                                         @* Role Description *@
                                         <div class="config-field">
                                             <label title="Custom role description that augments the agent's default persona. This is prepended to every AI system prompt, giving the agent a specialized identity and behavioral guidelines.">

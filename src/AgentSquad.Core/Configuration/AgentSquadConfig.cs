@@ -85,6 +85,17 @@ public class AgentConfigs
     public AgentConfig SoftwareEngineer { get; set; } = new() { ModelTier = "premium", Enabled = true };
     public AgentConfig TestEngineer { get; set; } = new() { ModelTier = "standard", Enabled = true };
 
+    /// <summary>Get the config for a built-in agent role.</summary>
+    public AgentConfig GetConfigForRole(AgentRole role) => role switch
+    {
+        AgentRole.ProgramManager => ProgramManager,
+        AgentRole.Researcher => Researcher,
+        AgentRole.Architect => Architect,
+        AgentRole.SoftwareEngineer => SoftwareEngineer,
+        AgentRole.TestEngineer => TestEngineer,
+        _ => new AgentConfig()
+    };
+
     /// <summary>
     /// Model tier for the independent critique ("rubber-duck") pass during PM review.
     /// When non-null, the PM runs a second AI call with an adversarial persona before its
@@ -104,6 +115,14 @@ public class AgentConfig
 {
     public string ModelTier { get; set; } = "standard";
     public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Whether this agent is automatically spawned at startup.
+    /// When false, the agent is listed as available but not spawned unless the PM activates it
+    /// via team composition. Core agents default to true; optional specialists default to false.
+    /// </summary>
+    public bool AutoSpawn { get; set; } = true;
+
     public int? MaxDailyTokens { get; set; }
 
     /// <summary>
@@ -228,6 +247,20 @@ public class EngineerPoolConfig
     /// Default: 2. Set to 0 to disable additional engineer spawning.
     /// </summary>
     public int SoftwareEngineerPool { get; set; } = 2;
+
+    /// <summary>
+    /// Unified limit for all engineering agents (leader SE + worker SEs + specialist engineers).
+    /// When set, this overrides SoftwareEngineerPool for total pool sizing.
+    /// Leader SE (rank 0) always counts as 1. Default: null (uses SoftwareEngineerPool + 1).
+    /// </summary>
+    public int? MaxEngineeringAgents { get; set; }
+
+    /// <summary>
+    /// Effective max additional engineers, accounting for unified limit.
+    /// </summary>
+    public int EffectiveMaxAdditional => MaxEngineeringAgents.HasValue
+        ? Math.Max(0, MaxEngineeringAgents.Value - 1) // subtract leader
+        : SoftwareEngineerPool;
 }
 
 public class DashboardConfig

@@ -19,6 +19,7 @@ public class ProjectFileManager
     private const string ArchitecturePath = "Architecture.md";
     private const string ResearchPath = "Research.md";
     private const string PMSpecPath = "PMSpec.md";
+    private const string TeamCompositionPath = "TeamComposition.md";
 
     public ProjectFileManager(
         IGitHubService github,
@@ -231,6 +232,27 @@ public class ProjectFileManager
 
         _logger.LogInformation("Updating PMSpec.md");
         await _github.CreateOrUpdateFileAsync(PMSpecPath, content, "Update PM specification", _branch, ct);
+    }
+
+    #endregion
+
+    #region Team Composition
+
+    /// <summary>
+    /// Get TeamComposition.md — the PM's analysis of team structure, specialists, and skill gaps.
+    /// Returns null if not yet created (leader SE should plan without it).
+    /// </summary>
+    public async Task<string?> GetTeamCompositionAsync(CancellationToken ct = default)
+    {
+        return await _github.GetFileContentAsync(TeamCompositionPath, _branch, ct);
+    }
+
+    public async Task UpdateTeamCompositionAsync(string content, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(content);
+
+        _logger.LogInformation("Updating TeamComposition.md");
+        await _github.CreateOrUpdateFileAsync(TeamCompositionPath, content, "Update team composition", _branch, ct);
     }
 
     #endregion
