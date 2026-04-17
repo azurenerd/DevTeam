@@ -1415,7 +1415,53 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 .Where(t => t.Status == "Pending" && _taskManager.AreDependenciesMet(t) && t.Id != IntegrationTaskId && t.IssueNumber.HasValue)
                 .ToList();
 
-            // Skill-based assignment: match specialists to tasks first, then generalists
+            // LLM-based semantic skill matching: single call matches all tasks to all engineers
+            var llmAssignments = await MatchTasksToEngineersWithLlmAsync(assignableTasks, freeEngineers, ct);
+            if (llmAssignments is not null)
+            {
+                // Process LLM assignments
+                foreach (var (engineerAgentId, task) in llmAssignments)
+                {
+                    if (!task.IssueNumber.HasValue) continue;
+                    var engineer = freeEngineers.FirstOrDefault(e =>
+                        string.Equals(e.AgentId, engineerAgentId, StringComparison.OrdinalIgnoreCase));
+                    if (engineer is null) continue;
+
+                    assignableTasks.Remove(task);
+                    await _taskManager.AssignTaskAsync(task.IssueNumber.Value, engineer.Name, ct);
+                    _agentAssignments[engineer.AgentId] = task.IssueNumber.Value;
+
+                    var skillMatch = engineer.Capabilities.Count > 0
+                        ? $" (skills: {string.Join(",", engineer.Capabilities)})"
+                        : " (generalist)";
+                    var taskSkills = task.SkillTags.Count > 0
+                        ? $" [tags: {string.Join(",", task.SkillTags)}]"
+                        : "";
+
+                    var assignStepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
+                        $"Assigning issue #{task.IssueNumber} ({task.Name}){taskSkills} to {engineer.Name}{skillMatch} (LLM-matched)", Identity.ModelTier);
+
+                    Logger.LogInformation(
+                        "Assigned issue #{IssueNumber} ({TaskName}){TaskSkills} to {Engineer}{SkillMatch} (LLM-matched)",
+                        task.IssueNumber, task.Name, taskSkills, engineer.Name, skillMatch);
+
+                    await MessageBus.PublishAsync(new IssueAssignmentMessage
+                    {
+                        FromAgentId = Identity.Id,
+                        ToAgentId = engineer.AgentId,
+                        MessageType = "IssueAssignment",
+                        IssueNumber = task.IssueNumber.Value,
+                        IssueTitle = task.Name,
+                        Complexity = task.Complexity,
+                        IssueUrl = task.IssueUrl
+                    }, ct);
+                    _taskTracker.CompleteStep(assignStepId);
+
+                    freeEngineers.Remove(engineer);
+                }
+            }
+
+            // Fallback: assign remaining free engineers to remaining tasks using exact-match logic
             foreach (var engineer in freeEngineers)
             {
                 if (assignableTasks.Count == 0) break;
@@ -5002,7 +5048,154 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     #region Skill-Based Assignment Helpers
 
     /// <summary>
-    /// Finds the task with the highest skill tag overlap with the given capabilities.
+    /// Uses a single LLM call to semantically match all assignable tasks to all free engineers.
+    /// Returns a dictionary of engineerAgentId → assigned task. Engineers/tasks not in the result are unmatched.
+    /// Falls back to null if the LLM call fails.
+    /// </summary>
+    private async Task<Dictionary<string, EngineeringTask>?> MatchTasksToEngineersWithLlmAsync(
+        List<EngineeringTask> tasks, List<EngineerInfo> engineers, CancellationToken ct)
+    {
+        if (tasks.Count == 0 || engineers.Count == 0) return null;
+
+        try
+        {
+            var stepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "LLM skill matching",
+                $"Matching {tasks.Count} tasks to {engineers.Count} engineers using semantic skill analysis", Identity.ModelTier);
+
+            var prompt = new StringBuilder();
+            prompt.AppendLine("You are an engineering manager assigning tasks to the best-qualified engineers.");
+            prompt.AppendLine("Match each task to the single best engineer based on SEMANTIC skill relevance.");
+            prompt.AppendLine("Do NOT require exact keyword matches — use domain knowledge to infer skill fit.");
+            prompt.AppendLine("For example: a Frontend Engineer should get UI/React/HTML tasks even if 'react' isn't in their capabilities.");
+            prompt.AppendLine("A Cloud Engineer should get Azure/AWS/infrastructure tasks.");
+            prompt.AppendLine("Generalist engineers (no specific capabilities) should get tasks that don't fit any specialist.");
+            prompt.AppendLine();
+            prompt.AppendLine("## Available Engineers");
+            foreach (var eng in engineers)
+            {
+                var caps = eng.Capabilities.Count > 0
+                    ? $"Capabilities: [{string.Join(", ", eng.Capabilities)}]"
+                    : "Generalist (no specific capabilities)";
+                prompt.AppendLine($"- **{eng.Name}** (ID: `{eng.AgentId}`) — {caps}");
+            }
+            prompt.AppendLine();
+            prompt.AppendLine("## Tasks to Assign");
+            foreach (var task in tasks)
+            {
+                var tags = task.SkillTags.Count > 0
+                    ? $" | Tags: [{string.Join(", ", task.SkillTags)}]"
+                    : "";
+                prompt.AppendLine($"- **{task.Id}**: {task.Name} (Complexity: {task.Complexity}{tags})");
+                if (!string.IsNullOrWhiteSpace(task.Description))
+                    prompt.AppendLine($"  Description: {task.Description[..Math.Min(200, task.Description.Length)]}");
+            }
+            prompt.AppendLine();
+            prompt.AppendLine("## Rules");
+            prompt.AppendLine("1. Each engineer gets AT MOST one task");
+            prompt.AppendLine("2. Each task is assigned to AT MOST one engineer");
+            prompt.AppendLine("3. Prefer assigning specialists to tasks matching their domain");
+            prompt.AppendLine("4. Assign higher-complexity tasks to more experienced/specialized engineers");
+            prompt.AppendLine("5. If there are more tasks than engineers, leave extra tasks unassigned");
+            prompt.AppendLine("6. If there are more engineers than tasks, leave extra engineers unassigned");
+            prompt.AppendLine();
+            prompt.AppendLine("Respond with ONLY a JSON object (no markdown fences):");
+            prompt.AppendLine("{");
+            prompt.AppendLine("  \"assignments\": [");
+            prompt.AppendLine("    { \"taskId\": \"T1\", \"engineerAgentId\": \"agent-id\", \"reason\": \"Brief reason for this match\" }");
+            prompt.AppendLine("  ]");
+            prompt.AppendLine("}");
+
+            // Use budget tier — this is structured matching, not code generation
+            var kernel = Models.GetKernel("budget", Identity.Id);
+            var chat = kernel.GetRequiredService<IChatCompletionService>();
+            var history = CreateChatHistory();
+            history.AddUserMessage(prompt.ToString());
+
+            var response = await chat.GetChatMessageContentsAsync(history, cancellationToken: ct);
+            var content = response.FirstOrDefault()?.Content;
+
+            _taskTracker.CompleteStep(stepId);
+
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                Logger.LogWarning("LLM skill matching returned empty response, falling back to exact match");
+                return null;
+            }
+
+            // Parse JSON response
+            var jsonContent = content.Trim();
+            if (jsonContent.StartsWith("```")) // Strip markdown fences if present
+            {
+                var lines = jsonContent.Split('\n');
+                jsonContent = string.Join('\n', lines.Skip(1).TakeWhile(l => !l.TrimStart().StartsWith("```")));
+            }
+
+            var options = new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+            var result = System.Text.Json.JsonSerializer.Deserialize<LlmAssignmentResponse>(jsonContent, options);
+
+            if (result?.Assignments is null || result.Assignments.Count == 0)
+            {
+                Logger.LogWarning("LLM skill matching returned no assignments, falling back to exact match");
+                return null;
+            }
+
+            // Build validated assignment map
+            var taskLookup = tasks.ToDictionary(t => t.Id, StringComparer.OrdinalIgnoreCase);
+            var engineerIds = new HashSet<string>(engineers.Select(e => e.AgentId), StringComparer.OrdinalIgnoreCase);
+            var assignments = new Dictionary<string, EngineeringTask>(StringComparer.OrdinalIgnoreCase);
+            var assignedTaskIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var a in result.Assignments)
+            {
+                if (string.IsNullOrEmpty(a.TaskId) || string.IsNullOrEmpty(a.EngineerAgentId))
+                    continue;
+                if (!taskLookup.TryGetValue(a.TaskId, out var task))
+                {
+                    Logger.LogDebug("LLM suggested unknown task ID {TaskId}, skipping", a.TaskId);
+                    continue;
+                }
+                if (!engineerIds.Contains(a.EngineerAgentId))
+                {
+                    Logger.LogDebug("LLM suggested unknown engineer ID {EngineerId}, skipping", a.EngineerAgentId);
+                    continue;
+                }
+                if (assignments.ContainsKey(a.EngineerAgentId) || assignedTaskIds.Contains(a.TaskId))
+                    continue; // Duplicate — skip
+
+                assignments[a.EngineerAgentId] = task;
+                assignedTaskIds.Add(a.TaskId);
+
+                Logger.LogInformation(
+                    "LLM matched task {TaskId} ({TaskName}) → {Engineer}: {Reason}",
+                    a.TaskId, task.Name, a.EngineerAgentId, a.Reason ?? "no reason given");
+            }
+
+            Logger.LogInformation("LLM skill matching produced {Count}/{Total} assignments",
+                assignments.Count, Math.Min(tasks.Count, engineers.Count));
+
+            return assignments.Count > 0 ? assignments : null;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "LLM skill matching failed, falling back to exact match");
+            return null;
+        }
+    }
+
+    private sealed class LlmAssignmentResponse
+    {
+        public List<LlmAssignment> Assignments { get; set; } = [];
+    }
+
+    private sealed class LlmAssignment
+    {
+        public string TaskId { get; set; } = "";
+        public string EngineerAgentId { get; set; } = "";
+        public string? Reason { get; set; }
+    }
+
+    /// <summary>
+    /// FALLBACK: Finds the task with the highest skill tag overlap with the given capabilities.
     /// Returns null if no tasks have any overlapping tags.
     /// </summary>
     private static EngineeringTask? FindBestMatchingTask(List<EngineeringTask> tasks, List<string> capabilities)
