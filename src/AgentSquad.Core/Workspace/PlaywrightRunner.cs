@@ -800,7 +800,8 @@ public class PlaywrightRunner
 
                 // Check if it has hardcoded port bindings
                 if (!content.Contains("app.Urls.Add") && !content.Contains("Urls.Add(") &&
-                    !content.Contains(".UseUrls("))
+                    !content.Contains(".UseUrls(") && !content.Contains("ConfigureKestrel") &&
+                    !content.Contains("ListenLocalhost") && !content.Contains("Listen(IPAddress"))
                     continue;
 
                 var relPath = Path.GetRelativePath(workspacePath, programFile);
@@ -1419,7 +1420,7 @@ public class PlaywrightRunner
                 if (csproj is not null)
                 {
                     _logger.LogInformation("Auto-detected app project: {Project}", Path.GetRelativePath(workspacePath, csproj));
-                    appStartCommand = $"dotnet run --project \"{csproj}\" --urls {portUrl}";
+                    appStartCommand = $"dotnet run --no-launch-profile --project \"{csproj}\" --urls {portUrl}";
                 }
                 else
                     return null; // Can't start app without a command
