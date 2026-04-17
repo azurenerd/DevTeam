@@ -170,6 +170,10 @@ public partial class PullRequestWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(taskTitle);
         ArgumentException.ThrowIfNullOrWhiteSpace(branchName);
 
+        // Guard: strip agent name prefix if task title already starts with it (prevents "Agent: Agent: Task")
+        if (taskTitle.StartsWith(agentName + ":", StringComparison.OrdinalIgnoreCase))
+            taskTitle = taskTitle[(agentName.Length + 1)..].Trim();
+
         var prTitle = $"{agentName}: {taskTitle}";
 
         // Idempotency: check if a PR with the same title already exists
@@ -473,6 +477,10 @@ public partial class PullRequestWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
         ArgumentException.ThrowIfNullOrWhiteSpace(documentPath);
+
+        // Guard: strip agent name prefix if already present (prevents "Agent: Agent: Doc")
+        if (prTitle.StartsWith(agentName + ":", StringComparison.OrdinalIgnoreCase))
+            prTitle = prTitle[(agentName.Length + 1)..].Trim();
 
         var fullPrTitle = $"{agentName}: {prTitle}";
 
