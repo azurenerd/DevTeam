@@ -691,19 +691,26 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             "- Maximize tasks that depend ONLY on T1 (star topology, not chains).\n" +
             "- Assign each task a WAVE: W0 for T1 only, W1 for tasks after T1, W2+ for later waves.\n\n" +
             "Output ONLY structured lines in this format:\n" +
-            "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>|<Wave>\n\n" +
+            "TASK|<ID>|<IssueNumber>|<Name>|<Description>|<Complexity>|<Dependencies or NONE>|<FilePlan>|<Wave>|<SkillTags>\n\n" +
             "The FilePlan field should contain semicolon-separated file operations:\n" +
             "  CREATE:path/to/file.ext(namespace);MODIFY:path/to/existing.ext;USE:ExistingType(namespace)\n" +
             "  SHARED:path/to/file.ext — declare a file that multiple tasks may modify (use sparingly, T1 only)\n\n" +
             "The Wave field: W0 for T1 only, W1 for tasks parallelizable after T1, W2+ for later waves.\n\n" +
+            "The SkillTags field: comma-separated domain tags for skill-based engineer assignment. Examples:\n" +
+            "  frontend,react,css — for UI/UX tasks\n" +
+            "  backend,api,database — for server-side tasks\n" +
+            "  infrastructure,azure,devops — for cloud/infra tasks\n" +
+            "  fullstack — for tasks spanning multiple domains\n" +
+            "  foundation — for T1 scaffolding\n" +
+            "Use specific tags that describe the domain expertise needed.\n\n" +
             "Example:\n" +
             "TASK|T1|42|Project Foundation & Scaffolding|Create solution structure, shared models, interfaces, " +
             "DI registration, and configuration|High|NONE|" +
-            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models);SHARED:MyApp/Program.cs|W0\n" +
+            "CREATE:.gitignore;CREATE:MyApp.sln;CREATE:MyApp/MyApp.csproj;CREATE:MyApp/Program.cs(MyApp);CREATE:MyApp/Models/AppConfig.cs(MyApp.Models);SHARED:MyApp/Program.cs|W0|foundation\n" +
             "TASK|T2|43|Implement auth module|Build JWT authentication with refresh tokens|Medium|T1|" +
-            "CREATE:MyApp/Services/AuthService.cs(MyApp.Services);MODIFY:MyApp/Program.cs;USE:IAuthService(MyApp.Interfaces)|W1\n" +
-            "TASK|T3|44|Implement user profile|Build user profile CRUD|Medium|T1|" +
-            "CREATE:MyApp/Services/UserProfileService.cs(MyApp.Services);CREATE:MyApp/Controllers/ProfileController.cs(MyApp.Controllers)|W1\n\n" +
+            "CREATE:MyApp/Services/AuthService.cs(MyApp.Services);MODIFY:MyApp/Program.cs;USE:IAuthService(MyApp.Interfaces)|W1|backend,api,security\n" +
+            "TASK|T3|44|Implement user profile UI|Build user profile page with React components|Medium|T1|" +
+            "CREATE:MyApp/Components/UserProfile.razor(MyApp.Components)|W1|frontend,blazor,css\n\n" +
             "Note: T1 is the ONLY task in W0 — it must complete alone before W1 starts. " +
             "T2 and T3 are both in W1 (parallel-safe) and own completely separate files. " +
             "Program.cs is declared SHARED in T1, so T2 can MODIFY it.\n\n" +
@@ -777,6 +784,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var wave = parts.Length >= 9 ? parts[8].Trim() : "W1";
             if (string.IsNullOrWhiteSpace(wave)) wave = "W1";
 
+            // Parse optional SkillTags field (10th field) for skill-based assignment
+            var skillTags = parts.Length >= 10
+                ? parts[9].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Select(t => t.ToLowerInvariant()).ToList()
+                : new List<string>();
+
             // Extract owned files from FilePlan (both CREATE and MODIFY)
             var ownedFiles = ExtractAllFilesFromFilePlan(filePlan);
 
@@ -794,7 +807,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 DependencyTypes = depTypes,
                 ParentIssueNumber = issueNum > 0 ? issueNum : null,
                 Wave = wave,
-                OwnedFiles = ownedFiles
+                OwnedFiles = ownedFiles,
+                SkillTags = skillTags
             });
         }
 
@@ -1354,11 +1368,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         {
             var registeredEngineers = new List<EngineerInfo>();
 
-            // Include non-leader SEs as assignable workers
+            // Include non-leader SEs (including specialist engineers) as assignable workers
             foreach (var agent in _registry.GetAgentsByRole(AgentRole.SoftwareEngineer))
             {
                 if (agent.Identity.Id == Identity.Id) continue; // Skip self (leader)
-                registeredEngineers.Add(new EngineerInfo { AgentId = agent.Identity.Id, Name = agent.Identity.DisplayName, Role = AgentRole.SoftwareEngineer });
+                registeredEngineers.Add(new EngineerInfo
+                {
+                    AgentId = agent.Identity.Id,
+                    Name = agent.Identity.DisplayName,
+                    Role = AgentRole.SoftwareEngineer,
+                    Capabilities = agent.Identity.Capabilities
+                });
             }
 
             // === Gate: TaskAssignment — human reviews task assignments ===
@@ -1380,6 +1400,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 _taskAssignmentGateCleared = true;
             }
 
+            // Build list of free engineers (not currently assigned)
+            var freeEngineers = new List<EngineerInfo>();
             foreach (var engineer in registeredEngineers)
             {
                 if (_agentAssignments.ContainsKey(engineer.AgentId))
@@ -1390,35 +1412,66 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         continue;
                     _agentAssignments.Remove(engineer.AgentId);
                 }
+                freeEngineers.Add(engineer);
+            }
 
-                var complexityPreferences = new[] { "High", "Medium", "Low" };
+            // Get all assignable tasks (pending with dependencies met, excluding integration)
+            var assignableTasks = _taskManager.Tasks
+                .Where(t => t.Status == "Pending" && _taskManager.AreDependenciesMet(t) && t.Id != IntegrationTaskId && t.IssueNumber.HasValue)
+                .ToList();
 
-                var task = _taskManager.FindNextAssignableTask(complexityPreferences);
-                // Never assign the integration task to regular engineers — PE leader handles it
-                if (task?.Id == IntegrationTaskId)
-                    task = null;
-                if (task is null || !task.IssueNumber.HasValue)
+            // Skill-based assignment: match specialists to tasks first, then generalists
+            foreach (var engineer in freeEngineers)
+            {
+                if (assignableTasks.Count == 0) break;
+
+                EngineeringTask? bestTask;
+                if (engineer.Capabilities.Count > 0)
+                {
+                    // Specialist: find the best-matching task by skill overlap
+                    bestTask = FindBestMatchingTask(assignableTasks, engineer.Capabilities);
+                    if (bestTask is null)
+                    {
+                        // No matching tasks — specialist can still take general work
+                        bestTask = assignableTasks.FirstOrDefault();
+                    }
+                }
+                else
+                {
+                    // Generalist: prefer tasks that no specialist would match, or highest complexity
+                    bestTask = FindBestTaskForGeneralist(assignableTasks, registeredEngineers);
+                }
+
+                if (bestTask is null || !bestTask.IssueNumber.HasValue)
                     continue;
 
-                await _taskManager.AssignTaskAsync(task.IssueNumber.Value, engineer.Name, ct);
-                _agentAssignments[engineer.AgentId] = task.IssueNumber.Value;
+                assignableTasks.Remove(bestTask);
+                await _taskManager.AssignTaskAsync(bestTask.IssueNumber.Value, engineer.Name, ct);
+                _agentAssignments[engineer.AgentId] = bestTask.IssueNumber.Value;
+
+                var skillMatch = engineer.Capabilities.Count > 0
+                    ? $" (skills: {string.Join(",", engineer.Capabilities)})"
+                    : " (generalist)";
+                var taskSkills = bestTask.SkillTags.Count > 0
+                    ? $" [tags: {string.Join(",", bestTask.SkillTags)}]"
+                    : "";
 
                 var assignStepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
-                    $"Assigning issue #{task.IssueNumber} ({task.Name}) to {engineer.Name}", Identity.ModelTier);
+                    $"Assigning issue #{bestTask.IssueNumber} ({bestTask.Name}){taskSkills} to {engineer.Name}{skillMatch}", Identity.ModelTier);
 
                 Logger.LogInformation(
-                    "Assigned issue #{IssueNumber} ({TaskName}) to {Engineer}",
-                    task.IssueNumber, task.Name, engineer.Name);
+                    "Assigned issue #{IssueNumber} ({TaskName}){TaskSkills} to {Engineer}{SkillMatch}",
+                    bestTask.IssueNumber, bestTask.Name, taskSkills, engineer.Name, skillMatch);
 
                 await MessageBus.PublishAsync(new IssueAssignmentMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = engineer.AgentId,
                     MessageType = "IssueAssignment",
-                    IssueNumber = task.IssueNumber.Value,
-                    IssueTitle = task.Name,
-                    Complexity = task.Complexity,
-                    IssueUrl = task.IssueUrl
+                    IssueNumber = bestTask.IssueNumber.Value,
+                    IssueTitle = bestTask.Name,
+                    Complexity = bestTask.Complexity,
+                    IssueUrl = bestTask.IssueUrl
                 }, ct);
                 _taskTracker.CompleteStep(assignStepId);
             }
@@ -2949,6 +3002,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     "SE requesting additional {Role}: {Parallelizable} tasks parallelizable, {Free} workers free",
                     neededRole, parallelizable, freeWorkers);
 
+                // Identify the most common unassigned skill tags for specialist scaling
+                var unassignedTasks = _taskManager.Tasks
+                    .Where(t => t.Status == "Pending" && _taskManager.AreDependenciesMet(t) && t.SkillTags.Count > 0)
+                    .ToList();
+                var dominantSkills = unassignedTasks
+                    .SelectMany(t => t.SkillTags)
+                    .GroupBy(tag => tag, StringComparer.OrdinalIgnoreCase)
+                    .OrderByDescending(g => g.Count())
+                    .Take(3)
+                    .Select(g => g.Key)
+                    .ToList();
+
                 await MessageBus.PublishAsync(new ResourceRequestMessage
                 {
                     FromAgentId = Identity.Id,
@@ -2956,7 +3021,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     MessageType = "ResourceRequest",
                     RequestedRole = neededRole.Value,
                     Justification = $"{parallelizable} tasks can be worked in parallel but only {freeWorkers} workers are available",
-                    CurrentTeamSize = _agentAssignments.Count + 1
+                    CurrentTeamSize = _agentAssignments.Count + 1,
+                    DesiredCapabilities = dominantSkills
                 }, ct);
 
                 _resourceRequestPending = true;
@@ -4766,6 +4832,71 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         }
     }
 
+    #region Skill-Based Assignment Helpers
+
+    /// <summary>
+    /// Finds the task with the highest skill tag overlap with the given capabilities.
+    /// Returns null if no tasks have any overlapping tags.
+    /// </summary>
+    private static EngineeringTask? FindBestMatchingTask(List<EngineeringTask> tasks, List<string> capabilities)
+    {
+        EngineeringTask? bestTask = null;
+        var bestScore = 0;
+
+        foreach (var task in tasks)
+        {
+            if (task.SkillTags.Count == 0) continue;
+            var overlap = task.SkillTags.Count(tag =>
+                capabilities.Any(cap => string.Equals(cap, tag, StringComparison.OrdinalIgnoreCase)));
+            if (overlap > bestScore)
+            {
+                bestScore = overlap;
+                bestTask = task;
+            }
+        }
+
+        return bestTask;
+    }
+
+    /// <summary>
+    /// For a generalist engineer, prefers tasks that no specialist would match well.
+    /// Falls back to highest complexity unmatched task.
+    /// </summary>
+    private static EngineeringTask? FindBestTaskForGeneralist(
+        List<EngineeringTask> tasks, List<EngineerInfo> allEngineers)
+    {
+        var specialists = allEngineers.Where(e => e.Capabilities.Count > 0).ToList();
+        if (specialists.Count == 0)
+        {
+            // No specialists — just pick highest complexity
+            return tasks.OrderByDescending(t => ComplexityRank(t.Complexity)).FirstOrDefault();
+        }
+
+        // Prefer tasks that no specialist has matching skills for
+        var unmatchedTasks = tasks.Where(t =>
+        {
+            if (t.SkillTags.Count == 0) return true; // No tags = anyone can do it
+            return !specialists.Any(s => t.SkillTags.Any(tag =>
+                s.Capabilities.Any(cap => string.Equals(cap, tag, StringComparison.OrdinalIgnoreCase))));
+        }).ToList();
+
+        if (unmatchedTasks.Count > 0)
+            return unmatchedTasks.OrderByDescending(t => ComplexityRank(t.Complexity)).FirstOrDefault();
+
+        // All tasks have matching specialists — just pick highest complexity
+        return tasks.OrderByDescending(t => ComplexityRank(t.Complexity)).FirstOrDefault();
+    }
+
+    private static int ComplexityRank(string complexity) => complexity.ToLowerInvariant() switch
+    {
+        "high" => 3,
+        "medium" => 2,
+        "low" => 1,
+        _ => 0
+    };
+
+    #endregion
+
     #endregion
 }
 
@@ -4790,6 +4921,9 @@ internal record EngineeringTask
     /// <summary>Current GitHub labels on this issue (for status label management).</summary>
     public List<string> Labels { get; init; } = new();
 
+    /// <summary>Skill tags for capability-based task assignment (e.g., "frontend", "react", "database").</summary>
+    public List<string> SkillTags { get; init; } = new();
+
     // ── PE Parallelism Enhancements ──
 
     /// <summary>Wave assignment for parallel scheduling (W1, W2, etc.). Default W1.</summary>
@@ -4807,4 +4941,5 @@ internal record EngineerInfo
     public string AgentId { get; init; } = "";
     public string Name { get; init; } = "";
     public AgentRole Role { get; init; }
+    public List<string> Capabilities { get; init; } = [];
 }

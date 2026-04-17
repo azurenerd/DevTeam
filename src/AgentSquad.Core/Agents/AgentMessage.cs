@@ -39,6 +39,11 @@ public record ResourceRequestMessage : AgentMessage
     public required AgentRole RequestedRole { get; init; }
     public required string Justification { get; init; }
     public required int CurrentTeamSize { get; init; }
+    /// <summary>
+    /// Desired skill capabilities for the requested agent. If non-empty, the spawn manager
+    /// should prefer creating a specialist with matching capabilities.
+    /// </summary>
+    public List<string> DesiredCapabilities { get; init; } = [];
 }
 
 public record ReviewRequestMessage : AgentMessage
