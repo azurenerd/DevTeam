@@ -424,20 +424,25 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
     private async Task CreateEngineeringPlanAsync(CancellationToken ct)
     {
+        // Set enhancement scope FIRST so all subsequent LoadTasksAsync calls filter stale tasks
+        var scopeEnhancements = await GitHub.GetIssuesByLabelAsync(
+            IssueWorkflow.Labels.Enhancement, ct);
+        if (scopeEnhancements.Count > 0)
+        {
+            _taskManager.SetEnhancementScope(scopeEnhancements.Select(i => i.Number));
+        }
+
         // Recovery: check for existing engineering-task issues from a prior run
         await _taskManager.LoadTasksAsync(ct);
         if (_taskManager.TotalCount > 0)
         {
-            // Validate recovered tasks belong to the current run by checking that
-            // corresponding enhancement issues still exist. If no enhancement issues
-            // exist, these tasks are stale leftovers from a previous run.
-            var currentEnhancements = await GitHub.GetIssuesByLabelAsync(
-                IssueWorkflow.Labels.Enhancement, ct);
-            var enhancementNumbers = currentEnhancements.Select(i => i.Number).ToHashSet();
+            // With enhancement scope set, loaded tasks are already filtered to current run.
+            // Double-check: validate at least one task has a matching parent.
+            var enhancementNumbers = scopeEnhancements.Select(i => i.Number).ToHashSet();
             var hasMatchingParent = _taskManager.Tasks.Any(t =>
                 t.ParentIssueNumber.HasValue && enhancementNumbers.Contains(t.ParentIssueNumber.Value));
 
-            if (currentEnhancements.Count == 0 || !hasMatchingParent)
+            if (scopeEnhancements.Count == 0 || !hasMatchingParent)
             {
                 Logger.LogWarning(
                     "Found {Count} engineering-task issues but they don't match current enhancement issues — ignoring stale tasks",
@@ -486,8 +491,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var pmSpec = await ProjectFiles.GetPMSpecAsync(ct);
         var teamComposition = await ProjectFiles.GetTeamCompositionAsync(ct);
 
-        var enhancementIssues = await GitHub.GetIssuesByLabelAsync(
-            IssueWorkflow.Labels.Enhancement, ct);
+        var enhancementIssues = scopeEnhancements;
 
         if (enhancementIssues.Count == 0)
         {
@@ -1283,6 +1287,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         try
         {
+            // Set enhancement scope to filter out stale tasks from prior runs
+            var enhancements = await GitHub.GetIssuesByLabelAsync(
+                IssueWorkflow.Labels.Enhancement, ct);
+            if (enhancements.Count > 0)
+                _taskManager.SetEnhancementScope(enhancements.Select(i => i.Number));
+
             await _taskManager.LoadTasksAsync(ct);
             if (_taskManager.TotalCount > 0)
             {

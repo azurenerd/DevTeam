@@ -24,12 +24,27 @@ internal sealed partial class EngineeringTaskIssueManager
     private List<EngineeringTask> _cache = new();
     private bool _cacheLoaded;
 
+    // Scope filter: when set, LoadTasksAsync only returns tasks whose ParentIssueNumber
+    // is in this set. This prevents stale tasks from prior runs from polluting the cache.
+    private HashSet<int>? _enhancementScope;
+
     public EngineeringTaskIssueManager(IGitHubService github, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(github);
         ArgumentNullException.ThrowIfNull(logger);
         _github = github;
         _logger = logger;
+    }
+
+    /// <summary>
+    /// Set the enhancement issue scope for the current run. Only engineering-task issues
+    /// whose ParentIssueNumber is in this set will be loaded. Call this before LoadTasksAsync
+    /// to filter out stale tasks from previous runs.
+    /// </summary>
+    public void SetEnhancementScope(IEnumerable<int> enhancementIssueNumbers)
+    {
+        _enhancementScope = new HashSet<int>(enhancementIssueNumbers);
+        _logger.LogInformation("Set enhancement scope filter with {Count} issue numbers", _enhancementScope.Count);
     }
 
     /// <summary>All tasks (cached). Call <see cref="LoadTasksAsync"/> first.</summary>
@@ -46,11 +61,24 @@ internal sealed partial class EngineeringTaskIssueManager
         var openIssues = await _github.GetIssuesByLabelAsync(TaskLabel, "open", ct);
         var closedIssues = await _github.GetIssuesByLabelAsync(TaskLabel, "closed", ct);
 
-        _cache = openIssues.Concat(closedIssues)
+        var allTasks = openIssues.Concat(closedIssues)
             .Select(MapIssueToTask)
             .OrderBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        // Apply enhancement scope filter to exclude stale tasks from prior runs
+        if (_enhancementScope is not null && _enhancementScope.Count > 0)
+        {
+            var before = allTasks.Count;
+            allTasks = allTasks
+                .Where(t => t.ParentIssueNumber.HasValue && _enhancementScope.Contains(t.ParentIssueNumber.Value))
+                .ToList();
+            if (before != allTasks.Count)
+                _logger.LogInformation("Filtered {Before} → {After} tasks using enhancement scope ({Excluded} stale tasks excluded)",
+                    before, allTasks.Count, before - allTasks.Count);
+        }
+
+        _cache = allTasks;
         _cacheLoaded = true;
         _logger.LogInformation("Loaded {Count} engineering tasks from GitHub issues ({Open} open, {Closed} closed)",
             _cache.Count, openIssues.Count, closedIssues.Count);
