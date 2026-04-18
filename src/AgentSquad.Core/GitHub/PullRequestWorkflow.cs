@@ -323,8 +323,18 @@ public partial class PullRequestWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
 
-        // Check if already marked ready-for-review to avoid duplicate comments
+        // Check if already marked ready-for-review OR already approved to avoid duplicate comments.
+        // The Architect swaps ready-for-review → architect-approved on approval, so we must check both.
         var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var alreadyApproved = pr is not null && (
+            pr.Labels.Contains(Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase) ||
+            pr.Labels.Contains(Labels.Approved, StringComparer.OrdinalIgnoreCase));
+        if (alreadyApproved)
+        {
+            _logger.LogInformation("PR #{Number} already has approval label, skipping ready-for-review", prNumber);
+            return;
+        }
+
         if (pr is not null && pr.Labels.Contains(Labels.ReadyForReview, StringComparer.OrdinalIgnoreCase))
         {
             // Label already exists. Only post a comment if there's been a changes-requested
