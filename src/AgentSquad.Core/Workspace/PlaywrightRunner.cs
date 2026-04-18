@@ -655,6 +655,18 @@ public class PlaywrightRunner
 
         var appCommand = ResolveAppStartCommand(workspacePath, config);
 
+        // Always inject --no-launch-profile for dotnet run commands to prevent
+        // launchSettings.json from overriding --urls and ASPNETCORE_URLS.
+        // Launch profiles take precedence over both env vars and CLI args,
+        // causing the app to listen on its default port (e.g., 5000) instead
+        // of our unique per-agent port.
+        if (appCommand.Contains("dotnet run", StringComparison.OrdinalIgnoreCase) &&
+            !appCommand.Contains("--no-launch-profile", StringComparison.OrdinalIgnoreCase))
+        {
+            appCommand = appCommand.Replace("dotnet run", "dotnet run --no-launch-profile");
+            _logger.LogInformation("Injected --no-launch-profile into app start command to prevent port override");
+        }
+
         // Resolve the app project directory for WorkingDirectory.
         // Using the workspace root causes relative path issues (e.g., data.json not found)
         // when the app resolves files relative to its CWD.
