@@ -1788,8 +1788,11 @@ public class PlaywrightRunner
                 Path.Combine(appDir, "wwwroot", "data", "data.json"),
             };
 
-            if (candidatePaths.Any(File.Exists))
-                continue; // Already has data somewhere
+            // Find which candidate paths are missing — fill them even if some already exist.
+            // The app may read from Data/data.json while the SE committed data.json to project root.
+            var missingPaths = candidatePaths.Where(p => !File.Exists(p)).ToArray();
+            if (missingPaths.Length == 0)
+                continue; // All candidate paths already have data.json
 
             // Strategy 1: Copy data.template.json or data.example.json from the workspace
             var templateCandidates = new[]
@@ -1802,17 +1805,18 @@ public class PlaywrightRunner
                 Path.Combine(appDir, "Data", "data.template.json"),
             };
 
-            var template = templateCandidates.FirstOrDefault(File.Exists);
+            // Also use an existing data.json from any candidate path as a source
+            var existingDataJson = candidatePaths.FirstOrDefault(File.Exists);
+            var template = templateCandidates.FirstOrDefault(File.Exists) ?? existingDataJson;
             if (template is not null)
             {
-                // Place in all candidate locations to cover however the app resolves the path
-                foreach (var dest in candidatePaths)
+                foreach (var dest in missingPaths)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                     File.Copy(template, dest, overwrite: false);
                 }
-                _logger.LogInformation("Copied {Template} → data.json ({Count} locations) for app preview",
-                    Path.GetRelativePath(workspacePath, template), candidatePaths.Length);
+                _logger.LogInformation("Copied {Template} → data.json ({Count} missing locations) for app preview",
+                    Path.GetRelativePath(workspacePath, template), missingPaths.Length);
                 continue;
             }
 
@@ -1825,13 +1829,13 @@ public class PlaywrightRunner
 
             if (testDataFiles.Count > 0)
             {
-                foreach (var dest in candidatePaths)
+                foreach (var dest in missingPaths)
                 {
                     Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
                     File.Copy(testDataFiles[0], dest, overwrite: false);
                 }
-                _logger.LogInformation("Copied test data {Source} → data.json ({Count} locations) for app preview",
-                    Path.GetRelativePath(workspacePath, testDataFiles[0]), candidatePaths.Length);
+                _logger.LogInformation("Copied test data {Source} → data.json ({Count} missing locations) for app preview",
+                    Path.GetRelativePath(workspacePath, testDataFiles[0]), missingPaths.Length);
                 continue;
             }
 
