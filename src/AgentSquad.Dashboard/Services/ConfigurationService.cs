@@ -28,6 +28,9 @@ public sealed class ConfigurationService : IConfigurationService
     /// <summary>Tracks the latest saved config so GetCurrentConfig returns fresh data even before IOptions reloads.</summary>
     private AgentSquadConfig? _lastSavedConfig;
 
+    /// <summary>Serializes save operations so concurrent requests don't overlap file I/O with the file-watcher's auto-reload.</summary>
+    private readonly SemaphoreSlim _saveLock = new(1, 1);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
@@ -140,32 +143,50 @@ public sealed class ConfigurationService : IConfigurationService
     /// </summary>
     public async Task SaveConfigAsync(AgentSquadConfig updatedConfig)
     {
-        var root = await ReadAppSettingsAsync() ?? new JsonObject();
+        await _saveLock.WaitAsync();
+        try
+        {
+            var total = System.Diagnostics.Stopwatch.StartNew();
+            var step = System.Diagnostics.Stopwatch.StartNew();
 
-        // Serialize the updated config section
-        var configJson = JsonSerializer.SerializeToNode(updatedConfig, JsonOptions);
+            var root = await ReadAppSettingsAsync() ?? new JsonObject();
+            _logger.LogInformation("SaveConfig step[read]: {Ms}ms", step.ElapsedMilliseconds); step.Restart();
 
-        // Strip secrets — these live in User Secrets / env vars, not appsettings.json
-        StripSecrets(configJson);
+            // Serialize the updated config section
+            var configJson = JsonSerializer.SerializeToNode(updatedConfig, JsonOptions);
 
-        root["AgentSquad"] = configJson;
+            // Strip secrets — these live in User Secrets / env vars, not appsettings.json
+            StripSecrets(configJson);
 
-        var output = root.ToJsonString(JsonOptions);
+            root["AgentSquad"] = configJson;
 
-        // Write to a temp file then move — avoids "user-mapped section open" IOException
-        // on Windows where ASP.NET's file watcher memory-maps appsettings.json.
-        var tempPath = _appSettingsPath + ".tmp";
-        await File.WriteAllTextAsync(tempPath, output);
-        File.Move(tempPath, _appSettingsPath, overwrite: true);
+            var output = root.ToJsonString(JsonOptions);
+            _logger.LogInformation("SaveConfig step[serialize]: {Ms}ms ({Bytes} bytes)", step.ElapsedMilliseconds, output.Length); step.Restart();
 
-        // Cache the saved config so GetCurrentConfig returns it immediately
-        _lastSavedConfig = updatedConfig;
+            // Write to a temp file then move — avoids "user-mapped section open" IOException
+            // on Windows where ASP.NET's file watcher memory-maps appsettings.json.
+            var tempPath = _appSettingsPath + ".tmp";
+            await File.WriteAllTextAsync(tempPath, output);
+            _logger.LogInformation("SaveConfig step[write-temp]: {Ms}ms", step.ElapsedMilliseconds); step.Restart();
 
-        // Trigger IConfiguration reload so IOptionsMonitor picks up the new values
-        if (_rootConfiguration is IConfigurationRoot configRoot)
-            configRoot.Reload();
+            File.Move(tempPath, _appSettingsPath, overwrite: true);
+            _logger.LogInformation("SaveConfig step[move]: {Ms}ms", step.ElapsedMilliseconds); step.Restart();
 
-        _logger.LogInformation("Configuration saved to {Path}", _appSettingsPath);
+            // Cache the saved config so GetCurrentConfig returns it immediately.
+            // We intentionally do NOT call configRoot.Reload() here — that operation
+            // synchronously re-binds every IOptionsMonitor<T> consumer and can take
+            // seconds (degrading with each call in long-running processes).
+            // The file watcher (reloadOnChange:true) will reload providers in the
+            // background, and _lastSavedConfig gives immediate consistency for our
+            // own reads in the meantime.
+            _lastSavedConfig = updatedConfig;
+
+            _logger.LogInformation("Configuration saved to {Path} (total {Ms}ms)", _appSettingsPath, total.ElapsedMilliseconds);
+        }
+        finally
+        {
+            _saveLock.Release();
+        }
     }
 
     /// <summary>

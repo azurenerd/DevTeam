@@ -4,6 +4,7 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Notifications;
 using AgentSquad.Core.Persistence;
 using AgentSquad.Core.Prompts;
+using AgentSquad.Core.Strategies;
 using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using AgentSquad.Agents;
@@ -20,6 +21,8 @@ builder.Services.Configure<AgentSquadConfig>(
     builder.Configuration.GetSection("AgentSquad"));
 builder.Services.Configure<LimitsConfig>(
     builder.Configuration.GetSection("AgentSquad:Limits"));
+builder.Services.Configure<StrategyFrameworkConfig>(
+    builder.Configuration.GetSection("AgentSquad:StrategyFramework"));
 
 // Configure Kestrel to use the dashboard port from config
 var dashboardPort = builder.Configuration.GetValue("AgentSquad:Dashboard:Port", 5050);
@@ -112,6 +115,22 @@ builder.Services.AddSingleton<AgentSquad.Core.Agents.Decisions.DecisionGateServi
 
 // Orchestrator (registry, health monitor, deadlock detector, spawn manager, workflow)
 builder.Services.AddOrchestrator();
+builder.Services.AddStrategyFramework();
+builder.Services.AddStrategyDashboard();
+builder.Services.AddSingleton<AgentSquad.Core.Strategies.IStrategyBroadcaster,
+    AgentSquad.Dashboard.Services.SignalRStrategyBroadcaster>();
+
+// Strategy framework: real baseline code generator (lives in Agents project so it can
+// use ModelRegistry + IPromptTemplateService). When this isn't registered, BaselineStrategy
+// falls back to its marker-only stub behavior — useful for orchestrator unit tests.
+builder.Services.AddSingleton<AgentSquad.Core.Strategies.IBaselineCodeGenerator,
+    AgentSquad.Agents.AI.BaselineCodeGenerator>();
+
+// Strategy framework: real LLM judge (overrides the NullLlmJudge from AddStrategyFramework).
+// Lives in Agents project so it can use ModelRegistry. When this isn't registered, the
+// evaluator falls back to deterministic tokens-then-time tiebreaks.
+builder.Services.AddSingleton<AgentSquad.Core.Strategies.ILlmJudge,
+    AgentSquad.Agents.AI.LlmJudge>();
 
 // Agent factory
 builder.Services.AddSingleton<IAgentFactory, AgentFactory>();
@@ -127,6 +146,7 @@ builder.Services.AddSingleton<ConfigurationService>();
 builder.Services.AddSingleton<IConfigurationService>(sp => sp.GetRequiredService<ConfigurationService>());
 builder.Services.AddSingleton<DirectorCliService>();
 builder.Services.AddSingleton(new DashboardMode(IsStandalone: false));
+builder.Services.AddSingleton<IStrategiesDataService, InProcessStrategiesDataService>();
 
 // Worker service that starts the core agents and kicks off the workflow
 builder.Services.AddHostedService<AgentSquadWorker>();
@@ -427,6 +447,29 @@ notificationApi.MapPost("/read-all", (GateNotificationService notificationSvc) =
     notificationSvc.MarkAllAsRead();
     return Results.Ok();
 });
+
+// ── Strategy framework REST API (Phase 4) ──
+var strategiesApi = app.MapGroup("/api/strategies").WithTags("Strategies");
+strategiesApi.MapGet("/active", (AgentSquad.Core.Strategies.CandidateStateStore store) =>
+    Results.Ok(store.GetActiveTasks()));
+strategiesApi.MapGet("/recent", (AgentSquad.Core.Strategies.CandidateStateStore store, int? limit) =>
+    Results.Ok(store.GetRecentTasks(limit ?? 50)));
+strategiesApi.MapGet("/enabled", (IOptions<StrategyFrameworkConfig> cfg) =>
+{
+    var c = cfg.Value;
+    return Results.Ok(new
+    {
+        masterEnabled = c.Enabled,
+        enabledStrategies = c.EnabledStrategies,
+    });
+});
+// Phase 6: per-strategy cost attribution rollup.
+strategiesApi.MapGet("/cost", (AgentSquad.Core.AI.AgentUsageTracker usage) =>
+    Results.Ok(new
+    {
+        total = usage.GetTotalStrategyCost(),
+        byStrategy = usage.GetAllStrategyStats(),
+    }));
 
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");

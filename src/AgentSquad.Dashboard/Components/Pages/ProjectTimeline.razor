@@ -39,7 +39,7 @@ else if (_phases.Count == 0)
 else
 {
     <!-- Top bar: title + stats + filter -->
-    <div class="ntl-topbar">
+    <div class="ntl-topbar" data-testid="page-timeline">
         <div class="ntl-topbar-left">
             <h1 class="ntl-title">Project Timeline</h1>
             <div class="ntl-stats">
@@ -58,17 +58,17 @@ else
                 <button class="ntl-theme-btn @(_designTheme == "cards" ? "active" : "")" @onclick='() => SetTheme("cards")' title="Card grid theme">Cards</button>
             </div>
             <span class="ntl-topbar-divider">|</span>
-            <div class="ntl-view-toggle">
-                <button class="ntl-view-btn @(_devViewMode == "pm" ? "active" : "")" @onclick='() => SetDevView("pm")' title="Show PM enhancement issues">📋 PM View</button>
-                <button class="ntl-view-btn @(_devViewMode == "engineering" ? "active" : "")" @onclick='() => SetDevView("engineering")' title="Show engineering tasks with linked PRs">🔧 Engineering View</button>
+            <div class="ntl-view-toggle" data-testid="timeline-view-toggle">
+                <button class="ntl-view-btn @(_devViewMode == "pm" ? "active" : "")" @onclick='() => SetDevView("pm")' title="Show PM enhancement issues" data-testid="timeline-view-pm">📋 PM View</button>
+                <button class="ntl-view-btn @(_devViewMode == "engineering" ? "active" : "")" @onclick='() => SetDevView("engineering")' title="Show engineering tasks with linked PRs" data-testid="timeline-view-engineering">🔧 Engineering View</button>
             </div>
             <span class="ntl-topbar-divider">|</span>
-            <div class="ntl-filter-pills">
-                <button class="ntl-pill @(_statusFilter == "all" ? "active" : "")" @onclick='() => SetFilter("all")'>All</button>
-                <button class="ntl-pill @(_statusFilter == "open" ? "active" : "")" @onclick='() => SetFilter("open")'>Open</button>
-                <button class="ntl-pill @(_statusFilter == "closed" ? "active" : "")" @onclick='() => SetFilter("closed")'>Closed</button>
+            <div class="ntl-filter-pills" data-testid="timeline-status-filter">
+                <button class="ntl-pill @(_statusFilter == "all" ? "active" : "")" @onclick='() => SetFilter("all")' data-testid="timeline-status-all">All</button>
+                <button class="ntl-pill @(_statusFilter == "open" ? "active" : "")" @onclick='() => SetFilter("open")' data-testid="timeline-status-open">Open</button>
+                <button class="ntl-pill @(_statusFilter == "closed" ? "active" : "")" @onclick='() => SetFilter("closed")' data-testid="timeline-status-closed">Closed</button>
             </div>
-            <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh from GitHub" disabled="@_refreshing"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
+            <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh from GitHub" disabled="@_refreshing" data-testid="timeline-refresh"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
             <span class="ntl-topbar-divider">|</span>
             <div class="ntl-zoom-controls">
                 <button class="ntl-zoom-btn" @onclick="ScrollToStart" title="Jump to beginning">⏮</button>

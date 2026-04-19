@@ -1,18 +1,21 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 
 namespace AgentSquad.Dashboard.Tests;
 
 /// <summary>
 /// Ensures the Dashboard is running for Playwright tests. Checks if it's already up;
-/// if not, starts it as a real process. Uses fast health checks (200ms intervals, 15s max).
+/// if not, starts it as a real process. Uses fast health checks (200ms intervals, 60s max).
 /// Cleans up the process on dispose if it started one.
 /// </summary>
 public class DashboardWebAppFixture : IAsyncLifetime
 {
     private Process? _dashboardProcess;
     private bool _weStartedIt;
+    private readonly StringBuilder _stdout = new();
+    private readonly StringBuilder _stderr = new();
     public string BaseUrl { get; private set; } = null!;
 
     public async Task InitializeAsync()
@@ -66,18 +69,33 @@ public class DashboardWebAppFixture : IAsyncLifetime
             _dashboardProcess.StartInfo.Environment["AgentSquad__Project__GitHubToken"] = "ghp_placeholder_for_ui_tests";
         }
 
+        // Drain stdout/stderr async so the child process doesn't deadlock on a
+        // full pipe buffer (~4KB on Windows). Without this, the dashboard blocks
+        // on its first chunky log batch and the fixture times out.
+        _dashboardProcess.OutputDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) lock (_stdout) _stdout.AppendLine(e.Data);
+        };
+        _dashboardProcess.ErrorDataReceived += (_, e) =>
+        {
+            if (e.Data is not null) lock (_stderr) _stderr.AppendLine(e.Data);
+        };
+
         _dashboardProcess.Start();
+        _dashboardProcess.BeginOutputReadLine();
+        _dashboardProcess.BeginErrorReadLine();
         _weStartedIt = true;
 
-        // Fast health check: 200ms intervals, 15s timeout
-        var deadline = DateTime.UtcNow.AddSeconds(15);
+        // Fast health check: 200ms intervals, 60s timeout (Blazor cold start on
+        // Windows with SignalR + full DI graph can take >15s on a fresh machine).
+        var deadline = DateTime.UtcNow.AddSeconds(60);
         while (DateTime.UtcNow < deadline)
         {
             if (_dashboardProcess.HasExited)
             {
-                var stderr = await _dashboardProcess.StandardError.ReadToEndAsync();
                 throw new InvalidOperationException(
-                    $"Dashboard process exited with code {_dashboardProcess.ExitCode}. Stderr: {stderr}");
+                    $"Dashboard process exited with code {_dashboardProcess.ExitCode}. " +
+                    $"Stderr:\n{SnapshotStderr()}\nStdout:\n{SnapshotStdout()}");
             }
 
             if (await IsRespondingAsync(BaseUrl))
@@ -87,8 +105,12 @@ public class DashboardWebAppFixture : IAsyncLifetime
         }
 
         throw new InvalidOperationException(
-            $"Dashboard did not become ready at {BaseUrl} within 15 seconds (PID: {_dashboardProcess.Id})");
+            $"Dashboard did not become ready at {BaseUrl} within 60 seconds (PID: {_dashboardProcess.Id}).\n" +
+            $"Captured stdout:\n{SnapshotStdout()}\nCaptured stderr:\n{SnapshotStderr()}");
     }
+
+    private string SnapshotStdout() { lock (_stdout) return _stdout.ToString(); }
+    private string SnapshotStderr() { lock (_stderr) return _stderr.ToString(); }
 
     public Task DisposeAsync()
     {
@@ -109,7 +131,11 @@ public class DashboardWebAppFixture : IAsyncLifetime
     {
         try
         {
-            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            // Generous timeout: the dashboard root pre-renders Blazor + makes
+            // RunnerApi calls to localhost:5050 which will be absent in tests,
+            // so the first response can take 5-10s while those HTTP calls
+            // fail over. A short timeout here makes the probe impossible.
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(15) };
             var resp = await http.GetAsync(url);
             return (int)resp.StatusCode < 500; // Any non-5xx means the app is serving
         }

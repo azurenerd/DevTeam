@@ -72,3 +72,18 @@ _ReSharper.Caches/
 
 # Dashboarduser data - contains project-specific info, use data.template.json as reference
 src/ReportingDashboard/wwwroot/data/data.json*.pid
+
+## Strategy framework (InteractiveCLIPlan) — per-candidate worktrees and experiment records
+.candidates/
+**/.candidates/
+experiment-data/
+**/experiment-data/
+.evaluator-scratch/
+**/.evaluator-scratch/
+
+# Runtime artifacts
+dashboard.pid
+runner.pid
+stderr.tmp
+stdout.tmp
+fake-cli-marker.txt

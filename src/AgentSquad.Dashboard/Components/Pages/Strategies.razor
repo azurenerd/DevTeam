@@ -1,0 +1,233 @@
+@page "/strategies"
+@rendermode InteractiveServer
+@using AgentSquad.Core.Strategies
+@using AgentSquad.Dashboard.Services
+@using Microsoft.AspNetCore.SignalR.Client
+@using Microsoft.Extensions.Logging
+@implements IAsyncDisposable
+@inject IStrategiesDataService StrategiesData
+@inject NavigationManager Navigation
+@inject ILogger<Strategies> Logger
+
+<PageTitle>AgentSquad — Strategies</PageTitle>
+
+<div class="dashboard-header" data-testid="page-strategies">
+    <h1>Code-Generation Strategies</h1>
+    <div class="header-badges">
+        <span class="header-badge @(_enabled?.MasterEnabled == true ? "" : "muted")" data-testid="strategies-enabled-badge">
+            @(_enabled?.MasterEnabled == true ? "● Framework ON" : "○ Framework OFF")
+        </span>
+        <span class="header-badge" data-testid="strategies-active-count">
+            Active: @_activeTasks.Count
+        </span>
+        <span class="header-badge" data-testid="strategies-recent-count">
+            Recent: @_recentTasks.Count
+        </span>
+        <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="RefreshAsync" disabled="@_refreshing" title="Refresh" data-testid="strategies-refresh">
+            <svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+                <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/>
+            </svg>
+        </button>
+    </div>
+</div>
+
+@if (_enabled?.MasterEnabled != true)
+{
+    <div class="alert-banner info" data-testid="strategies-disabled-banner">
+        <strong>Strategy framework is disabled.</strong> Baseline code generation is the
+        only active path. Set <code>AgentSquad:StrategyFramework:Enabled = true</code>
+        to enable multi-strategy candidate runs.
+    </div>
+}
+
+<section class="strategies-section">
+    <h2>Active Tasks</h2>
+    @if (_activeTasks.Count == 0)
+    {
+        <div class="empty-state">No active strategy candidates. Waiting for the next task&hellip;</div>
+    }
+    else
+    {
+        @foreach (var task in _activeTasks)
+        {
+            <div class="task-card" data-testid="strategies-task-card" data-task-id="@task.TaskId">
+                <div class="task-header">
+                    <div>
+                        <span class="task-id">@task.TaskId</span>
+                        <span class="task-run">run @task.RunId</span>
+                    </div>
+                    <div class="task-elapsed">@FormatElapsed(task.StartedAt)</div>
+                </div>
+                <div class="candidate-grid">
+                    @foreach (var candidate in task.Candidates.Values.OrderBy(c => c.StrategyId))
+                    {
+                        <div class="candidate-card state-@(candidate.State.ToString().ToLowerInvariant())" data-testid="strategies-candidate-card" data-strategy-id="@candidate.StrategyId">
+                            <div class="candidate-head">
+                                <span class="candidate-id">@candidate.StrategyId</span>
+                                <span class="candidate-state">@candidate.State</span>
+                            </div>
+                            @if (candidate.ElapsedSec is double e)
+                            {
+                                <div class="candidate-timing">@e.ToString("0.0")s @(candidate.TokensUsed.HasValue ? $"· {candidate.TokensUsed} tok" : "")</div>
+                            }
+                            @if (candidate.State == CandidateState.Scored || candidate.State == CandidateState.Winner)
+                            {
+                                <div class="candidate-scores">
+                                    <div>AC <span>@(candidate.AcScore ?? 0)</span></div>
+                                    <div>Des <span>@(candidate.DesignScore ?? 0)</span></div>
+                                    <div>Read <span>@(candidate.ReadabilityScore ?? 0)</span></div>
+                                </div>
+                            }
+                            @if (candidate.Succeeded == false)
+                            {
+                                <div class="candidate-fail">@candidate.FailureReason</div>
+                            }
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+</section>
+
+<section class="strategies-section">
+    <h2>Recent Completed (last @_recentTasks.Count)</h2>
+    @if (_recentTasks.Count == 0)
+    {
+        <div class="empty-state">No completed tasks yet.</div>
+    }
+    else
+    {
+        <table class="recent-table" data-testid="strategies-recent-table">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>Winner</th>
+                    <th>Candidates</th>
+                    <th>Tie-break</th>
+                    <th>Eval</th>
+                    <th>Completed</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var task in _recentTasks)
+                {
+                    <tr>
+                        <td><span class="task-id">@task.TaskId</span></td>
+                        <td>
+                            @if (task.WinnerStrategyId is string w)
+                            {
+                                <span class="winner-badge">@w</span>
+                            }
+                            else
+                            {
+                                <span class="muted">— none —</span>
+                            }
+                        </td>
+                        <td>@string.Join(", ", task.Candidates.Keys)</td>
+                        <td class="muted">@task.TieBreakReason</td>
+                        <td>@(task.EvaluationElapsedSec?.ToString("0.0") ?? "-")s</td>
+                        <td>@(task.CompletedAt?.ToLocalTime().ToString("HH:mm:ss") ?? "-")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+</section>
+
+<style>
+    .strategies-section { margin: 1.5rem 0; }
+    .strategies-section h2 { font-size: 1.1rem; margin: 0 0 .75rem; }
+    .task-card { background: var(--card-bg, #1a1e26); border: 1px solid var(--border, #2d3240); border-radius: 6px; padding: 1rem; margin-bottom: 1rem; }
+    .task-header { display: flex; justify-content: space-between; margin-bottom: .75rem; align-items: baseline; }
+    .task-id { font-weight: 600; }
+    .task-run { opacity: .55; font-size: .85em; margin-left: .5rem; font-family: monospace; }
+    .task-elapsed { font-family: monospace; opacity: .7; }
+    .candidate-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .75rem; }
+    .candidate-card { border: 1px solid var(--border, #2d3240); border-radius: 5px; padding: .75rem; }
+    .candidate-card.state-running { border-left: 3px solid #4dabf7; }
+    .candidate-card.state-completed { border-left: 3px solid #51cf66; }
+    .candidate-card.state-scored { border-left: 3px solid #ffd43b; }
+    .candidate-card.state-winner { border-left: 3px solid gold; background: rgba(255, 215, 0, .08); }
+    .candidate-head { display: flex; justify-content: space-between; margin-bottom: .25rem; font-weight: 500; }
+    .candidate-state { font-size: .75em; opacity: .7; text-transform: uppercase; letter-spacing: .05em; }
+    .candidate-timing { font-family: monospace; font-size: .85em; opacity: .8; }
+    .candidate-scores { display: flex; gap: .5rem; font-size: .85em; margin-top: .35rem; }
+    .candidate-scores div { flex: 1; background: rgba(255,255,255,.04); padding: .2rem .4rem; border-radius: 3px; }
+    .candidate-scores span { font-weight: 600; margin-left: .15rem; }
+    .candidate-fail { color: #ff6b6b; font-size: .85em; margin-top: .35rem; }
+    .recent-table { width: 100%; border-collapse: collapse; }
+    .recent-table th, .recent-table td { padding: .5rem; border-bottom: 1px solid var(--border, #2d3240); text-align: left; }
+    .recent-table th { opacity: .7; font-weight: 500; font-size: .85em; text-transform: uppercase; letter-spacing: .05em; }
+    .winner-badge { background: gold; color: #111; padding: .1rem .4rem; border-radius: 3px; font-weight: 600; font-size: .85em; }
+    .empty-state { opacity: .6; padding: 1rem 0; font-style: italic; }
+    .muted { opacity: .55; }
+    .alert-banner { background: rgba(77, 171, 247, .08); border-left: 3px solid #4dabf7; padding: .75rem 1rem; border-radius: 4px; margin: 1rem 0; }
+</style>
+
+@code {
+    private IReadOnlyList<TaskSnapshot> _activeTasks = [];
+    private IReadOnlyList<TaskSnapshot> _recentTasks = [];
+    private EnabledStrategiesInfo? _enabled;
+    private HubConnection? _hub;
+    private bool _refreshing;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await RefreshAsync();
+        try
+        {
+            _hub = new HubConnectionBuilder()
+                .WithUrl(Navigation.ToAbsoluteUri("/agenthub"))
+                .WithAutomaticReconnect()
+                .Build();
+            _hub.On<string, object>("StrategyEvent", async (_, _) => await InvokeAsync(RefreshAsync));
+            await _hub.StartAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "SignalR connection for /strategies failed; falling back to manual refresh");
+        }
+    }
+
+    private async Task RefreshAsync()
+    {
+        if (_refreshing) return;
+        _refreshing = true;
+        try
+        {
+            var active = StrategiesData.GetActiveTasksAsync();
+            var recent = StrategiesData.GetRecentTasksAsync(50);
+            var enabled = StrategiesData.GetEnabledAsync();
+            await Task.WhenAll(active, recent, enabled);
+            _activeTasks = active.Result;
+            _recentTasks = recent.Result;
+            _enabled = enabled.Result;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogDebug(ex, "Strategies page refresh failed");
+        }
+        finally
+        {
+            _refreshing = false;
+        }
+    }
+
+    private static string FormatElapsed(DateTimeOffset startedAt)
+    {
+        var d = DateTimeOffset.UtcNow - startedAt;
+        if (d.TotalSeconds < 60) return $"{d.TotalSeconds:0}s";
+        if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes}m {d.Seconds}s";
+        return $"{(int)d.TotalHours}h {d.Minutes}m";
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (_hub is not null)
+        {
+            await _hub.DisposeAsync();
+        }
+    }
+}

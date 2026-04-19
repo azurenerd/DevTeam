@@ -5,7 +5,7 @@
 @rendermode InteractiveServer
 @implements IDisposable
 
-<div class="page-header">
+<div class="page-header" data-testid="page-issues">
     <h1 class="page-title">📋 Issues</h1>
     <div class="header-badges">
         <span class="badge badge-success">@_openCount Open</span>
@@ -14,73 +14,73 @@
 </div>
 
 <div class="issue-toolbar">
-    <div class="issue-filter-bar">
-        <button class="issue-filter-btn @(_stateFilter == "open" ? "active" : "")" @onclick='() => SetStateFilter("open")'>
+    <div class="issue-filter-bar" data-testid="issue-filter-bar">
+        <button class="issue-filter-btn @(_stateFilter == "open" ? "active" : "")" @onclick='() => SetStateFilter("open")' data-testid="issue-filter-open">
             <span class="issue-state-icon issue-state-open">●</span> Open <span class="issue-filter-count">@_openCount</span>
         </button>
-        <button class="issue-filter-btn @(_stateFilter == "closed" ? "active" : "")" @onclick='() => SetStateFilter("closed")'>
+        <button class="issue-filter-btn @(_stateFilter == "closed" ? "active" : "")" @onclick='() => SetStateFilter("closed")' data-testid="issue-filter-closed">
             <span class="issue-state-icon issue-state-closed">✔</span> Closed <span class="issue-filter-count">@_closedCount</span>
         </button>
-        <button class="issue-filter-btn @(_stateFilter == "all" ? "active" : "")" @onclick='() => SetStateFilter("all")'>
+        <button class="issue-filter-btn @(_stateFilter == "all" ? "active" : "")" @onclick='() => SetStateFilter("all")' data-testid="issue-filter-all">
             All <span class="issue-filter-count">@_allIssues.Count</span>
         </button>
     </div>
 
     <div class="issue-filters-right">
         @* Label filter dropdown *@
-        <div class="issue-dropdown">
-            <button class="issue-dropdown-btn" @onclick="ToggleLabelDropdown">
+        <div class="issue-dropdown" data-testid="issue-dropdown-labels">
+            <button class="issue-dropdown-btn" @onclick="ToggleLabelDropdown" data-testid="issue-dropdown-btn-labels">
                 Labels ▾
             </button>
             @if (_showLabelDropdown)
             {
-                <div class="issue-dropdown-menu">
+                <div class="issue-dropdown-menu" data-testid="issue-dropdown-menu-labels">
                     <button class="issue-dropdown-item @(_labelFilter == null ? "active" : "")"
-                            @onclick="() => SetLabelFilter(null)">All labels</button>
+                            @onclick="() => SetLabelFilter(null)" data-testid="issue-dropdown-item-label-all">All labels</button>
                     @foreach (var label in _availableLabels)
                     {
                         <button class="issue-dropdown-item @(_labelFilter == label ? "active" : "")"
-                                @onclick="() => SetLabelFilter(label)">@label</button>
+                                @onclick="() => SetLabelFilter(label)" data-testid="issue-dropdown-item-label" data-label-value="@label">@label</button>
                     }
                 </div>
             }
         </div>
 
         @* Assignee filter dropdown *@
-        <div class="issue-dropdown">
-            <button class="issue-dropdown-btn" @onclick="ToggleAssigneeDropdown">
+        <div class="issue-dropdown" data-testid="issue-dropdown-assignees">
+            <button class="issue-dropdown-btn" @onclick="ToggleAssigneeDropdown" data-testid="issue-dropdown-btn-assignees">
                 Assignees ▾
             </button>
             @if (_showAssigneeDropdown)
             {
-                <div class="issue-dropdown-menu">
+                <div class="issue-dropdown-menu" data-testid="issue-dropdown-menu-assignees">
                     <button class="issue-dropdown-item @(_assigneeFilter == null ? "active" : "")"
-                            @onclick="() => SetAssigneeFilter(null)">All assignees</button>
+                            @onclick="() => SetAssigneeFilter(null)" data-testid="issue-dropdown-item-assignee-all">All assignees</button>
                     @foreach (var assignee in _availableAssignees)
                     {
                         <button class="issue-dropdown-item @(_assigneeFilter == assignee ? "active" : "")"
-                                @onclick="() => SetAssigneeFilter(assignee)">@assignee</button>
+                                @onclick="() => SetAssigneeFilter(assignee)" data-testid="issue-dropdown-item-assignee" data-assignee-value="@assignee">@assignee</button>
                     }
                 </div>
             }
         </div>
 
         @* Sort dropdown *@
-        <div class="issue-dropdown">
-            <button class="issue-dropdown-btn" @onclick="ToggleSortDropdown">
+        <div class="issue-dropdown" data-testid="issue-dropdown-sort">
+            <button class="issue-dropdown-btn" @onclick="ToggleSortDropdown" data-testid="issue-dropdown-btn-sort">
                 ⇅ @GetSortLabel() ▾
             </button>
             @if (_showSortDropdown)
             {
-                <div class="issue-dropdown-menu">
+                <div class="issue-dropdown-menu" data-testid="issue-dropdown-menu-sort">
                     <button class="issue-dropdown-item @(_sortBy == "newest" ? "active" : "")"
-                            @onclick='() => SetSort("newest")'>Newest</button>
+                            @onclick='() => SetSort("newest")' data-testid="issue-sort-newest">Newest</button>
                     <button class="issue-dropdown-item @(_sortBy == "oldest" ? "active" : "")"
-                            @onclick='() => SetSort("oldest")'>Oldest</button>
+                            @onclick='() => SetSort("oldest")' data-testid="issue-sort-oldest">Oldest</button>
                     <button class="issue-dropdown-item @(_sortBy == "most-commented" ? "active" : "")"
-                            @onclick='() => SetSort("most-commented")'>Most commented</button>
+                            @onclick='() => SetSort("most-commented")' data-testid="issue-sort-most-commented">Most commented</button>
                     <button class="issue-dropdown-item @(_sortBy == "recently-updated" ? "active" : "")"
-                            @onclick='() => SetSort("recently-updated")'>Recently updated</button>
+                            @onclick='() => SetSort("recently-updated")' data-testid="issue-sort-recently-updated">Recently updated</button>
                 </div>
             }
         </div>
@@ -100,11 +100,11 @@ else if (_filteredIssues.Count == 0)
 }
 else
 {
-    <div class="issue-list">
+    <div class="issue-list" data-testid="issue-list">
         @foreach (var issue in _filteredIssues)
         {
             var stateClass = issue.State == "open" ? "open" : "closed";
-            <div class="issue-card @(issue.Labels.Contains("blocker") ? "issue-blocked" : "")">
+            <div class="issue-card @(issue.Labels.Contains("blocker") ? "issue-blocked" : "")" data-testid="issue-card" data-issue-number="@issue.Number">
                 <div class="issue-state-indicator @(issue.Labels.Contains("blocker") ? "issue-state-blocked" : $"issue-state-{stateClass}")"></div>
                 <div class="issue-content">
                     <div class="issue-title-row">

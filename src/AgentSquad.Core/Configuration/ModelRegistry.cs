@@ -20,6 +20,10 @@ public class ModelRegistry
     private readonly AgentUsageTracker _usageTracker;
     private readonly HashSet<string> _cliFallbackTiers = new();
     private readonly object _overrideLock = new();
+    // Guards _kernelCache and _cliFallbackTiers. These are hit concurrently by parallel
+    // strategy candidates (e.g. baseline + mcp-enhanced running in Task.WhenAll), so
+    // a plain Dictionary read/write is unsafe without synchronization.
+    private readonly object _kernelCacheLock = new();
 
     /// <summary>Well-known models available via Copilot CLI.</summary>
     public static readonly IReadOnlyList<string> AvailableCopilotModels =
@@ -77,13 +81,22 @@ public class ModelRegistry
         // Cache key includes override model so different agents can have different kernels
         var cacheKey = modelOverride is not null ? $"{modelTier}:{modelOverride}" : modelTier;
 
-        if (_kernelCache.TryGetValue(cacheKey, out var cached))
-            return cached;
+        lock (_kernelCacheLock)
+        {
+            if (_kernelCache.TryGetValue(cacheKey, out var cached))
+                return cached;
+        }
 
         Kernel? kernel = null;
 
+        bool cliFallback;
+        lock (_kernelCacheLock)
+        {
+            cliFallback = _cliFallbackTiers.Contains(modelTier);
+        }
+
         // Try Copilot CLI first if enabled and available
-        if (_cliConfig.Enabled && _processManager?.IsAvailable == true && !_cliFallbackTiers.Contains(modelTier))
+        if (_cliConfig.Enabled && _processManager?.IsAvailable == true && !cliFallback)
         {
             kernel = BuildCopilotCliKernel(modelTier, modelOverride);
         }
@@ -91,7 +104,14 @@ public class ModelRegistry
         // Fall back to API-key provider
         kernel ??= BuildApiKeyKernel(modelTier);
 
-        _kernelCache[cacheKey] = kernel;
+        lock (_kernelCacheLock)
+        {
+            // Another thread may have raced us; prefer the existing entry so callers
+            // observe a single canonical Kernel per cache key.
+            if (_kernelCache.TryGetValue(cacheKey, out var raced))
+                return raced;
+            _kernelCache[cacheKey] = kernel;
+        }
         return kernel;
     }
 
@@ -154,8 +174,11 @@ public class ModelRegistry
     /// </summary>
     public void TriggerFallback(string modelTier, string reason)
     {
-        _cliFallbackTiers.Add(modelTier);
-        _kernelCache.Remove(modelTier);
+        lock (_kernelCacheLock)
+        {
+            _cliFallbackTiers.Add(modelTier);
+            _kernelCache.Remove(modelTier);
+        }
 
         var logger = _loggerFactory.CreateLogger<ModelRegistry>();
         logger.LogWarning("Copilot CLI fallback triggered for tier '{Tier}': {Reason}", modelTier, reason);

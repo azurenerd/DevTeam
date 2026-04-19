@@ -1,0 +1,315 @@
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using AgentSquad.Core.AI;
+using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Strategies.Contracts;
+
+namespace AgentSquad.Core.Strategies;
+
+/// <summary>
+/// Coordinates the multi-strategy run for a single task: creates per-candidate
+/// worktrees, invokes each enabled strategy in parallel under a concurrency cap,
+/// extracts patches, runs the evaluator, emits lifecycle events, and writes the
+/// experiment record. Returns a descriptive result but does NOT apply the winner —
+/// that's the SE agent's responsibility (so it can do a head-change check first).
+/// </summary>
+public class StrategyOrchestrator
+{
+    private readonly ILogger<StrategyOrchestrator> _logger;
+    private readonly GitWorktreeManager _worktree;
+    private readonly CandidateEvaluator _evaluator;
+    private readonly ExperimentTracker _tracker;
+    private readonly StrategyConcurrencyGate _gate;
+    private readonly IOptionsMonitor<StrategyFrameworkConfig> _cfg;
+    private readonly IReadOnlyDictionary<string, ICodeGenerationStrategy> _strategies;
+    private readonly IStrategyEventSink _events;
+    private readonly StrategySamplingPolicy? _sampling;
+    private readonly RunBudgetTracker? _budget;
+    private readonly AgentUsageTracker? _usage;
+
+    public StrategyOrchestrator(
+        ILogger<StrategyOrchestrator> logger,
+        GitWorktreeManager worktree,
+        CandidateEvaluator evaluator,
+        ExperimentTracker tracker,
+        StrategyConcurrencyGate gate,
+        IOptionsMonitor<StrategyFrameworkConfig> cfg,
+        IEnumerable<ICodeGenerationStrategy> strategies,
+        IStrategyEventSink? events = null,
+        StrategySamplingPolicy? sampling = null,
+        RunBudgetTracker? budget = null,
+        AgentUsageTracker? usage = null)
+    {
+        _logger = logger;
+        _worktree = worktree;
+        _evaluator = evaluator;
+        _tracker = tracker;
+        _gate = gate;
+        _cfg = cfg;
+        _strategies = strategies.ToDictionary(s => s.Id, StringComparer.OrdinalIgnoreCase);
+        _events = events ?? NullStrategyEventSink.Instance;
+        _sampling = sampling;
+        _budget = budget;
+        _usage = usage;
+    }
+
+    /// <summary>Run all enabled strategies for a task and evaluate. Does not apply the winner.</summary>
+    public async Task<OrchestrationOutcome> RunCandidatesAsync(TaskContext task, CancellationToken ct)
+    {
+        var cfg = _cfg.CurrentValue;
+        var runSw = Stopwatch.StartNew();
+        // Dedupe defensively. .NET IConfiguration.Bind APPENDS list items to
+        // any default List<T> initializer on the target property rather than
+        // replacing it, so a config file that re-lists the default values
+        // (["baseline","mcp-enhanced"]) produces a 4-item runtime list.
+        // Orchestrating the same strategy twice wastes tokens AND races on the
+        // worktree directory (same candidate dir name, unique-suffix fix still
+        // can't fully recover from cleanup file locks). Distinct() here is the
+        // surgical fix; root cause is in StrategyFrameworkConfig's default init.
+        var enabled = cfg.EnabledStrategies
+            .Where(id => _strategies.ContainsKey(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (enabled.Count == 0)
+        {
+            _logger.LogWarning("No enabled strategies registered; skipping orchestration for task {Task}", task.TaskId);
+            return OrchestrationOutcome.Empty(task);
+        }
+
+        // Phase 5: sampling policy + budget check — may shrink the enabled set.
+        // TODO(val-e2e): Once experiment-data/<runId>.ndjson contains real survival
+        // data from live runs, wire AdaptiveStrategySelector here (inject it via
+        // the constructor like _sampling, then call selector.Filter(enabled) before
+        // handing `enabled` to the sampling policy). Until then the selector is
+        // registered in DI but intentionally not invoked — we do NOT want to drop
+        // strategies based on synthetic/empty history. See docs/StrategyFramework.md
+        // Phase 5 status row.
+        var samplingReason = "no-policy";
+        if (_sampling is not null)
+        {
+            var decision = _sampling.Decide(task, enabled);
+            if (decision.SelectedStrategies.Count == 0)
+            {
+                _logger.LogInformation("Sampling policy eliminated all strategies for task {Task}: {Reason}",
+                    task.TaskId, decision.Reason);
+                return OrchestrationOutcome.Empty(task);
+            }
+            if (decision.SelectedStrategies.Count != enabled.Count)
+            {
+                _logger.LogInformation("Sampling policy narrowed strategies for task {Task}: {Reason}. Running: {List}",
+                    task.TaskId, decision.Reason, string.Join(",", decision.SelectedStrategies));
+                enabled = decision.SelectedStrategies.ToList();
+            }
+            samplingReason = decision.Reason;
+        }
+
+        _logger.LogInformation("Orchestrating {Count} strategies for task {Task}: {Strategies}",
+            enabled.Count, task.TaskId, string.Join(",", enabled));
+
+        // Launch each strategy in its own worktree, bounded by the global gate.
+        var tasks = enabled.Select(id => RunOneAsync(task, id, cfg, ct)).ToList();
+        var outputs = await Task.WhenAll(tasks);
+
+        // Evaluate survivors.
+        var evalInput = outputs
+            .Where(o => o.exec is not null)
+            .Select(o => (o.exec!, o.patch))
+            .ToList();
+        var evalResult = await _evaluator.EvaluateAsync(task, evalInput, ct);
+
+        // Emit scored / winner events.
+        foreach (var c in evalResult.Candidates)
+        {
+            if (c.Score is not null)
+            {
+                await _events.EmitAsync(StrategyEvents.CandidateScored, new CandidateScoredEvent(
+                    task.RunId, task.TaskId, c.StrategyId,
+                    c.Score.AcceptanceCriteriaScore, c.Score.DesignScore, c.Score.ReadabilityScore), ct);
+            }
+        }
+        if (evalResult.Winner is not null)
+        {
+            await _events.EmitAsync(StrategyEvents.WinnerSelected, new WinnerSelectedEvent(
+                task.RunId, task.TaskId, evalResult.Winner.StrategyId,
+                evalResult.TieBreakReason ?? "",
+                evalResult.EvaluationElapsed.TotalSeconds), ct);
+        }
+
+        // Write experiment record.
+        _tracker.Write(new ExperimentRecord
+        {
+            RunId = task.RunId,
+            TaskId = task.TaskId,
+            TaskTitle = task.TaskTitle,
+            StartedAt = DateTimeOffset.UtcNow - runSw.Elapsed,
+            CompletedAt = DateTimeOffset.UtcNow,
+            Candidates = evalResult.Candidates.Select(c => new CandidateRecord
+            {
+                StrategyId = c.StrategyId,
+                Succeeded = c.Survived,
+                FailureReason = c.FailureDetail,
+                FailedGate = c.FailedGate,
+                ElapsedSec = c.Execution.Elapsed.TotalSeconds,
+                PatchSizeBytes = c.PatchSizeBytes,
+                TokensUsed = c.Execution.TokensUsed,
+                AcceptanceCriteriaScore = c.Score?.AcceptanceCriteriaScore,
+                DesignScore = c.Score?.DesignScore,
+                ReadabilityScore = c.Score?.ReadabilityScore,
+            }).ToList(),
+            WinnerStrategyId = evalResult.Winner?.StrategyId,
+            TieBreakReason = evalResult.TieBreakReason,
+            EvaluationElapsedSec = evalResult.EvaluationElapsed.TotalSeconds,
+            TotalTokens = evalResult.Candidates.Sum(c => c.Execution.TokensUsed),
+        });
+
+        return new OrchestrationOutcome(task, evalResult);
+    }
+
+    private async Task<(StrategyExecutionResult? exec, string patch)> RunOneAsync(
+        TaskContext task, string strategyId, StrategyFrameworkConfig cfg, CancellationToken ct)
+    {
+        var strategy = _strategies[strategyId];
+        var timeout = strategyId switch
+        {
+            "agentic-delegation" => TimeSpan.FromSeconds(cfg.Timeouts.AgenticSeconds),
+            "mcp-enhanced" => TimeSpan.FromSeconds(cfg.Timeouts.McpSeconds),
+            _ => TimeSpan.FromSeconds(cfg.Timeouts.BaselineSeconds),
+        };
+
+        await _events.EmitAsync(StrategyEvents.CandidateStarted,
+            new CandidateStartedEvent(task.RunId, task.TaskId, strategyId, DateTimeOffset.UtcNow), ct);
+
+        WorktreeHandle? handle = null;
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            // Global process-count throttling used to live here (StrategyConcurrencyGate.Acquire)
+            // but moved into CopilotCliProcessManager (p3-semaphore-split): the gate now sits
+            // AFTER each per-pool semaphore, so agentic bursts can't steal every permit and
+            // starve baseline. Worktree creation and the evaluator don't spawn copilot
+            // processes, so they don't need the gate.
+            try
+            {
+                handle = await _worktree.CreateAsync(
+                    task.AgentRepoPath, cfg.CandidateDirectoryName,
+                    task.TaskId, strategyId, task.BaseSha, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                // Worktree setup failure (e.g. locked candidate dir, disk full, pruned repo).
+                // Without this catch the method faulted before emitting CandidateCompleted,
+                // leaving the dashboard state store with the candidate stuck in "Running"
+                // forever and propagating the exception through Task.WhenAll in
+                // RunCandidatesAsync — aborting the entire run. val-e2e exposed this path
+                // when a prior candidate's cleanup left locked files in the parent dir.
+                _logger.LogError(ex, "Worktree create failed for strategy {S} task {T}", strategyId, task.TaskId);
+                var failExec = new StrategyExecutionResult
+                {
+                    StrategyId = strategyId,
+                    Succeeded = false,
+                    FailureReason = $"worktree-create: {ex.GetType().Name}: {ex.Message}",
+                    Elapsed = sw.Elapsed,
+                };
+                await _events.EmitAsync(StrategyEvents.CandidateCompleted, new CandidateCompletedEvent(
+                    task.RunId, task.TaskId, strategyId, failExec.Succeeded, failExec.FailureReason,
+                    failExec.Elapsed.TotalSeconds, failExec.TokensUsed), ct);
+                return (failExec, "");
+            }
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(timeout);
+
+            var invocation = new StrategyInvocation
+            {
+                Task = task,
+                WorktreePath = handle.Path,
+                StrategyId = strategyId,
+                Timeout = timeout,
+            };
+
+            StrategyExecutionResult exec;
+            string patch = "";
+            try
+            {
+                exec = await strategy.ExecuteAsync(invocation, timeoutCts.Token);
+                if (exec.Succeeded)
+                {
+                    patch = await _worktree.ExtractPatchAsync(handle.Path, ct);
+                }
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                exec = new StrategyExecutionResult
+                {
+                    StrategyId = strategyId,
+                    Succeeded = false,
+                    FailureReason = $"timeout after {timeout.TotalSeconds}s",
+                    Elapsed = sw.Elapsed,
+                };
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Strategy {S} threw for task {T}", strategyId, task.TaskId);
+                exec = new StrategyExecutionResult
+                {
+                    StrategyId = strategyId,
+                    Succeeded = false,
+                    FailureReason = $"exception: {ex.GetType().Name}: {ex.Message}",
+                    Elapsed = sw.Elapsed,
+                };
+            }
+
+            await _events.EmitAsync(StrategyEvents.CandidateCompleted, new CandidateCompletedEvent(
+                task.RunId, task.TaskId, strategyId, exec.Succeeded, exec.FailureReason,
+                exec.Elapsed.TotalSeconds, exec.TokensUsed), ct);
+
+            // Phase 5: charge tokens to the per-run budget. Trips the breaker once
+            // the configured cap is exceeded; subsequent tasks in the run see
+            // IsExhausted=true and the sampling policy narrows to baseline-only.
+            if (_budget is not null && exec.TokensUsed > 0)
+                _budget.Charge(task.RunId, exec.TokensUsed);
+
+            // Phase 6: per-strategy cost attribution. Uses the model reported
+            // by the candidate; falls back to a generic label if unknown so we
+            // still get a row for the strategy.
+            if (_usage is not null && exec.TokensUsed > 0)
+                _usage.RecordStrategyTokens(strategyId, "cli-estimated", exec.TokensUsed);
+
+            return (exec, patch);
+        }
+        finally
+        {
+            if (handle is not null) await handle.DisposeAsync();
+        }
+    }
+}
+
+public record OrchestrationOutcome(TaskContext Task, EvaluationResult Evaluation)
+{
+    public bool HasWinner => Evaluation.Winner is not null;
+
+    public static OrchestrationOutcome Empty(TaskContext task) => new(task, new EvaluationResult
+    {
+        Candidates = Array.Empty<CandidateResult>(),
+        Winner = null,
+        TieBreakReason = "no-strategies-enabled",
+        EvaluationElapsed = TimeSpan.Zero,
+    });
+}
+
+/// <summary>
+/// Abstraction for emitting lifecycle events (SignalR-bound in the Runner; no-op in tests).
+/// Implementations MUST NOT throw on unknown event types.
+/// </summary>
+public interface IStrategyEventSink
+{
+    Task EmitAsync(string eventName, object payload, CancellationToken ct);
+}
+
+public sealed class NullStrategyEventSink : IStrategyEventSink
+{
+    public static readonly NullStrategyEventSink Instance = new();
+    public Task EmitAsync(string eventName, object payload, CancellationToken ct) => Task.CompletedTask;
+}

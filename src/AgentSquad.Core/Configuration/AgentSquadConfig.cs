@@ -20,6 +20,7 @@ public class AgentSquadConfig
     public PromptsConfig Prompts { get; set; } = new();
     public DecisionGatingConfig DecisionGating { get; set; } = new();
     public ReviewConfig Review { get; set; } = new();
+    public StrategyFrameworkConfig StrategyFramework { get; set; } = new();
 }
 
 public class ProjectConfig
@@ -368,7 +369,22 @@ public class CopilotCliConfig
     public string? WorkingDirectory { get; set; }
 
     /// <summary>Additional arguments to pass to the copilot CLI.</summary>
+    /// <remarks>
+    /// Legacy free-form string. Passed as a single raw chunk to the CLI argv only when
+    /// it contains no characters that would require Windows command-line escaping
+    /// (quotes, backslash-quote sequences). If this field contains such characters,
+    /// <see cref="CopilotCliProcessManager"/> will throw at startup rather than risk
+    /// silently mis-tokenising user-supplied values. New callers should use
+    /// <see cref="AdditionalArgList"/> instead.
+    /// </remarks>
     public string? AdditionalArgs { get; set; }
+
+    /// <summary>
+    /// Additional CLI arguments as a pre-tokenised list. Each entry becomes one argv
+    /// element with no further splitting or interpretation. Prefer this over
+    /// <see cref="AdditionalArgs"/>: it survives quoting and whitespace correctly.
+    /// </summary>
+    public List<string> AdditionalArgList { get; set; } = new();
 }
 
 /// <summary>

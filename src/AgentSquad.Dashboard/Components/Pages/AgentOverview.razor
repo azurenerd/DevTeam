@@ -17,7 +17,7 @@
 
 <PageTitle>AgentSquad — Overview</PageTitle>
 
-<div class="dashboard-header">
+<div class="dashboard-header" data-testid="page-agent-overview">
     <h1>Agent Overview</h1>
     <div class="header-badges">
         <span class="header-badge @HealthClass">
@@ -25,7 +25,7 @@
             @HealthLabel
         </span>
         <div class="agent-filter-wrap">
-            <button class="header-badge agent-filter-toggle" @onclick="ToggleAgentFilter">
+            <button class="header-badge agent-filter-toggle" @onclick="ToggleAgentFilter" data-testid="agents-filter-toggle">
                 🤖 @_visibleAgents.Count Agents@(_hiddenAgentIds.Count > 0 ? $", {_hiddenAgentIds.Count} Hidden" : "")
                 <span class="agent-filter-chevron">▾</span>
             </button>
@@ -49,7 +49,7 @@
         {
             <span class="header-badge danger">⚠ @ncCount Non-Compliant</span>
         }
-        <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh" disabled="@_refreshing"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
+        <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh" disabled="@_refreshing" data-testid="agents-force-refresh"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
     </div>
 </div>
 
@@ -131,7 +131,7 @@ else
             var selectedClass = _selectedAgentId == agent.Id ? "selected" : "";
             var approvalClass = IsAwaitingApproval(agent) ? "awaiting-approval" : "";
 
-            <div class="agent-card @statusClass @selectedClass @approvalClass" @onclick="() => NavigateToAgent(agent.Id)">
+            <div class="agent-card @statusClass @selectedClass @approvalClass" @onclick="() => NavigateToAgent(agent.Id)" data-testid="agent-card" data-agent-id="@agent.Id" data-agent-status="@agent.Status">
                 <div class="agent-card-header">
                     <div class="agent-avatar @roleClass">
                         @GetRoleInitials(agent.Role, agent.Specialty)
@@ -226,18 +226,18 @@ else
                         @if (_editingModelAgentId == agent.Id)
                         {
                             <select class="model-select" value="@agent.ActiveModel"
-                                    @onchange="(e) => OnModelSelected(agent.Id, e)">
+                                    @onchange="(e) => OnModelSelected(agent.Id, e)" data-testid="agent-card-model-select">
                                 @foreach (var model in _availableModels)
                                 {
                                     <option value="@model" selected="@(model == agent.ActiveModel)">@model</option>
                                 }
                             </select>
-                            <button class="model-edit-btn" @onclick="() => _editingModelAgentId = null" title="Cancel">✕</button>
+                            <button class="model-edit-btn" @onclick="() => _editingModelAgentId = null" title="Cancel" data-testid="agent-card-model-cancel">✕</button>
                         }
                         else
                         {
                             <span class="detail-value">@agent.ActiveModel</span>
-                            <button class="model-edit-btn" @onclick="() => _editingModelAgentId = agent.Id" title="Change model">✏️</button>
+                            <button class="model-edit-btn" @onclick="() => _editingModelAgentId = agent.Id" title="Change model" data-testid="agent-card-model-edit">✏️</button>
                         }
                     </div>
                     @if (agent.Status == AgentStatus.Working)
@@ -265,12 +265,12 @@ else
                     }
                     @if (agent.ErrorCount > 0)
                     {
-                        <div class="agent-detail error-badge-row" @onclick:stopPropagation="true" @onclick="() => ShowErrors(agent.Id)">
+                        <div class="agent-detail error-badge-row" @onclick:stopPropagation="true" @onclick="() => ShowErrors(agent.Id)" data-testid="agent-card-error-badge">
                             <span class="error-badge">⚠ @agent.ErrorCount error@(agent.ErrorCount != 1 ? "s" : "")</span>
                         </div>
                     }
                     <div class="agent-actions" @onclick:stopPropagation="true">
-                        <button class="action-btn chat-btn" @onclick="() => OpenChat(agent.Id)" title="Chat with this agent">💬 Chat</button>
+                        <button class="action-btn chat-btn" @onclick="() => OpenChat(agent.Id)" title="Chat with this agent" data-testid="agent-card-chat-btn">💬 Chat</button>
                     </div>
                 </div>
             </div>
@@ -280,13 +280,13 @@ else
 
 @if (_showErrorModal && _errorModalAgentId is not null)
 {
-    <div class="modal-overlay" @onclick="CloseErrorModal">
+    <div class="modal-overlay" @onclick="CloseErrorModal" data-testid="modal-agent-errors">
         <div class="error-modal" @onclick:stopPropagation="true">
             <div class="error-modal-header">
                 <h3>Errors — @_errorModalAgentName</h3>
-                <button class="modal-close" @onclick="CloseErrorModal">✕</button>
+                <button class="modal-close" @onclick="CloseErrorModal" data-testid="modal-error-close">✕</button>
             </div>
-            <div class="error-modal-body">
+            <div class="error-modal-body" data-testid="modal-error-body">
                 @if (_errorEntries.Count == 0)
                 {
                     <div class="empty-errors">No errors recorded</div>
@@ -295,7 +295,7 @@ else
                 {
                     @foreach (var err in _errorEntries)
                     {
-                        <div class="error-entry @(err.Level == Microsoft.Extensions.Logging.LogLevel.Warning ? "warn" : "err")">
+                        <div class="error-entry @(err.Level == Microsoft.Extensions.Logging.LogLevel.Warning ? "warn" : "err")" data-testid="modal-error-entry">
                             <div class="error-entry-header">
                                 <span class="error-level">@(err.Level == Microsoft.Extensions.Logging.LogLevel.Warning ? "⚠ WARN" : "❌ ERROR")</span>
                                 <span class="error-time">@err.Timestamp.ToString("HH:mm:ss")</span>
@@ -313,7 +313,7 @@ else
                 }
             </div>
             <div class="error-modal-footer">
-                <button class="btn-reset" @onclick="ResetErrors">Clear All Errors</button>
+                <button class="btn-reset" @onclick="ResetErrors" data-testid="modal-error-reset">Clear All Errors</button>
             </div>
         </div>
     </div>

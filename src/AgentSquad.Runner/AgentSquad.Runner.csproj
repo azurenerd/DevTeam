@@ -12,5 +12,32 @@
     <ProjectReference Include="..\AgentSquad.Agents\AgentSquad.Agents.csproj" />
     <ProjectReference Include="..\AgentSquad.Orchestrator\AgentSquad.Orchestrator.csproj" />
     <ProjectReference Include="..\AgentSquad.Dashboard\AgentSquad.Dashboard.csproj" />
+    <!--
+      McpEnhancedStrategy spawns AgentSquad.McpServer as a subprocess via `dotnet <dll>`.
+      Reference it so its DLL + .runtimeconfig.json sidecar land in the Runner's output dir.
+      ReferenceOutputAssembly=false: we don't link against the exe; we just need the binary copied.
+    -->
+    <ProjectReference Include="..\AgentSquad.McpServer\AgentSquad.McpServer.csproj"
+                      ReferenceOutputAssembly="false"
+                      Private="true"
+                      PrivateAssets="all"
+                      OutputItemType="None" />
   </ItemGroup>
+
+  <!--
+    ReferenceOutputAssembly=false suppresses the automatic copy of the referenced exe's
+    build output. Copy the McpServer deployment assets (dll + runtimeconfig + deps) into
+    the Runner's output explicitly so DefaultMcpServerLocator's `beside` probe succeeds.
+  -->
+  <Target Name="CopyMcpServerArtifacts" AfterTargets="AfterBuild">
+    <ItemGroup>
+      <_McpServerArtifacts Include="..\AgentSquad.McpServer\bin\$(Configuration)\net8.0\AgentSquad.McpServer.dll" />
+      <_McpServerArtifacts Include="..\AgentSquad.McpServer\bin\$(Configuration)\net8.0\AgentSquad.McpServer.runtimeconfig.json" />
+      <_McpServerArtifacts Include="..\AgentSquad.McpServer\bin\$(Configuration)\net8.0\AgentSquad.McpServer.deps.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_McpServerArtifacts)"
+          DestinationFolder="$(OutDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('%(_McpServerArtifacts.FullPath)')" />
+  </Target>
 </Project>

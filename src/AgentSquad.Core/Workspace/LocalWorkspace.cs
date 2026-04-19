@@ -468,6 +468,36 @@ public class LocalWorkspace
     }
 
     /// <summary>
+    /// Get the SHA of the given local ref (defaults to HEAD).
+    /// </summary>
+    public async Task<string> GetHeadShaAsync(string @ref = "HEAD", CancellationToken ct = default)
+    {
+        EnsureInitialized();
+        var result = await RunGitAsync("rev-parse", @ref, ct: ct);
+        return result.StandardOutput.Trim();
+    }
+
+    /// <summary>
+    /// Fetch the given branch from origin and return its remote SHA. Returns empty
+    /// string when the remote ref does not exist.
+    /// </summary>
+    public async Task<string> GetRemoteShaAsync(string branchName, CancellationToken ct = default)
+    {
+        EnsureInitialized();
+        await _gitLock.WaitAsync(ct);
+        try
+        {
+            await RunGitAsync("fetch", "origin", branchName, ct: ct, throwOnError: false);
+            var result = await RunGitAsync("rev-parse", $"origin/{branchName}", ct: ct, throwOnError: false);
+            return result.Success ? result.StandardOutput.Trim() : "";
+        }
+        finally
+        {
+            _gitLock.Release();
+        }
+    }
+
+    /// <summary>
     /// Get git status (porcelain format) for changed files.
     /// </summary>
     public async Task<string> GetStatusAsync(CancellationToken ct = default)

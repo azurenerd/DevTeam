@@ -18,6 +18,14 @@ builder.Configuration.AddJsonFile(
 // Re-add user secrets so they override Runner's appsettings (e.g., GitHubToken)
 if (builder.Environment.IsDevelopment())
     builder.Configuration.AddUserSecrets<Program>();
+// Re-add env vars and cmdline AFTER the Runner appsettings.json we just loaded,
+// so they retain standard ASP.NET Core precedence (env > json, cmdline > env).
+// Without this, callers setting AgentSquad__* env vars (e.g. test fixtures,
+// container deployments) would have their overrides silently lost. Note:
+// `builder.WebHost.UseUrls(...)` below still hard-overrides ASPNETCORE_URLS;
+// set AgentSquad:Dashboard:StandalonePort to change the bind port.
+builder.Configuration.AddEnvironmentVariables();
+builder.Configuration.AddCommandLine(args);
 builder.Services.Configure<AgentSquadConfig>(
     builder.Configuration.GetSection("AgentSquad"));
 builder.Services.Configure<LimitsConfig>(
@@ -77,6 +85,13 @@ builder.Services.AddSingleton<HttpDashboardDataService>(sp =>
 });
 builder.Services.AddSingleton<IDashboardDataService>(sp => sp.GetRequiredService<HttpDashboardDataService>());
 builder.Services.AddHostedService(sp => sp.GetRequiredService<HttpDashboardDataService>());
+// Strategies page: in standalone mode, proxy to the Runner REST API at /api/strategies/*.
+builder.Services.AddSingleton<IStrategiesDataService>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var http = factory.CreateClient("RunnerApi");
+    return new HttpStrategiesDataService(http, sp.GetRequiredService<ILogger<HttpStrategiesDataService>>());
+});
 builder.Services.AddSingleton<ConfigurationService>();
 builder.Services.AddSingleton<IConfigurationService>(sp => sp.GetRequiredService<ConfigurationService>());
 builder.Services.AddSingleton<DirectorCliService>();

@@ -14,7 +14,7 @@
 @inject IServiceProvider ServiceProvider
 @rendermode InteractiveServer
 
-<div class="page-header">
+<div class="page-header" data-testid="page-configuration">
     <h1 class="page-title">⚙️ Configuration</h1>
     <div class="header-badges">
         @if (_saveSuccess)
@@ -48,7 +48,7 @@ else if (_config is not null)
 
         @* ── Project Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _projectExpanded = !_projectExpanded">
+            <div class="config-card-header" @onclick="() => _projectExpanded = !_projectExpanded" data-testid="config-card-project">
                 <span class="config-card-icon">🏗️</span>
                 <span class="config-card-title">Project</span>
                 <span class="config-card-chevron @(_projectExpanded ? "expanded" : "")">▶</span>
@@ -164,7 +164,7 @@ else if (_config is not null)
 
         @* ── Copilot CLI Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _copilotExpanded = !_copilotExpanded">
+            <div class="config-card-header" @onclick="() => _copilotExpanded = !_copilotExpanded" data-testid="config-card-copilot">
                 <span class="config-card-icon">🤖</span>
                 <span class="config-card-title">Copilot CLI</span>
                 <span class="config-card-chevron @(_copilotExpanded ? "expanded" : "")">▶</span>
@@ -269,7 +269,7 @@ else if (_config is not null)
 
         @* ── Agent Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _agentsExpanded = !_agentsExpanded">
+            <div class="config-card-header" @onclick="() => _agentsExpanded = !_agentsExpanded" data-testid="config-card-agents">
                 <span class="config-card-icon">👥</span>
                 <span class="config-card-title">Agents</span>
                 <span class="config-card-chevron @(_agentsExpanded ? "expanded" : "")">▶</span>
@@ -554,7 +554,7 @@ else if (_config is not null)
 
         @* ── Engineer Pool ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _poolExpanded = !_poolExpanded">
+            <div class="config-card-header" @onclick="() => _poolExpanded = !_poolExpanded" data-testid="config-card-pool">
                 <span class="config-card-icon">🏊</span>
                 <span class="config-card-title">Engineer Pool</span>
                 <span class="config-card-chevron @(_poolExpanded ? "expanded" : "")">▶</span>
@@ -583,7 +583,7 @@ else if (_config is not null)
 
         @* ── Limits ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _limitsExpanded = !_limitsExpanded">
+            <div class="config-card-header" @onclick="() => _limitsExpanded = !_limitsExpanded" data-testid="config-card-limits">
                 <span class="config-card-icon">📏</span>
                 <span class="config-card-title">Limits</span>
                 <span class="config-card-chevron @(_limitsExpanded ? "expanded" : "")">▶</span>
@@ -665,7 +665,7 @@ else if (_config is not null)
 
         @* ── Dashboard Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _dashboardExpanded = !_dashboardExpanded">
+            <div class="config-card-header" @onclick="() => _dashboardExpanded = !_dashboardExpanded" data-testid="config-card-dashboard">
                 <span class="config-card-icon">📊</span>
                 <span class="config-card-title">Dashboard</span>
                 <span class="config-card-chevron @(_dashboardExpanded ? "expanded" : "")">▶</span>
@@ -698,7 +698,7 @@ else if (_config is not null)
 
         @* ── Workspace Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _workspaceExpanded = !_workspaceExpanded">
+            <div class="config-card-header" @onclick="() => _workspaceExpanded = !_workspaceExpanded" data-testid="config-card-workspace">
                 <span class="config-card-icon">🔧</span>
                 <span class="config-card-title">Workspace</span>
                 <span class="config-card-chevron @(_workspaceExpanded ? "expanded" : "")">▶</span>
@@ -826,7 +826,7 @@ else if (_config is not null)
 
         @* ── Human Interaction Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _humanInteractionExpanded = !_humanInteractionExpanded">
+            <div class="config-card-header" @onclick="() => _humanInteractionExpanded = !_humanInteractionExpanded" data-testid="config-card-human-interaction">
                 <span class="config-card-icon">🧑‍💼</span>
                 <span class="config-card-title">Human Interaction</span>
                 <span class="config-card-chevron @(_humanInteractionExpanded ? "expanded" : "")">▶</span>
@@ -950,7 +950,7 @@ else if (_config is not null)
 
         @* MCP Servers *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _mcpServersExpanded = !_mcpServersExpanded">
+            <div class="config-card-header" @onclick="() => _mcpServersExpanded = !_mcpServersExpanded" data-testid="config-card-mcp-servers">
                 <span class="config-card-icon">🔌</span>
                 <span class="config-card-title">Registered MCP Servers</span>
                 <span class="config-card-chevron @(_mcpServersExpanded ? "expanded" : "")">▶</span>
@@ -996,7 +996,7 @@ else if (_config is not null)
 
         @* SME Templates *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _smeTemplatesExpanded = !_smeTemplatesExpanded">
+            <div class="config-card-header" @onclick="() => _smeTemplatesExpanded = !_smeTemplatesExpanded" data-testid="config-card-sme-templates">
                 <span class="config-card-icon">📋</span>
                 <span class="config-card-title">SME Templates</span>
                 <span class="config-card-chevron @(_smeTemplatesExpanded ? "expanded" : "")">▶</span>
@@ -1060,7 +1060,7 @@ else if (_config is not null)
             @if (nonTemplateDefs.Count > 0)
             {
                 <div class="config-card">
-                    <div class="config-card-header" @onclick="() => _persistedSmeExpanded = !_persistedSmeExpanded">
+                    <div class="config-card-header" @onclick="() => _persistedSmeExpanded = !_persistedSmeExpanded" data-testid="config-card-persisted-sme">
                         <span class="config-card-icon">🤖</span>
                         <span class="config-card-title">Active SME Agents</span>
                         <span class="sme-count-badge">@nonTemplateDefs.Count</span>
@@ -1122,7 +1122,7 @@ else if (_config is not null)
 
         @* ── Review Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _reviewExpanded = !_reviewExpanded">
+            <div class="config-card-header" @onclick="() => _reviewExpanded = !_reviewExpanded" data-testid="config-card-review">
                 <span class="config-card-icon">🔍</span>
                 <span class="config-card-title">PR Review</span>
                 <span class="config-card-chevron @(_reviewExpanded ? "expanded" : "")">▶</span>
@@ -1169,7 +1169,7 @@ else if (_config is not null)
 
         @* ── Decision Gating Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _decisionGatingExpanded = !_decisionGatingExpanded">
+            <div class="config-card-header" @onclick="() => _decisionGatingExpanded = !_decisionGatingExpanded" data-testid="config-card-decision-gating">
                 <span class="config-card-icon">🚦</span>
                 <span class="config-card-title">Decision Gating</span>
                 <span class="config-card-chevron @(_decisionGatingExpanded ? "expanded" : "")">▶</span>
@@ -1234,7 +1234,7 @@ else if (_config is not null)
 
         @* ── Agentic Loop Settings ── *@
         <div class="config-card">
-            <div class="config-card-header" @onclick="() => _agenticLoopExpanded = !_agenticLoopExpanded">
+            <div class="config-card-header" @onclick="() => _agenticLoopExpanded = !_agenticLoopExpanded" data-testid="config-card-agentic-loop">
                 <span class="config-card-icon">🔄</span>
                 <span class="config-card-title">Agentic Loop</span>
                 <span class="config-card-chevron @(_agenticLoopExpanded ? "expanded" : "")">▶</span>
@@ -1266,7 +1266,7 @@ else if (_config is not null)
             {
                 <div class="config-save-error">⚠️ @_saveError</div>
             }
-            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving">
+            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving" data-testid="config-save-btn">
                 @if (_saving)
                 {
                     <span class="config-spinner"></span>

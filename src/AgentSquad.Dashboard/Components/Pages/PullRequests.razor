@@ -5,7 +5,7 @@
 @rendermode InteractiveServer
 @implements IDisposable
 
-<div class="page-header">
+<div class="page-header" data-testid="page-pull-requests">
     <h1 class="page-title">🔀 Pull Requests</h1>
     <div class="header-badges">
         <span class="badge badge-success">@_openCount Open</span>
@@ -14,17 +14,17 @@
     </div>
 </div>
 
-<div class="pr-filter-bar">
-    <button class="pr-filter-btn @(_filter == "open" ? "active" : "")" @onclick='() => SetFilter("open")'>
+<div class="pr-filter-bar" data-testid="pr-filter-bar">
+    <button class="pr-filter-btn @(_filter == "open" ? "active" : "")" @onclick='() => SetFilter("open")' data-testid="pr-filter-open">
         <span class="pr-state-icon pr-state-open">●</span> Open <span class="pr-filter-count">@_openCount</span>
     </button>
-    <button class="pr-filter-btn @(_filter == "merged" ? "active" : "")" @onclick='() => SetFilter("merged")'>
+    <button class="pr-filter-btn @(_filter == "merged" ? "active" : "")" @onclick='() => SetFilter("merged")' data-testid="pr-filter-merged">
         <span class="pr-state-icon pr-state-merged">●</span> Merged <span class="pr-filter-count">@_mergedCount</span>
     </button>
-    <button class="pr-filter-btn @(_filter == "closed" ? "active" : "")" @onclick='() => SetFilter("closed")'>
+    <button class="pr-filter-btn @(_filter == "closed" ? "active" : "")" @onclick='() => SetFilter("closed")' data-testid="pr-filter-closed">
         <span class="pr-state-icon pr-state-closed">●</span> Closed <span class="pr-filter-count">@_closedCount</span>
     </button>
-    <button class="pr-filter-btn @(_filter == "all" ? "active" : "")" @onclick='() => SetFilter("all")'>
+    <button class="pr-filter-btn @(_filter == "all" ? "active" : "")" @onclick='() => SetFilter("all")' data-testid="pr-filter-all">
         All <span class="pr-filter-count">@_allPrs.Count</span>
     </button>
 </div>
@@ -39,11 +39,11 @@ else if (_filteredPrs.Count == 0)
 }
 else
 {
-    <div class="pr-list">
+    <div class="pr-list" data-testid="pr-list">
         @foreach (var pr in _filteredPrs)
         {
             var stateClass = pr.IsMerged ? "merged" : pr.State == "open" ? "open" : "closed";
-            <div class="pr-card">
+            <div class="pr-card" data-testid="pr-card" data-pr-number="@pr.Number">
                 <div class="pr-state-indicator pr-state-@stateClass"></div>
                 <div class="pr-content">
                     <div class="pr-title-row">

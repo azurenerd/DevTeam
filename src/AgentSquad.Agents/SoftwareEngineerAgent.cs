@@ -12,6 +12,7 @@ using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
 using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Services;
+using AgentSquad.Core.Strategies;
 using AgentSquad.Core.Workspace;
 using AgentSquad.Orchestrator;
 using Microsoft.Extensions.Logging;
@@ -39,6 +40,11 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private readonly SmeDefinitionGenerator? _smeGenerator;
     private readonly AgentSpawnManager? _spawnManager;
     private readonly DecisionGateService? _decisionGate;
+
+    // Strategy Framework (Phase 1) — optional, opt-in via StrategyFrameworkConfig.Enabled.
+    private readonly StrategyOrchestrator? _strategyOrchestrator;
+    private readonly WinnerApplyService? _winnerApply;
+    private readonly IOptionsMonitor<StrategyFrameworkConfig>? _strategyConfig;
 
     private bool _planningComplete;
     private bool _planningSignalReceived;
@@ -121,7 +127,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         SmeDefinitionGenerator? smeGenerator = null,
         AgentSpawnManager? spawnManager = null,
         DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null)
+        IAgentTaskTracker? taskTracker = null,
+        StrategyOrchestrator? strategyOrchestrator = null,
+        WinnerApplyService? winnerApply = null,
+        IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker)
@@ -134,6 +143,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         _smeGenerator = smeGenerator;
         _spawnManager = spawnManager;
         _decisionGate = decisionGate;
+        _strategyOrchestrator = strategyOrchestrator;
+        _winnerApply = winnerApply;
+        _strategyConfig = strategyConfig;
     }
 
     protected override string GetRoleDisplayName() => "Software Engineer";
@@ -1981,6 +1993,20 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 "Software Engineer created PR #{PrNumber} for task {TaskId}, starting implementation",
                 pr.Number, task.Id);
 
+            // ── Strategy Framework integration (opt-in via StrategyFrameworkConfig.Enabled) ──
+            // Try the multi-strategy orchestrator first. If it produces and applies a winning
+            // patch (with build verification), skip the legacy code-gen path and proceed to
+            // ready-for-review. On any failure, fall back to the legacy path so we never
+            // leave the task half-done.
+            if (await TryRunStrategyFrameworkAsync(task, pr, ct))
+            {
+                Logger.LogInformation(
+                    "Strategy framework produced winning candidate for PR #{PrNumber} (task {TaskId}); skipping legacy code-gen",
+                    pr.Number, task.Id);
+                await FinalizeReadyForReviewAsync(pr, task, ct);
+                return;
+            }
+
             // Use incremental step-by-step implementation (same pattern as EngineerAgentBase)
             var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
@@ -2136,34 +2162,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 await AppendDesignContextIfRelevantAsync(designCtxBuilder, task.Name, task.Description, sourceIssue?.Body, ct);
                 var designContext = designCtxBuilder.ToString();
 
-                var singlePassUser = PromptService is not null
-                    ? await PromptService.RenderAsync("software-engineer/single-pass-implementation",
-                        new Dictionary<string, string>
-                        {
-                            ["pm_spec"] = pmSpecDoc,
-                            ["architecture"] = architectureDoc,
-                            ["issue_context"] = issueContext,
-                            ["design_context"] = designContext,
-                            ["task_name"] = task.Name,
-                            ["task_description"] = task.Description,
-                            ["tech_stack"] = techStack
-                        }, ct)
-                    : null;
-                history.AddUserMessage(singlePassUser ??
-                    $"## PM Specification\n{pmSpecDoc}\n\n" +
-                    $"## Architecture\n{architectureDoc}" +
-                    issueContext +
-                    (string.IsNullOrWhiteSpace(designContext) ? "" : $"\n\n{designContext}") +
-                    $"\n\n## Task: {task.Name}\n{task.Description}\n\n" +
-                    "Implement ONLY the files needed for this specific task. " +
-                    "Output each file using this exact format:\n\n" +
-                    "FILE: path/to/file.ext\n```language\n<file content>\n```\n\n" +
-                    $"Use the {techStack} technology stack. " +
-                    "SCOPE RULE: Only output files that are NEW or MINIMALLY MODIFIED for this task. " +
-                    "Do NOT regenerate .sln, .csproj, Program.cs, or other infrastructure files unless " +
-                    "this task explicitly requires changes to them. " +
-                    "If the task has a FilePlan (CREATE:/MODIFY:/USE:), follow it strictly. " +
-                    "Every file MUST use the FILE: marker format so it can be parsed and committed.");
+                var singlePassUser = await AgentSquad.Agents.AI.SinglePassPromptBuilder.BuildUserPromptAsync(
+                    new AgentSquad.Agents.AI.SinglePassPromptInputs
+                    {
+                        TaskName = task.Name,
+                        TaskDescription = task.Description,
+                        TechStack = techStack,
+                        PmSpec = pmSpecDoc,
+                        Architecture = architectureDoc,
+                        IssueContext = issueContext,
+                        DesignContext = designContext,
+                    }, PromptService, ct);
+                history.AddUserMessage(singlePassUser);
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var implementation = response.Content?.Trim() ?? "";
@@ -2194,33 +2204,291 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             }
 
             // Track step: Mark ready for review
-            var readyStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Mark ready for review",
-                $"Syncing branch and marking PR #{pr.Number} ready", Identity.ModelTier);
-
-            // Sync branch with main before marking ready — ensures PR is merge-clean
-            await SyncBranchWithMainAsync(pr.Number, ct);
-            await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
-            _taskTracker.CompleteStep(readyStepId);
-
-            await MessageBus.PublishAsync(new ReviewRequestMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "ReviewRequest",
-                PrNumber = pr.Number,
-                PrTitle = pr.Title,
-                ReviewType = "CodeReview"
-            }, ct);
-
-            UpdateStatus(AgentStatus.Working, $"Ready for review: {task.Name}");
-            Logger.LogInformation(
-                "Software Engineer completed implementation for PR #{PrNumber} (task {TaskId})",
-                pr.Number, task.Id);
+            await FinalizeReadyForReviewAsync(pr, task, ct);
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to work on own tasks");
         }
+    }
+
+    /// <summary>
+    /// Sync the PR branch with main, mark it ready-for-review, and broadcast the review request.
+    /// Extracted so both the legacy code-gen path and the strategy framework path share the
+    /// same finalization sequence.
+    /// </summary>
+    private async Task FinalizeReadyForReviewAsync(AgentPullRequest pr, EngineeringTask task, CancellationToken ct)
+    {
+        var readyStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Mark ready for review",
+            $"Syncing branch and marking PR #{pr.Number} ready", Identity.ModelTier);
+
+        // Sync branch with main before marking ready — ensures PR is merge-clean
+        await SyncBranchWithMainAsync(pr.Number, ct);
+        await PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+        _taskTracker.CompleteStep(readyStepId);
+
+        await MessageBus.PublishAsync(new ReviewRequestMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = "*",
+            MessageType = "ReviewRequest",
+            PrNumber = pr.Number,
+            PrTitle = pr.Title,
+            ReviewType = "CodeReview"
+        }, ct);
+
+        UpdateStatus(AgentStatus.Working, $"Ready for review: {task.Name}");
+        Logger.LogInformation(
+            "Software Engineer completed implementation for PR #{PrNumber} (task {TaskId})",
+            pr.Number, task.Id);
+    }
+
+    /// <summary>
+    /// Strategy Framework integration (Phase 1). When opted in via
+    /// <c>StrategyFrameworkConfig.Enabled</c>, runs all configured code-generation
+    /// strategies in parallel against per-candidate worktrees, picks a winner, applies
+    /// the patch to the PR branch, build-verifies, then commits and pushes with strategy
+    /// trailers.
+    ///
+    /// Returns <c>true</c> when the framework produced and shipped a winner — caller skips
+    /// legacy code-gen. Returns <c>false</c> on any guard failure, no winner, head change,
+    /// build failure, or exception — caller should fall back to the legacy path.
+    /// </summary>
+    private async Task<bool> TryRunStrategyFrameworkAsync(
+        EngineeringTask task, AgentPullRequest pr, CancellationToken ct)
+    {
+        // Guards: services must be wired and feature must be opted in.
+        if (_strategyOrchestrator is null || _winnerApply is null || _strategyConfig is null)
+            return false;
+
+        var cfg = _strategyConfig.CurrentValue;
+        if (!cfg.Enabled || cfg.EnabledStrategies.Count == 0)
+            return false;
+
+        if (Workspace is null || BuildRunnerSvc is null)
+        {
+            Logger.LogDebug(
+                "Strategy framework requires LocalWorkspace + BuildRunner; skipping for task {TaskId}", task.Id);
+            return false;
+        }
+
+        var branchName = pr.HeadBranch
+            ?? $"agent/{Identity.DisplayName.Replace(" ", "").ToLowerInvariant()}/{task.Id}-{task.Name}";
+
+        try
+        {
+            // Resume PR branch state from the remote — CreateTaskBranchAsync already pushed it.
+            await Workspace.CheckoutBranchAsync(branchName, ct);
+
+            var localHead = (await Workspace.GetHeadShaAsync("HEAD", ct)).Trim();
+            if (string.IsNullOrEmpty(localHead))
+            {
+                Logger.LogWarning("Strategy framework: could not resolve local HEAD for {Branch}; falling back", branchName);
+                return false;
+            }
+
+            // Pre-flight: confirm remote head hasn't advanced since checkout.
+            // CheckoutBranchAsync already fetched, so a new push would be visible here.
+            var remoteHead = (await Workspace.GetRemoteShaAsync(branchName, ct)).Trim();
+            if (!string.IsNullOrEmpty(remoteHead) &&
+                !string.Equals(remoteHead, localHead, StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.LogWarning(
+                    "Strategy framework: remote {Branch} ({Remote}) ahead of local ({Local}); falling back",
+                    branchName, remoteHead, localHead);
+                return false;
+            }
+
+            var runId = StateStore.LastBootUtc != DateTime.MinValue
+                ? StateStore.LastBootUtc.ToString("yyyyMMddTHHmmssZ")
+                : "run-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
+
+            var techStack = Config.Project.TechStack ?? "";
+
+            // Load PMSpec, architecture, and source-issue context — same data the legacy
+            // single-pass uses. Failures here just leave the corresponding context empty;
+            // the baseline generator handles missing context gracefully.
+            string pmSpecDoc = "", architectureDoc = "", issueContext = "", designContext = "";
+            try { pmSpecDoc = await ProjectFiles.GetPMSpecAsync(ct) ?? ""; } catch { /* best-effort */ }
+            try { architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct) ?? ""; } catch { /* best-effort */ }
+
+            AgentIssue? sourceIssue = null;
+            if (task.IssueNumber.HasValue)
+            {
+                try { sourceIssue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct); } catch { /* best-effort */ }
+            }
+            if (sourceIssue is not null)
+                issueContext = $"\n\n## GitHub Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}";
+
+            try
+            {
+                var designSb = new StringBuilder();
+                await AppendDesignContextIfRelevantAsync(designSb, task.Name, task.Description, sourceIssue?.Body, ct);
+                designContext = designSb.ToString();
+            }
+            catch { /* best-effort */ }
+
+            var taskCtx = new TaskContext
+            {
+                TaskId = task.Id,
+                TaskTitle = task.Name,
+                TaskDescription = task.Description ?? "",
+                PrBranch = branchName,
+                BaseSha = localHead,
+                RunId = runId,
+                AgentRepoPath = Workspace.RepoPath,
+                Complexity = MapComplexityToInt(task.Complexity),
+                IsWebTask = LooksLikeWebTask(techStack, task.Name, task.Description),
+                PmSpec = pmSpecDoc,
+                Architecture = architectureDoc,
+                TechStack = techStack,
+                IssueContext = issueContext,
+                DesignContext = designContext,
+            };
+
+            UpdateStatus(AgentStatus.Working, $"Strategy candidates: {task.Name}");
+            var outcome = await _strategyOrchestrator.RunCandidatesAsync(taskCtx, ct);
+
+            if (!outcome.HasWinner)
+            {
+                Logger.LogInformation(
+                    "Strategy framework: no winner for task {TaskId} ({Reason}); falling back",
+                    task.Id, outcome.Evaluation.TieBreakReason ?? "");
+                return false;
+            }
+
+            var winner = outcome.Evaluation.Winner!;
+            if (string.IsNullOrEmpty(winner.Patch))
+            {
+                Logger.LogInformation(
+                    "Strategy framework: winner {Strategy} produced empty patch for task {TaskId}; falling back",
+                    winner.StrategyId, task.Id);
+                return false;
+            }
+
+            // Reject the marker-file-only stub baseline — until p1-baseline-contract lands,
+            // baseline produces only `.strategy-baseline.md` which would ship a no-op PR.
+            if (IsStubMarkerOnlyPatch(winner.Patch))
+            {
+                Logger.LogInformation(
+                    "Strategy framework: winner {Strategy} produced stub marker-only patch; falling back to legacy path",
+                    winner.StrategyId);
+                return false;
+            }
+
+            // Apply the winning patch into the workspace's working tree (head-change safe).
+            var apply = await _winnerApply.ApplyAsync(Workspace.RepoPath, branchName, localHead, winner.Patch, ct);
+            if (!apply.Applied)
+            {
+                Logger.LogWarning(
+                    "Strategy framework: winner {Strategy} apply failed for task {TaskId}: {Reason}; falling back",
+                    winner.StrategyId, task.Id, apply.FailureReason);
+                return false;
+            }
+
+            // Build-verify before committing — never push broken code.
+            var wsConfig = Config.Workspace;
+            var build = await BuildRunnerSvc.BuildAsync(
+                Workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+            if (!build.Success)
+            {
+                Logger.LogWarning(
+                    "Strategy framework: winner {Strategy} build failed for task {TaskId}; reverting and falling back",
+                    winner.StrategyId, task.Id);
+                await Workspace.RevertUncommittedChangesAsync(ct);
+                return false;
+            }
+
+            // Build commit message with sanitized strategy trailers.
+            var trailers = new Dictionary<string, string>
+            {
+                [StrategyTrailers.StrategyKey] = SanitizeTrailerValue(winner.StrategyId),
+                [StrategyTrailers.RunIdKey] = SanitizeTrailerValue(runId),
+            };
+            var tieBreak = outcome.Evaluation.TieBreakReason;
+            if (!string.IsNullOrWhiteSpace(tieBreak))
+                trailers[StrategyTrailers.TieBreakKey] = SanitizeTrailerValue(tieBreak);
+
+            var subject = $"Implement {task.Name}";
+            var commitBody = $"Generated by strategy '{winner.StrategyId}' (run {runId}).";
+            var fullMessage = StrategyTrailers.Append($"{subject}\n\n{commitBody}\n", trailers);
+
+            await Workspace.CommitAsync(fullMessage, ct);
+            await Workspace.PushAsync(branchName, ct);
+
+            Logger.LogInformation(
+                "Strategy framework shipped winner {Strategy} for task {TaskId} on PR #{PrNumber}",
+                winner.StrategyId, task.Id, pr.Number);
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex,
+                "Strategy framework path threw for task {TaskId}; falling back to legacy code-gen", task.Id);
+            try { await Workspace.RevertUncommittedChangesAsync(ct); } catch { }
+            return false;
+        }
+    }
+
+    private static int MapComplexityToInt(string? complexity)
+        => complexity?.ToLowerInvariant() switch
+        {
+            "high" => 3,
+            "medium" => 2,
+            _ => 1,
+        };
+
+    private static bool LooksLikeWebTask(string techStack, string? name, string? description)
+    {
+        var blob = $"{techStack} {name} {description}".ToLowerInvariant();
+        return blob.Contains("blazor") || blob.Contains("aspnet") || blob.Contains("asp.net")
+            || blob.Contains("react") || blob.Contains("angular") || blob.Contains("vue")
+            || blob.Contains("html") || blob.Contains("ui") || blob.Contains("dashboard")
+            || blob.Contains("page") || blob.Contains("frontend");
+    }
+
+    /// <summary>
+    /// Detect the Phase-1 stub baseline patch (only modifies <c>.strategy-baseline.md</c>).
+    /// Returns true when the patch contains no other tracked file changes.
+    /// </summary>
+    private static bool IsStubMarkerOnlyPatch(string patch)
+    {
+        if (string.IsNullOrEmpty(patch)) return true;
+        var sawAnyDiff = false;
+        foreach (var line in patch.Split('\n'))
+        {
+            if (!line.StartsWith("diff --git ", StringComparison.Ordinal)) continue;
+            sawAnyDiff = true;
+            // Lines look like: diff --git a/path b/path
+            var parts = line.Split(' ');
+            if (parts.Length < 4) return false;
+            var aPath = parts[2].StartsWith("a/", StringComparison.Ordinal) ? parts[2][2..] : parts[2];
+            if (!aPath.EndsWith(".strategy-baseline.md", StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+        return sawAnyDiff;
+    }
+
+    /// <summary>
+    /// Collapse newlines and tabs into spaces, trim, and cap length so the value is a
+    /// safe single-line scalar for <see cref="StrategyTrailers.BuildBlock"/> (which throws on CR/LF).
+    /// </summary>
+    private static string SanitizeTrailerValue(string value)
+    {
+        if (string.IsNullOrEmpty(value)) return "";
+        var sb = new StringBuilder(value.Length);
+        foreach (var c in value)
+        {
+            if (c == '\r' || c == '\n' || c == '\t') sb.Append(' ');
+            else if (c < 0x20) continue;
+            else sb.Append(c);
+        }
+        var s = sb.ToString().Trim();
+        return s.Length > 200 ? s[..200] : s;
     }
 
     /// <summary>

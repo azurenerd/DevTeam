@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Strategies;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -10,13 +11,20 @@ namespace AgentSquad.Core.AI;
 /// <summary>
 /// Manages execution of copilot CLI processes in non-interactive mode.
 /// Each AI request spawns a fresh <c>copilot -p</c> process with auto-permissions.
-/// Uses SemaphoreSlim for concurrency limiting.
+/// Concurrency is layered: a per-pool <see cref="SemaphoreSlim"/> (SingleShot /
+/// Candidate / Agentic) throttles the specific call site, then the global
+/// <see cref="StrategyConcurrencyGate"/> caps total concurrent processes across
+/// pools. Pool-first ordering prevents agentic slots from starving baseline.
 /// </summary>
 public sealed class CopilotCliProcessManager : IHostedService, IDisposable
 {
     private readonly CopilotCliConfig _config;
+    private readonly StrategyFrameworkConfig _frameworkConfig;
     private readonly ILogger<CopilotCliProcessManager> _logger;
-    private readonly SemaphoreSlim _concurrencyLimiter;
+    private readonly SemaphoreSlim _singleShotPool;
+    private readonly SemaphoreSlim _candidatePool;
+    private readonly SemaphoreSlim _agenticPool;
+    private readonly StrategyConcurrencyGate _globalGate;
     private readonly CliInteractiveWatchdog _watchdog;
     private bool _copilotAvailable;
     private bool _disposed;
@@ -24,11 +32,60 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
     public CopilotCliProcessManager(
         IOptions<AgentSquadConfig> config,
         ILogger<CopilotCliProcessManager> logger)
+        : this(config, Options.Create(new StrategyFrameworkConfig()), NewDefaultGate(), logger)
+    {
+    }
+
+    public CopilotCliProcessManager(
+        IOptions<AgentSquadConfig> config,
+        IOptions<StrategyFrameworkConfig> frameworkConfig,
+        ILogger<CopilotCliProcessManager> logger)
+        : this(config, frameworkConfig, NewDefaultGate(frameworkConfig.Value), logger)
+    {
+    }
+
+    public CopilotCliProcessManager(
+        IOptions<AgentSquadConfig> config,
+        IOptions<StrategyFrameworkConfig> frameworkConfig,
+        StrategyConcurrencyGate globalGate,
+        ILogger<CopilotCliProcessManager> logger)
     {
         _config = config.Value.CopilotCli;
+        _frameworkConfig = frameworkConfig.Value;
         _logger = logger;
-        _concurrencyLimiter = new SemaphoreSlim(_config.MaxConcurrentRequests, _config.MaxConcurrentRequests);
+        _globalGate = globalGate;
+
+        // Per-pool sizing. SingleShot honours the legacy CopilotCli.MaxConcurrentRequests
+        // when the strategy framework is off (preserves pre-existing behaviour), otherwise
+        // takes the framework value. Candidate/Agentic come from the framework config.
+        var concurrency = _frameworkConfig.Concurrency;
+        var singleShotSize = concurrency.SingleShotSlots > 0
+            ? concurrency.SingleShotSlots
+            : _config.MaxConcurrentRequests;
+        _singleShotPool = new SemaphoreSlim(singleShotSize, singleShotSize);
+        _candidatePool = new SemaphoreSlim(
+            Math.Max(1, concurrency.CandidateSlots),
+            Math.Max(1, concurrency.CandidateSlots));
+        _agenticPool = new SemaphoreSlim(
+            Math.Max(1, concurrency.AgenticSlots),
+            Math.Max(1, concurrency.AgenticSlots));
+
         _watchdog = new CliInteractiveWatchdog(logger, _config.AutoApprovePrompts);
+    }
+
+    private static StrategyConcurrencyGate NewDefaultGate(StrategyFrameworkConfig? cfg = null)
+    {
+        cfg ??= new StrategyFrameworkConfig();
+        var monitor = new StaticOptionsMonitor<StrategyFrameworkConfig>(cfg);
+        return new StrategyConcurrencyGate(monitor);
+    }
+
+    private sealed class StaticOptionsMonitor<T> : Microsoft.Extensions.Options.IOptionsMonitor<T>
+    {
+        public StaticOptionsMonitor(T value) { CurrentValue = value; }
+        public T CurrentValue { get; }
+        public T Get(string? name) => CurrentValue;
+        public IDisposable? OnChange(Action<T, string?> listener) => null;
     }
 
     /// <summary>Whether the copilot CLI was detected and is available for use.</summary>
@@ -80,26 +137,114 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         if (!_copilotAvailable)
             return CopilotCliResult.Failure("Copilot CLI is not available");
 
-        // Wait for a concurrency slot
-        await _concurrencyLimiter.WaitAsync(ct);
+        // Legacy callers land in the SingleShot pool. Acquire the per-pool slot first,
+        // then the global gate — this ordering prevents a burst of agentic calls from
+        // stealing every global permit and starving SingleShot. See StrategyConcurrencyGate.
+        await _singleShotPool.WaitAsync(ct);
         try
         {
+            using var _ = await _globalGate.AcquireAsync(ct);
             return await RunProcessAsync(prompt, modelOverride, sessionId, ct);
         }
         finally
         {
-            _concurrencyLimiter.Release();
+            _singleShotPool.Release();
+        }
+    }
+
+    /// <summary>
+    /// Pool-routed overload of <see cref="ExecutePromptAsync(string, CancellationToken)"/>.
+    /// Callers that know which pool their call belongs to (e.g. strategy patch-producers
+    /// routing to <see cref="CopilotCliPool.Candidate"/>) should use this overload.
+    /// <see cref="CopilotCliPool.Agentic"/> is rejected — agentic sessions must go
+    /// through <see cref="ExecuteAgenticSessionAsync"/> because their lifecycle differs
+    /// (stdin stays open, allow-all flag, JSONL watchdog).
+    /// </summary>
+    public async Task<CopilotCliResult> ExecutePromptAsync(
+        string prompt,
+        CopilotCliRequestOptions options,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentNullException.ThrowIfNull(options);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (options.Pool == CopilotCliPool.Agentic)
+            throw new ArgumentException(
+                "Pool=Agentic is not valid for ExecutePromptAsync. Use ExecuteAgenticSessionAsync.",
+                nameof(options));
+
+        if (!_copilotAvailable)
+            return CopilotCliResult.Failure("Copilot CLI is not available");
+
+        var pool = options.Pool switch
+        {
+            CopilotCliPool.Candidate => _candidatePool,
+            CopilotCliPool.SingleShot => _singleShotPool,
+            _ => _singleShotPool,
+        };
+
+        await pool.WaitAsync(ct);
+        try
+        {
+            using var _ = await _globalGate.AcquireAsync(ct);
+            return await RunProcessAsync(prompt, options.ModelOverride, options.SessionId, ct);
+        }
+        finally
+        {
+            pool.Release();
+        }
+    }
+
+    /// <summary>
+    /// Execute an agentic session via the copilot CLI (Pool=Agentic, --allow-all).
+    /// Unlike <see cref="ExecutePromptAsync(string, CancellationToken)"/>, this lifecycle
+    /// keeps stdin open until process exit so future watchdog responses and multi-turn
+    /// stdin input work. The watchdog itself, the per-pool semaphore split, the
+    /// Windows Job Object containment, and the sandbox env scrub are layered on by
+    /// subsequent todos (p3-agentic-watchdog, p3-semaphore-split, p3-cleanup-impl,
+    /// p3-real-sandbox). This method establishes the process-lifecycle skeleton that
+    /// those todos extend without reshaping the API.
+    /// </summary>
+    public async Task<AgenticSessionResult> ExecuteAgenticSessionAsync(
+        string prompt,
+        CopilotCliRequestOptions options,
+        CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        ArgumentNullException.ThrowIfNull(options);
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        if (options.Pool != CopilotCliPool.Agentic)
+            throw new ArgumentException(
+                $"ExecuteAgenticSessionAsync requires Pool=Agentic, got {options.Pool}",
+                nameof(options));
+
+        if (!_copilotAvailable)
+            return AgenticSessionResult.Unavailable("Copilot CLI is not available");
+
+        // Agentic calls acquire the Agentic pool first, then the global gate. The
+        // per-pool semaphore bounds parallel agentic sessions (default 2); the global
+        // gate bounds total concurrent processes across all pools (default 6).
+        await _agenticPool.WaitAsync(ct);
+        try
+        {
+            using var _ = await _globalGate.AcquireAsync(ct);
+            return await RunAgenticSessionAsync(prompt, options, ct);
+        }
+        finally
+        {
+            _agenticPool.Release();
         }
     }
 
     private async Task<CopilotCliResult> RunProcessAsync(string prompt, string? modelOverride, string? sessionId, CancellationToken ct)
     {
-        var args = BuildArguments(modelOverride, sessionId);
+        var argList = BuildArguments(modelOverride, sessionId);
 
         var psi = new ProcessStartInfo
         {
             FileName = _config.ExecutablePath,
-            Arguments = args,
             UseShellExecute = false,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -109,9 +254,19 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
             StandardErrorEncoding = Encoding.UTF8,
         };
 
-        // Set working directory if configured
-        if (!string.IsNullOrEmpty(_config.WorkingDirectory))
-            psi.WorkingDirectory = _config.WorkingDirectory;
+        // ArgumentList bypasses manual Windows command-line quoting. Essential for args
+        // that may contain JSON with embedded quotes (e.g. --additional-mcp-config).
+        foreach (var a in argList)
+            psi.ArgumentList.Add(a);
+
+        // Per-invocation CWD override (e.g. a candidate worktree root) takes precedence
+        // over the global default. Fall back to whatever is configured globally.
+        var invocation = AgentCallContext.CurrentInvocationContext;
+        var workingDir = !string.IsNullOrEmpty(invocation?.OverrideWorkingDirectory)
+            ? invocation!.OverrideWorkingDirectory
+            : _config.WorkingDirectory;
+        if (!string.IsNullOrEmpty(workingDir))
+            psi.WorkingDirectory = workingDir;
 
         // Environment overrides
         psi.Environment["NO_COLOR"] = "1";
@@ -188,6 +343,299 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
     }
 
     /// <summary>
+    /// Agentic lifecycle: starts copilot with --allow-all, keeps stdin open, streams
+    /// stdout to a log buffer, enforces wall-clock timeout, and kills the whole
+    /// process tree on cancel/timeout. Job Object containment (p3-cleanup-impl),
+    /// JSONL watchdog (p3-agentic-watchdog), and sandbox env scrub (p3-real-sandbox)
+    /// are layered in by subsequent todos without changing this method's signature.
+    /// </summary>
+    private async Task<AgenticSessionResult> RunAgenticSessionAsync(
+        string prompt,
+        CopilotCliRequestOptions options,
+        CancellationToken ct)
+    {
+        var sw = Stopwatch.StartNew();
+        var argList = BuildAgenticArguments(options);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = _config.ExecutablePath,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+        foreach (var a in argList)
+            psi.ArgumentList.Add(a);
+
+        // Working directory precedence: options override > CopilotCli default.
+        var workingDir = !string.IsNullOrEmpty(options.WorkingDirectory)
+            ? options.WorkingDirectory
+            : _config.WorkingDirectory;
+        if (!string.IsNullOrEmpty(workingDir))
+            psi.WorkingDirectory = workingDir;
+
+        psi.Environment["NO_COLOR"] = "1";
+
+        // Environment overrides. A null value removes the variable entirely — this
+        // is the scrub path used by the sandbox scope (p3-real-sandbox) to strip
+        // host credentials such as GITHUB_TOKEN, SSH_AUTH_SOCK, etc.
+        if (options.EnvironmentOverrides is { Count: > 0 })
+        {
+            foreach (var (k, v) in options.EnvironmentOverrides)
+            {
+                if (string.IsNullOrEmpty(k)) continue;
+                if (v is null)
+                    psi.Environment.Remove(k);
+                else
+                    psi.Environment[k] = v;
+            }
+        }
+
+        var wallClock = options.Timeout
+            ?? TimeSpan.FromSeconds(_frameworkConfig.Timeouts.AgenticSeconds);
+        using var timeoutCts = new CancellationTokenSource(wallClock);
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, timeoutCts.Token);
+
+        Process process;
+        Win32JobObject? jobObject = null;
+        try
+        {
+            process = new Process { StartInfo = psi };
+            process.Start();
+
+            // Assign to a Job Object for atomic descendant-kill on close.
+            // KILL_ON_JOB_CLOSE + BreakawayOK=false means every grandchild is
+            // terminated when we dispose the job handle at the end of this
+            // session — no orphaned git/node/shell processes on timeout or crash.
+            // Cross-platform: on non-Windows, IsSupported returns false, jobObject
+            // stays null, and we fall through to Process.Kill(entireProcessTree:true).
+            if (Win32JobObject.IsSupported)
+            {
+                try
+                {
+                    jobObject = new Win32JobObject(
+                        _logger,
+                        _frameworkConfig.Agentic.JobObjectMemoryLimitBytes,
+                        _frameworkConfig.Agentic.JobObjectActiveProcessLimit);
+                    if (!jobObject.AssignProcess(process))
+                    {
+                        jobObject.Dispose();
+                        jobObject = null;
+                    }
+                }
+                catch (Exception jobEx)
+                {
+                    _logger.LogWarning(jobEx, "Failed to create/assign Job Object; agentic session will rely on tree-kill fallback");
+                    jobObject?.Dispose();
+                    jobObject = null;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to start copilot agentic process");
+            return AgenticSessionResult.LaunchFailed($"Failed to start copilot: {ex.Message}");
+        }
+
+        using (process)
+        using (jobObject)
+        {
+            var logBuffer = new StringBuilder();
+            // killSource lets the watchdog signal a kill request (stuck or tool-cap
+            // violation) while the main lifecycle is awaiting WaitForExitAsync.
+            using var killSource = new CancellationTokenSource();
+            AgenticOutputMonitor? monitor = null;
+            try
+            {
+                // Pipe prompt via stdin; flush but DO NOT close. Agentic sessions
+                // keep stdin open for watchdog responses and future multi-turn input.
+                await process.StandardInput.WriteAsync(prompt.AsMemory(), linked.Token);
+                await process.StandardInput.FlushAsync(linked.Token);
+                if (options.CloseStdinAfterPrompt)
+                    process.StandardInput.Close();
+
+                Task<string> stdoutFallbackTask = Task.FromResult(string.Empty);
+                Task monitorTask = Task.CompletedTask;
+                var useMonitor = options.WatchdogMode == CopilotCliWatchdogMode.Agentic;
+
+                if (useMonitor)
+                {
+                    // JSONL watchdog: stuck detector + tool-call cap. Always emitted with
+                    // JSON mode (BuildAgenticArguments forces --output-format json).
+                    monitor = new AgenticOutputMonitor(_frameworkConfig.Agentic, _logger, jsonMode: true);
+                    monitorTask = monitor.RunAsync(process.StandardOutput, logBuffer, killSource, linked.Token);
+                }
+                else
+                {
+                    // Legacy path: raw stdout-to-string (no stuck detection, no tool-cap).
+                    stdoutFallbackTask = process.StandardOutput.ReadToEndAsync(linked.Token);
+                }
+
+                var stderrTask = process.StandardError.ReadToEndAsync(linked.Token);
+
+                // Compose a cancellation that also reacts to watchdog kill signals.
+                using var processWait = CancellationTokenSource.CreateLinkedTokenSource(
+                    linked.Token, killSource.Token);
+
+                try
+                {
+                    await process.WaitForExitAsync(processWait.Token);
+                }
+                catch (OperationCanceledException) when (killSource.IsCancellationRequested)
+                {
+                    // Watchdog asked us to kill. Tear down the process tree and fall
+                    // through to classify the failure from the monitor's FailureReason.
+                    KillProcessSafely(process);
+                    try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+                }
+
+                // Drain the watchdog/stdout tasks. Swallow their exceptions — classification
+                // happens on the monitor's FailureReason or the process exit code.
+                try { await monitorTask; } catch { }
+                string stdout = string.Empty;
+                try { stdout = await stdoutFallbackTask; } catch { }
+                string stderr = string.Empty;
+                try { stderr = await stderrTask; } catch { }
+
+                if (!useMonitor)
+                    logBuffer.Append(stdout);
+                if (!string.IsNullOrEmpty(stderr))
+                    logBuffer.Append("\n---- stderr ----\n").Append(stderr);
+
+                sw.Stop();
+
+                // Watchdog-detected violation wins over exit-code classification — the
+                // session was killed BECAUSE of the violation, so exit code is noise.
+                if (monitor?.FailureReason is { } watchdogFailure)
+                {
+                    return new AgenticSessionResult
+                    {
+                        Succeeded = false,
+                        FailureReason = watchdogFailure,
+                        ExitCode = process.HasExited ? process.ExitCode : -1,
+                        WallClock = sw.Elapsed,
+                        ToolCallCount = monitor.ToolCallCount,
+                        LogBuffer = logBuffer.ToString(),
+                        ErrorMessage = watchdogFailure == AgenticFailureReason.StuckNoOutput
+                            ? $"Agentic session stuck: no stdout for {_frameworkConfig.Agentic.StuckSeconds}s"
+                            : $"Agentic session exceeded tool-call cap of {_frameworkConfig.Agentic.ToolCallCap}",
+                    };
+                }
+
+                if (process.ExitCode != 0)
+                {
+                    _logger.LogWarning(
+                        "Agentic copilot process exited with code {Code}. stderr: {Stderr}",
+                        process.ExitCode,
+                        stderr.Length > 500 ? stderr[..500] : stderr);
+                    return new AgenticSessionResult
+                    {
+                        Succeeded = false,
+                        FailureReason = AgenticFailureReason.ExitNonzero,
+                        ExitCode = process.ExitCode,
+                        WallClock = sw.Elapsed,
+                        ToolCallCount = monitor?.ToolCallCount ?? 0,
+                        LogBuffer = logBuffer.ToString(),
+                        ErrorMessage = $"Copilot exited with code {process.ExitCode}",
+                    };
+                }
+
+                return new AgenticSessionResult
+                {
+                    Succeeded = true,
+                    FailureReason = AgenticFailureReason.None,
+                    ExitCode = process.ExitCode,
+                    WallClock = sw.Elapsed,
+                    ToolCallCount = monitor?.ToolCallCount ?? 0,
+                    LogBuffer = logBuffer.ToString(),
+                };
+            }
+            catch (OperationCanceledException) when (timeoutCts.IsCancellationRequested)
+            {
+                KillProcessSafely(process);
+                sw.Stop();
+                return new AgenticSessionResult
+                {
+                    Succeeded = false,
+                    FailureReason = AgenticFailureReason.Timeout,
+                    ExitCode = -1,
+                    WallClock = sw.Elapsed,
+                    ToolCallCount = monitor?.ToolCallCount ?? 0,
+                    LogBuffer = logBuffer.ToString(),
+                    ErrorMessage = $"Agentic session timed out after {wallClock.TotalSeconds:F0}s",
+                };
+            }
+            catch (OperationCanceledException)
+            {
+                KillProcessSafely(process);
+                sw.Stop();
+                return new AgenticSessionResult
+                {
+                    Succeeded = false,
+                    FailureReason = AgenticFailureReason.Canceled,
+                    ExitCode = -1,
+                    WallClock = sw.Elapsed,
+                    ToolCallCount = monitor?.ToolCallCount ?? 0,
+                    LogBuffer = logBuffer.ToString(),
+                    ErrorMessage = "Caller cancelled the agentic session",
+                };
+            }
+            catch (Exception ex)
+            {
+                KillProcessSafely(process);
+                sw.Stop();
+                _logger.LogError(ex, "Error during agentic copilot process execution");
+                return new AgenticSessionResult
+                {
+                    Succeeded = false,
+                    FailureReason = AgenticFailureReason.LaunchFailed,
+                    ExitCode = -1,
+                    WallClock = sw.Elapsed,
+                    ToolCallCount = monitor?.ToolCallCount ?? 0,
+                    LogBuffer = logBuffer.ToString(),
+                    ErrorMessage = $"Process error: {ex.Message}",
+                };
+            }
+        }
+    }
+
+    /// <summary>
+    /// Build argv for an agentic session. Layers over <see cref="BuildArguments"/> by
+    /// prepending <c>--allow-all</c> when <see cref="CopilotCliRequestOptions.AllowAll"/>
+    /// is true and forcing JSON output mode so the watchdog (p3-agentic-watchdog) can
+    /// count tool-call events reliably.
+    /// </summary>
+    internal IReadOnlyList<string> BuildAgenticArguments(CopilotCliRequestOptions options)
+    {
+        var baseArgs = BuildArguments(options.ModelOverride, options.SessionId);
+        var args = new List<string>();
+
+        if (options.AllowAll)
+            args.Add("--allow-all");
+
+        var jsonAlreadyPresent = false;
+        for (var i = 0; i < baseArgs.Count; i++)
+        {
+            var a = baseArgs[i];
+            args.Add(a);
+            if (a == "--output-format" && i + 1 < baseArgs.Count && baseArgs[i + 1] == "json")
+                jsonAlreadyPresent = true;
+        }
+
+        if (!jsonAlreadyPresent)
+        {
+            args.Add("--output-format");
+            args.Add("json");
+        }
+
+        return args;
+    }
+
+    /// <summary>
     /// Reads stdout while monitoring for interactive prompts via the watchdog.
     /// If a prompt is detected, auto-responds via stdin.
     /// </summary>
@@ -250,59 +698,145 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         return output.ToString();
     }
 
-    private string BuildArguments(string? modelOverride = null, string? sessionId = null)
+    /// <summary>
+    /// Build the argv for a single CLI invocation. Returns a pre-tokenised list; each
+    /// element becomes one argv entry with no further shell interpretation. This is the
+    /// ONLY safe way to pass inline JSON (for <c>--additional-mcp-config</c>) on Windows.
+    /// </summary>
+    /// <remarks>
+    /// Per-invocation values (inline MCP config, allow-tool permissions, override CWD)
+    /// are read from <see cref="AgentCallContext.CurrentInvocationContext"/>. The method
+    /// is <c>internal</c> so strategy-framework tests can assert the emitted argv without
+    /// having to spawn a real CLI process.
+    /// </remarks>
+    internal IReadOnlyList<string> BuildArguments(string? modelOverride = null, string? sessionId = null)
     {
-        var args = new StringBuilder();
+        var args = new List<string>();
 
-        // Core flags for non-interactive autonomous operation
-        // NOTE: We intentionally omit --allow-all so the CLI cannot use file-creation
-        // tools. Our agents need TEXT responses, not local file operations.
-        args.Append("--no-ask-user ");
-        args.Append("--no-auto-update ");
-        args.Append("--no-custom-instructions ");
+        // Core flags for non-interactive autonomous operation.
+        // NOTE: --allow-all is intentionally omitted. For strategies that need to invoke
+        // read-only MCP tools, explicit --allow-tool flags are emitted below via the
+        // per-invocation context — this is tighter than --allow-all, which would also
+        // permit filesystem writes and shell execution.
+        args.Add("--no-ask-user");
+        args.Add("--no-auto-update");
+        args.Add("--no-custom-instructions");
 
-        // Session resume for conversational continuity across calls
+        // Session resume for conversational continuity across calls.
         if (!string.IsNullOrEmpty(sessionId))
-            args.Append($"--resume={sessionId} ");
+            args.Add($"--resume={sessionId}");
 
         if (_config.SilentMode)
-            args.Append("--silent ");
+            args.Add("--silent");
 
-        args.Append("--no-color ");
+        args.Add("--no-color");
 
         if (_config.JsonOutput)
-            args.Append("--output-format json ");
+        {
+            args.Add("--output-format");
+            args.Add("json");
+        }
 
-        // Model selection (per-agent override takes precedence)
+        // Model selection (per-agent override takes precedence).
         var model = modelOverride ?? _config.ModelName;
-        args.Append($"--model {model} ");
+        args.Add("--model");
+        args.Add(model);
 
-        // Reasoning effort (skip for models that don't support it, e.g. haiku)
+        // Reasoning effort (skip for models that don't support it, e.g. haiku).
         var effectiveModel = modelOverride ?? _config.ModelName;
-        var supportsReasoning = effectiveModel == null || !effectiveModel.Contains("haiku", StringComparison.OrdinalIgnoreCase);
+        var supportsReasoning = effectiveModel == null
+            || !effectiveModel.Contains("haiku", StringComparison.OrdinalIgnoreCase);
         if (!string.IsNullOrEmpty(_config.ReasoningEffort) && supportsReasoning)
-            args.Append($"--effort {_config.ReasoningEffort} ");
+        {
+            args.Add("--effort");
+            args.Add(_config.ReasoningEffort);
+        }
 
-        // Excluded tools
+        // Excluded tools.
         foreach (var tool in _config.ExcludedTools)
-            args.Append($"--excluded-tools {tool} ");
+        {
+            args.Add("--excluded-tools");
+            args.Add(tool);
+        }
 
-        // Additional user-specified args
+        // Legacy free-form additional args. Passed verbatim as a single argv entry when
+        // safe; rejected if the value contains quote/escape characters we cannot
+        // faithfully reproduce without a real shell tokeniser. New callers should use
+        // AdditionalArgList instead.
         if (!string.IsNullOrEmpty(_config.AdditionalArgs))
-            args.Append(_config.AdditionalArgs);
+        {
+            if (ContainsShellEscapeChars(_config.AdditionalArgs))
+            {
+                throw new InvalidOperationException(
+                    "CopilotCli.AdditionalArgs contains quote or backslash-quote characters " +
+                    "that cannot be safely tokenised without shell semantics. Migrate to " +
+                    "CopilotCli.AdditionalArgList (string[]) — each list entry is passed as " +
+                    "a single argv element with no further interpretation.");
+            }
+            // No embedded quotes; safe to split on whitespace to mirror prior single-string
+            // semantics under Windows command-line parsing for the quote-free case.
+            foreach (var tok in _config.AdditionalArgs.Split(
+                         (char[]?)null, StringSplitOptions.RemoveEmptyEntries))
+            {
+                args.Add(tok);
+            }
+        }
 
-        // MCP servers from the current agent's role configuration
+        // Pre-tokenised additional args (preferred API).
+        foreach (var a in _config.AdditionalArgList)
+        {
+            if (!string.IsNullOrEmpty(a))
+                args.Add(a);
+        }
+
+        // MCP servers referenced by name from the agent-role config (legacy path).
         var mcpServers = AgentCallContext.McpServers;
         if (mcpServers is { Count: > 0 })
         {
             foreach (var server in mcpServers)
             {
                 if (!string.IsNullOrWhiteSpace(server))
-                    args.Append($" --mcp-server {server}");
+                {
+                    args.Add("--mcp-server");
+                    args.Add(server);
+                }
             }
         }
 
-        return args.ToString().Trim();
+        // Per-invocation MCP additions (inline config + tool permissions). These come
+        // from strategies that opt into workspace-reader or similar scoped servers;
+        // they flow via AsyncLocal so the entire call chain — ProcessManager AND the
+        // chat completion service's prompt flattener — sees a consistent state.
+        var invocation = AgentCallContext.CurrentInvocationContext;
+        if (invocation is not null)
+        {
+            if (!string.IsNullOrEmpty(invocation.AdditionalMcpConfigJson))
+            {
+                args.Add("--additional-mcp-config");
+                args.Add(invocation.AdditionalMcpConfigJson);
+            }
+
+            if (invocation.AllowedMcpTools is { Count: > 0 })
+            {
+                foreach (var tool in invocation.AllowedMcpTools)
+                {
+                    if (!string.IsNullOrWhiteSpace(tool))
+                        args.Add($"--allow-tool={tool}");
+                }
+            }
+        }
+
+        return args;
+    }
+
+    private static bool ContainsShellEscapeChars(string s)
+    {
+        foreach (var c in s)
+        {
+            if (c == '"' || c == '\'' || c == '\\' || c == '`')
+                return true;
+        }
+        return false;
     }
 
     private async Task<bool> VerifyCopilotInstalledAsync(CancellationToken ct)
@@ -374,7 +908,9 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        _concurrencyLimiter.Dispose();
+        _singleShotPool.Dispose();
+        _candidatePool.Dispose();
+        _agenticPool.Dispose();
     }
 }
 

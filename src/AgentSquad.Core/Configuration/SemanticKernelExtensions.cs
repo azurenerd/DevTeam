@@ -1,7 +1,9 @@
 namespace AgentSquad.Core.Configuration;
 
 using AgentSquad.Core.AI;
+using AgentSquad.Core.Strategies;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 
@@ -14,6 +16,13 @@ public static class SemanticKernelExtensions
     /// </summary>
     public static IServiceCollection AddSemanticKernelModels(this IServiceCollection services)
     {
+        // StrategyConcurrencyGate is a global cap above the CopilotCliProcessManager
+        // per-pool semaphores. The process manager depends on it, so we register it
+        // here (idempotent) to keep DI resolvable even when the strategy framework
+        // itself is disabled. AddStrategyFramework uses TryAddSingleton too, so the
+        // two registration paths coexist.
+        services.TryAddSingleton<StrategyConcurrencyGate>();
+
         // Register the Copilot CLI process manager (checks availability at startup)
         services.AddSingleton<CopilotCliProcessManager>();
         services.AddHostedService(sp => sp.GetRequiredService<CopilotCliProcessManager>());

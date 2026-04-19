@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="AgentSquad.Core.Tests" />
+    <InternalsVisibleTo Include="AgentSquad.StrategyFramework.Tests" />
   </ItemGroup>
 
   <ItemGroup>

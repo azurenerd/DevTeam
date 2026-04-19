@@ -141,16 +141,38 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
     /// Converts a Semantic Kernel ChatHistory into a single prompt suitable for the copilot CLI.
     /// The CLI doesn't support multi-turn natively, so we flatten the conversation.
     /// </summary>
+    /// <remarks>
+    /// Rule #2 of the [OUTPUT FORMAT INSTRUCTIONS] header is the tool-permission rule.
+    /// It flips based on <see cref="AgentCallContext.CurrentInvocationContext"/>:
+    /// <list type="bullet">
+    ///   <item>No context / no allowed tools → strict "Do NOT use any tools or shell commands".</item>
+    ///   <item>Context with allowed MCP tools → "MAY call read-only MCP tools silently; no narration; still no file writes or shell commands".</item>
+    /// </list>
+    /// Keeping prompt-state + CLI-arg-state in a single source (the invocation context)
+    /// is deliberate: allowing CLI tool flags without updating the prompt would leave the
+    /// model disinclined to use the tools despite permission; updating the prompt without
+    /// granting CLI permission would invite tool-call failures.
+    /// </remarks>
     internal static string FormatChatHistoryAsPrompt(ChatHistory chatHistory, CopilotCliConfig? config = null)
     {
         var sb = new StringBuilder();
+
+        var invocation = AgentCallContext.CurrentInvocationContext;
+        var allowTools = invocation?.AllowToolUsage == true;
 
         // Critical directive: prevent CLI from acting as an interactive assistant
         sb.AppendLine("[OUTPUT FORMAT INSTRUCTIONS]");
         sb.AppendLine("For this task, produce ONLY the direct requested content as plain text.");
         sb.AppendLine("RULES:");
         sb.AppendLine("1. Output the requested content DIRECTLY. Start immediately with the content itself.");
-        sb.AppendLine("2. Do NOT create, edit, or write any files. Do NOT use any tools or shell commands.");
+        if (allowTools)
+        {
+            sb.AppendLine("2. You MAY silently call the configured read-only MCP tools (e.g. read_file, list_directory, search_code) to inspect workspace context BEFORE producing output. Do NOT narrate tool calls, inspection steps, or intermediate actions in your response. Do NOT create, edit, or write files. Do NOT run shell commands.");
+        }
+        else
+        {
+            sb.AppendLine("2. Do NOT create, edit, or write any files. Do NOT use any tools or shell commands.");
+        }
         sb.AppendLine("3. Do NOT include conversational framing like 'Here is...' or 'I have created...'.");
         sb.AppendLine("4. Do NOT include meta-commentary about yourself, your capabilities, or your design.");
         sb.AppendLine("5. If asked for a markdown document, output the FULL markdown — start with the first heading.");
