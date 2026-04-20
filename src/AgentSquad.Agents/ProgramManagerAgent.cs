@@ -965,20 +965,11 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
-                // Idempotency: skip if we've already posted a review for THIS HEAD SHA.
-                // The SHA check at the top of the loop (_reviewedPrHeadShas) handles in-session
-                // repeats; NeedsReviewFromAsync covers cross-session duplicates (prior PM comment
-                // on unchanged HEAD). It requires an SE "ready for review" comment between PM
-                // reviews — but when HEAD SHA has changed (new commits), that's sufficient signal
-                // that re-review is warranted, so we bypass the comment-marker gate.
-                var hasPriorReview = _reviewedPrHeadShas.ContainsKey(prNumber);
-                if (!_forceApprovalPrs.Contains(prNumber) &&
-                    !hasPriorReview &&
-                    !await _prWorkflow.NeedsReviewFromAsync(prNumber, "ProgramManager", ct))
-                {
-                    _reviewedPrHeadShas[prNumber] = pr.HeadSha;
-                    continue;
-                }
+                // Idempotency: PRs already PM-approved are skipped via the label check above.
+                // Otherwise, if HEAD SHA differs from the one we last reviewed (or we've never
+                // reviewed this PR in this session), we re-review. SE pushing new commits after
+                // CHANGES REQUESTED advances HEAD SHA — that IS the re-review trigger.
+                // (Force-approval PRs always proceed regardless of any idempotency check.)
 
                 Logger.LogInformation("PM reviewing PR #{Number}: {Title} (Phase 3 — final review after TE tests)",
                     pr.Number, pr.Title);
