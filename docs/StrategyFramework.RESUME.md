@@ -31,6 +31,26 @@ Wrote experiment record: run=20260420T074258Z task=T4 winner=agentic-delegation
 Strategy framework shipped winner agentic-delegation for task T4 on PR #2071
 ```
 
+**T2 (PR #2072)** — second Strategy Framework cycle (different winner):
+
+```
+Orchestrating 3 strategies for task T2: baseline, mcp-enhanced, agentic-delegation
+BaselineCodeGenerator wrote 9/9 file(s) for task T2
+AgenticDelegationStrategy succeeded for task T2 (tool-calls: 65, wall: 242.3506523s)
+Wrote experiment record: run=20260420T074258Z task=T2 winner=baseline
+Strategy framework shipped winner baseline for task T2 on PR #2072
+```
+
+**T3 (PR #2073)** auto-kicked off in parallel as soon as T2 shipped — proves the
+`_pastImplementationPrs` HashSet correctly lets SE Leader move on without
+blocking on previous PRs in review.
+
+**Full review/rework cycle validated** — PR #2071 received PM CHANGES REQUESTED
+(blank screenshot — content quality issue, not a state machine bug), SE recognized
+ownership via the restored `_pastImplementationPrs` set, attempted rework once,
+hit `MaxReworkCycles` limit, requested FinalApproval, PM approved on second
+review (HEAD-SHA-keyed map allowed re-review). End-to-end loop closes.
+
 Answer to the long-standing question "has the agentic third option ever finished with correct output yet?" — **YES, as of this run.**
 
 ## Session commits (2026-04-20 evening)
