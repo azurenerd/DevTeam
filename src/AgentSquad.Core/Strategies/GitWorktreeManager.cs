@@ -196,7 +196,15 @@ public class GitWorktreeManager
         // On Windows, lingering file handles from just-killed subprocesses can
         // cause `git worktree remove` or Directory.Delete to fail with sharing
         // violations. Retry with backoff before giving up. (p3-cleanup-impl)
-        const int MaxAttempts = 4;
+        //
+        // Retry schedule was originally 4 attempts @ 250/500/750ms (<1.5s total),
+        // which was too short when MCP server child processes had just been
+        // killed — OS file handles can hold locks for several seconds as the
+        // descriptor table unwinds. Bumped to 6 attempts with exponential
+        // backoff (250/500/1000/2000/4000ms ≈ 7.75s total) to give child-process
+        // handles time to drain before giving up and leaving a ghost dir.
+        // Ref: c-agents-file-lock follow-up.
+        const int MaxAttempts = 6;
         Exception? lastException = null;
         var skipGitRemove = false;
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
@@ -224,7 +232,8 @@ public class GitWorktreeManager
                 }
                 else if (attempt < MaxAttempts - 1)
                 {
-                    await Task.Delay(250 * (attempt + 1), ct);
+                    // Exponential backoff: 250, 500, 1000, 2000, 4000ms.
+                    await Task.Delay(250 * (int)Math.Pow(2, attempt), ct);
                     continue;
                 }
 
@@ -240,12 +249,18 @@ public class GitWorktreeManager
                     catch (IOException ioEx) when (delAttempt < MaxAttempts - 1)
                     {
                         _logger.LogDebug(ioEx, "Directory delete retry {Attempt} for {Path}", delAttempt + 1, worktreePath);
-                        await Task.Delay(250 * (delAttempt + 1), ct);
+                        // Force .NET to release any managed file handles before retrying —
+                        // MCP bridge clients or stray FileStreams we own may be the locker.
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        await Task.Delay(250 * (int)Math.Pow(2, delAttempt), ct);
                     }
                     catch (UnauthorizedAccessException uaEx) when (delAttempt < MaxAttempts - 1)
                     {
                         _logger.LogDebug(uaEx, "Directory delete access-retry {Attempt} for {Path}", delAttempt + 1, worktreePath);
-                        await Task.Delay(250 * (delAttempt + 1), ct);
+                        GC.Collect();
+                        GC.WaitForPendingFinalizers();
+                        await Task.Delay(250 * (int)Math.Pow(2, delAttempt), ct);
                     }
                     catch (Exception ex2)
                     {

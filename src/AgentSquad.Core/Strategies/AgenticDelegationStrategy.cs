@@ -140,6 +140,12 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
                 "AgenticDelegationStrategy succeeded for task {Task} (tool-calls: {ToolCalls}, wall: {Wall}s)",
                 invocation.Task.TaskId, result.ToolCallCount, result.WallClock.TotalSeconds);
 
+            // Diagnostic: persist agentic session log for forensic analysis. Agentic
+            // can report "succeeded" but still produce an empty patch (the CLI ran
+            // its tool calls but wrote nothing to the worktree); without the log we
+            // can't see WHY. File is best-effort — don't fail the strategy on IO error.
+            TryPersistAgenticLog(invocation, result);
+
             return new StrategyExecutionResult
             {
                 StrategyId = Id,
@@ -171,6 +177,35 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
     {
         const int MaxLogChars = 8 * 1024;
         return log.Length <= MaxLogChars ? log : log[..MaxLogChars] + "\n… [truncated]";
+    }
+
+    private void TryPersistAgenticLog(StrategyInvocation invocation, AgenticSessionResult result)
+    {
+        try
+        {
+            var dir = Path.Combine(AppContext.BaseDirectory, "experiment-data");
+            Directory.CreateDirectory(dir);
+            var safeTask = new string((invocation.Task.TaskId ?? "unknown")
+                .Select(c => char.IsLetterOrDigit(c) || c is '-' or '_' ? c : '-').ToArray());
+            var stamp = DateTimeOffset.UtcNow.ToString("yyyyMMddTHHmmssZ");
+            var fileName = $"{stamp}-{safeTask}-agentic.log";
+            var fullPath = Path.Combine(dir, fileName);
+            var header = $"# Agentic session log\n" +
+                         $"# stamp: {stamp}\n" +
+                         $"# task: {invocation.Task.TaskId} — {invocation.Task.TaskTitle}\n" +
+                         $"# worktree: {invocation.WorktreePath}\n" +
+                         $"# succeeded: {result.Succeeded}\n" +
+                         $"# tool-calls: {result.ToolCallCount}\n" +
+                         $"# wall: {result.WallClock.TotalSeconds:F1}s\n" +
+                         $"# exit: {result.ExitCode}\n" +
+                         $"# ----- stdout/stderr begin -----\n";
+            File.WriteAllText(fullPath, header + (result.LogBuffer ?? ""));
+            _logger.LogInformation("Persisted agentic session log: {Path}", fullPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to persist agentic session log for task {Task}", invocation.Task.TaskId);
+        }
     }
 }
 
