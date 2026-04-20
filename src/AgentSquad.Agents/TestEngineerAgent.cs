@@ -2859,6 +2859,114 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     }
 
     /// <summary>
+    /// Ensures at least one UI Playwright test spec exists in the workspace. If the AI produced none
+    /// (and none existed previously), injects a project-agnostic AppSmokeTests.cs that navigates to /
+    /// and asserts the app responded successfully and shows no obvious error banner. Keeps the UI-tier
+    /// meaningful on scaffold PRs — otherwise the runner reports "0 passed, 0 failed, 0 skipped".
+    /// </summary>
+    private async Task EnsureUiSmokeTestExistsAsync(CancellationToken ct)
+    {
+        if (_workspace is null) return;
+
+        var uiTestRoot = Path.Combine(_workspace.RepoPath, "tests");
+        if (!Directory.Exists(uiTestRoot)) return;
+
+        var uiTestDir = Directory.GetDirectories(uiTestRoot, "*UITests*", SearchOption.TopDirectoryOnly)
+            .FirstOrDefault();
+        if (uiTestDir is null) return;
+
+        // Does any .cs spec file under UITests/ declare [Fact] or [Theory]?
+        var existingSpec = Directory.EnumerateFiles(uiTestDir, "*.cs", SearchOption.AllDirectories)
+            .Any(f =>
+            {
+                try
+                {
+                    var content = File.ReadAllText(f);
+                    return content.Contains("[Fact]", StringComparison.Ordinal)
+                        || content.Contains("[Theory]", StringComparison.Ordinal);
+                }
+                catch { return false; }
+            });
+
+        if (existingSpec)
+            return;
+
+        var projectName = GetSourceProjectName();
+        var smokePath = Path.Combine(uiTestDir, "AppSmokeTests.cs");
+        var relSmokePath = Path.GetRelativePath(_workspace.RepoPath, smokePath).Replace('\\', '/');
+
+        var content =
+            "using Microsoft.Playwright;\n" +
+            "using Xunit;\n" +
+            $"using {projectName}.UITests.Infrastructure;\n\n" +
+            $"namespace {projectName}.UITests;\n\n" +
+            "/// <summary>\n" +
+            "/// Auto-generated smoke test — runs when no other UI specs exist. Verifies the app boots\n" +
+            "/// at / and does not render a red error banner or stub/placeholder text. This keeps the\n" +
+            "/// UI tier meaningful on scaffold PRs (prevents \"0 passed / 0 failed / 0 skipped\").\n" +
+            "/// </summary>\n" +
+            "[Collection(\"Playwright\")]\n" +
+            "[Trait(\"Category\", \"UI\")]\n" +
+            "public class AppSmokeTests\n" +
+            "{\n" +
+            "    private readonly PlaywrightFixture _fx;\n" +
+            "    public AppSmokeTests(PlaywrightFixture fx) => _fx = fx;\n\n" +
+            "    [Fact]\n" +
+            "    public async Task HomePage_LoadsWithoutErrorBanner()\n" +
+            "    {\n" +
+            "        var (page, context) = await _fx.NewPageWithContextAsync(nameof(HomePage_LoadsWithoutErrorBanner));\n" +
+            "        try\n" +
+            "        {\n" +
+            "            var response = await page.GotoAsync(\"/\", new PageGotoOptions { WaitUntil = WaitUntilState.NetworkIdle, Timeout = 30000 });\n" +
+            "            Assert.NotNull(response);\n" +
+            "            Assert.True(response!.Ok, $\"Home page returned HTTP {response.Status} {response.StatusText}\");\n\n" +
+            "            var html = await page.ContentAsync();\n\n" +
+            "            // Common server-rendered error signals that must never appear in the baseline scaffold.\n" +
+            "            string[] forbiddenSubstrings =\n" +
+            "            {\n" +
+            "                \"An unhandled error has occurred\",\n" +
+            "                \"An unhandled exception\",\n" +
+            "                \"Scaffold stub\",\n" +
+            "                \"data loading not yet implemented\",\n" +
+            "                \"HTTP Error 500\",\n" +
+            "                \"Server Error in '/' Application\"\n" +
+            "            };\n" +
+            "            foreach (var needle in forbiddenSubstrings)\n" +
+            "            {\n" +
+            "                Assert.False(\n" +
+            "                    html.Contains(needle, StringComparison.OrdinalIgnoreCase),\n" +
+            "                    $\"Home page HTML contains forbidden error signal: \\\"{needle}\\\"\");\n" +
+            "            }\n\n" +
+            "            // Visible role=alert / .error-banner / .alert-danger elements must not carry error text.\n" +
+            "            var alerts = await page.Locator(\".error-banner, .alert-danger, [role='alert']\").AllAsync();\n" +
+            "            foreach (var alert in alerts)\n" +
+            "            {\n" +
+            "                if (!await alert.IsVisibleAsync()) continue;\n" +
+            "                var alertText = (await alert.InnerTextAsync()).Trim();\n" +
+            "                if (alertText.Length == 0) continue;\n" +
+            "                Assert.False(\n" +
+            "                    alertText.Contains(\"error\", StringComparison.OrdinalIgnoreCase)\n" +
+            "                    || alertText.Contains(\"fail\", StringComparison.OrdinalIgnoreCase)\n" +
+            "                    || alertText.Contains(\"not found\", StringComparison.OrdinalIgnoreCase),\n" +
+            "                    $\"Home page shows visible error alert: {alertText}\");\n" +
+            "            }\n\n" +
+            "            await PlaywrightFixture.CaptureScreenshotAsync(page, nameof(HomePage_LoadsWithoutErrorBanner));\n" +
+            "        }\n" +
+            "        finally\n" +
+            "        {\n" +
+            "            await PlaywrightFixture.StopTracingAsync(context, nameof(HomePage_LoadsWithoutErrorBanner));\n" +
+            "            await context.DisposeAsync();\n" +
+            "        }\n" +
+            "    }\n" +
+            "}\n";
+
+        await _workspace.WriteFileAsync(relSmokePath, content, ct);
+        Logger.LogInformation(
+            "TestEngineer: injected UI smoke test {Path} (no UI specs were generated by AI; keeps UI tier ≥ 1 test).",
+            relSmokePath);
+    }
+
+    /// <summary>
     /// Generates a test .csproj with appropriate NuGet references for the project type.
     /// </summary>
     private static string GenerateTestCsproj(string sourceProjectName, string testDir, bool isBlazor)
@@ -3271,7 +3379,24 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             f.Path.Contains("UITests", StringComparison.OrdinalIgnoreCase) ||
             f.Path.Contains("Playwright", StringComparison.OrdinalIgnoreCase));
 
-        if (hasUITests && _playwrightRunner is not null && wsConfig.EnableUITests)
+        // Detect whether this project has any UI surface worth smoke-testing.
+        // Project-agnostic: presence of common UI component/view extensions.
+        var hasUiSurface = Directory.EnumerateFiles(_workspace.RepoPath, "*.*", SearchOption.AllDirectories)
+            .Any(f =>
+            {
+                var ext = Path.GetExtension(f).ToLowerInvariant();
+                return ext is ".razor" or ".cshtml" or ".tsx" or ".jsx" or ".vue" or ".svelte";
+            });
+
+        // If UI tests are enabled and this is a UI project, we will guarantee ≥1 smoke test exists —
+        // either because AI already produced one, or we inject a minimal one below. This prevents
+        // the "UI Tests: 0 passed, 0 failed, 0 skipped" outcome on scaffold PRs.
+        var shouldGuaranteeUiTest = _playwrightRunner is not null
+            && wsConfig.EnableUITests
+            && wsConfig.UITestCommand is not null
+            && hasUiSurface;
+
+        if ((hasUITests || shouldGuaranteeUiTest) && _playwrightRunner is not null && wsConfig.EnableUITests)
         {
             var uiTestDir = Path.Combine(_workspace.RepoPath, "tests");
             var existingPlaywright = Directory.Exists(uiTestDir) &&
@@ -3291,6 +3416,16 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         // Write test files
         foreach (var file in testFiles)
             await _workspace.WriteFileAsync(file.Path, file.Content, ct);
+
+        // If we should guarantee a UI smoke test, check whether any UI spec file now lives in the
+        // workspace (either from AI-generated testFiles or already on disk from a prior PR).
+        // A "UI spec" = a .cs file under a *UITests* directory that contains [Fact] or [Theory].
+        // If none exists, inject a project-agnostic AppSmokeTests.cs so the UI-tier tier always runs
+        // at least one assertion against the running app.
+        if (shouldGuaranteeUiTest)
+        {
+            await EnsureUiSmokeTestExistsAsync(ct);
+        }
 
         // Ensure a unit/integration test .csproj exists — scaffold one if AI didn't generate it
         EnsureTestProjectExists(testFiles);
