@@ -2988,6 +2988,44 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         try
         {
             var myPRs = await PrWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
+
+            // First pass: populate _pastImplementationPrs with ALL open PRs we own.
+            // This restores in-memory ownership after a restart so HandleChangesRequestedAsync
+            // (which filters by CurrentPrNumber OR _pastImplementationPrs.Contains(n)) will
+            // recognize late review feedback from PM/Architect on shipped PRs.
+            foreach (var pr in myPRs)
+            {
+                if (string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+                {
+                    _pastImplementationPrs.Add(pr.Number);
+                }
+            }
+
+            // Also seed rework queue for PRs with unaddressed CHANGES REQUESTED feedback,
+            // regardless of whether the "ready-for-review" label is still present (PM/Architect
+            // typically clears it when requesting changes). The older loop below only handles
+            // PRs still labelled "ready-for-review" for merge-recovery.
+            foreach (var pr in myPRs)
+            {
+                if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+                    continue;
+                // Skip already approved (pm-approved) PRs — they go through merge path
+                if (pr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
+                    continue;
+                // Skip if still ready-for-review (handled by the merge-recovery loop below)
+                if (pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                    continue;
+
+                var pendingFb = await PrWorkflow.GetPendingChangesRequestedAsync(pr.Number, ct);
+                if (pendingFb is { } pending && !ReworkQueue.Any(r => r.PrNumber == pr.Number))
+                {
+                    ReworkQueue.Enqueue(new ReworkItem(pr.Number, pr.Title, pending.Feedback, pending.Reviewer));
+                    Logger.LogInformation(
+                        "SE recovered unaddressed changes-requested feedback on PR #{PrNumber} from {Reviewer} (no ready-for-review label)",
+                        pr.Number, pending.Reviewer);
+                }
+            }
+
             foreach (var pr in myPRs)
             {
                 if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase)
