@@ -22,7 +22,7 @@ public class StrategyFrameworkConfig
     /// symlink/junction rejection) to be safe. Order is ignored; the orchestrator
     /// runs enabled strategies in parallel.
     /// </summary>
-    public List<string> EnabledStrategies { get; set; } = new() { "baseline", "mcp-enhanced" };
+    public List<string> EnabledStrategies { get; set; } = new();
 
     /// <summary>
     /// How often strategies run.

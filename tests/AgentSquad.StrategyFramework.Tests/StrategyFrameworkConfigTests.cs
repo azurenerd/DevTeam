@@ -19,13 +19,15 @@ public class StrategyFrameworkConfigTests
     }
 
     [Fact]
-    public void Default_enabled_strategies_exclude_agentic_until_sandbox_hardened()
+    public void Default_enabled_strategies_is_empty_to_force_explicit_opt_in()
     {
         var cfg = new StrategyFrameworkConfig();
 
-        Assert.Contains("baseline", cfg.EnabledStrategies);
-        Assert.Contains("mcp-enhanced", cfg.EnabledStrategies);
-        Assert.DoesNotContain("agentic-delegation", cfg.EnabledStrategies);
+        // Empty default prevents .NET IConfiguration.Bind from APPENDING
+        // config file entries to the default list (which produced duplicates
+        // like baseline,mcp-enhanced,baseline,agentic-delegation at runtime).
+        // Every deployment must explicitly list EnabledStrategies in config.
+        Assert.Empty(cfg.EnabledStrategies);
     }
 
     [Fact]
