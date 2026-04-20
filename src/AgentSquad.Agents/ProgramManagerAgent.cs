@@ -965,9 +965,15 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
-                // Skip if we've already posted a review comment (GitHub check)
-                // BUT always process force-approval PRs regardless
+                // Idempotency: skip if we've already posted a review for THIS HEAD SHA.
+                // The SHA check at the top of the loop (_reviewedPrHeadShas) handles in-session
+                // repeats; NeedsReviewFromAsync covers cross-session duplicates (prior PM comment
+                // on unchanged HEAD). It requires an SE "ready for review" comment between PM
+                // reviews — but when HEAD SHA has changed (new commits), that's sufficient signal
+                // that re-review is warranted, so we bypass the comment-marker gate.
+                var hasPriorReview = _reviewedPrHeadShas.ContainsKey(prNumber);
                 if (!_forceApprovalPrs.Contains(prNumber) &&
+                    !hasPriorReview &&
                     !await _prWorkflow.NeedsReviewFromAsync(prNumber, "ProgramManager", ct))
                 {
                     _reviewedPrHeadShas[prNumber] = pr.HeadSha;
