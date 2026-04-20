@@ -323,7 +323,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         await EvaluateResourceNeedsAsync(ct);
 
                     // Priority 0: Continue work on our own in-progress PR before anything else
-                    if (CurrentPrNumber is not null && !await IsOwnPrReadyForReview(ct))
+                    if (CurrentPrNumber is not null && !await IsOwnPrPastImplementationAsync(ct))
                     {
                         await ContinueOwnPrImplementationAsync(ct);
                         continue; // Skip reviews until our own PR is done
@@ -3103,8 +3103,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                // Look for in-progress PRs (not ready-for-review — those are handled elsewhere)
-                if (pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
+                // Look for in-progress PRs (not past implementation — those are handled by
+                // review / merge flows, not by resuming implementation).
+                if (PullRequestWorkflow.Labels.IsPastImplementation(pr.Labels))
                     continue;
 
                 // Found an in-progress PR that belongs to the PE
@@ -3126,9 +3127,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     }
 
     /// <summary>
-    /// Check if our currently tracked PR is already ready for review (vs still in progress).
+    /// Check whether our currently tracked PR has progressed past the SE's implementation phase
+    /// (has ready-for-review, architect-approved, pm-approved, approved, or tests-added label).
+    /// Reviewers strip the `ready-for-review` label when they act and replace it with downstream
+    /// approval labels — so the SE must treat any of those as "past implementation" and avoid
+    /// re-entering ContinueOwnPrImplementationAsync (which would re-checkout the branch and
+    /// clobber reviewer-produced commits).
     /// </summary>
-    private async Task<bool> IsOwnPrReadyForReview(CancellationToken ct)
+    private async Task<bool> IsOwnPrPastImplementationAsync(CancellationToken ct)
     {
         if (CurrentPrNumber is null)
             return false;
@@ -3136,7 +3142,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         try
         {
             var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
-            return pr?.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase) == true;
+            return pr is not null && PullRequestWorkflow.Labels.IsPastImplementation(pr.Labels);
         }
         catch
         {

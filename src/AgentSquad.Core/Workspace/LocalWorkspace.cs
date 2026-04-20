@@ -58,6 +58,10 @@ public class LocalWorkspace
             {
                 _logger.LogInformation("[{Agent}] Workspace exists at {Path}, fetching latest", _agentId, RepoPath);
                 await RunGitAsync("fetch", "--all", ct: ct);
+                // Self-heal any mid-rebase/merge/cherry-pick state left behind by a
+                // crashed prior run before attempting checkout.
+                await AbortInProgressOperationsAsync(ct);
+                await RunGitAsync("reset", "--hard", "HEAD", ct: ct, throwOnError: false);
                 await RunGitAsync("checkout", _defaultBranch, ct: ct);
                 await RunGitAsync("reset", "--hard", $"origin/{_defaultBranch}", ct: ct);
                 await RunGitAsync("clean", "-fd", ct: ct);
@@ -116,6 +120,11 @@ public class LocalWorkspace
         try
         {
             await RunGitAsync("fetch", "origin", ct: ct);
+            // Abort any in-progress rebase/merge/cherry-pick from a prior failed
+            // operation — leftover state blocks checkout with "resolve your current
+            // index first". Must happen before reset --hard because reset is also
+            // blocked in some wedged states.
+            await AbortInProgressOperationsAsync(ct);
             // Clean uncommitted changes before checkout to prevent
             // "Please commit your changes or stash them before you switch branches"
             await RunGitAsync("reset", "--hard", "HEAD", ct: ct);
@@ -164,6 +173,13 @@ public class LocalWorkspace
         await _gitLock.WaitAsync(ct);
         try
         {
+            // Abort any in-progress rebase/merge/cherry-pick from a prior failed
+            // operation — leftover state blocks checkout with "resolve your current
+            // index first", causing infinite retry loops.
+            await AbortInProgressOperationsAsync(ct);
+            // Discard any dirty working tree so checkout doesn't refuse due to
+            // "Please commit your changes or stash them" from a prior attempt.
+            await RunGitAsync("reset", "--hard", "HEAD", ct: ct, throwOnError: false);
             await RunGitAsync("fetch", "origin", branchName, ct: ct, throwOnError: false);
             await RunGitAsync("checkout", branchName, ct: ct);
             // Reset to remote HEAD to pick up any new commits pushed by other agents
@@ -173,6 +189,44 @@ public class LocalWorkspace
         finally
         {
             _gitLock.Release();
+        }
+    }
+
+    /// <summary>
+    /// Detect and abort any in-progress git operation (rebase/merge/cherry-pick/revert/am/bisect)
+    /// that would otherwise block subsequent checkouts with "you need to resolve your current index
+    /// first". Called from SyncWithMainAsync / CheckoutBranchAsync to self-heal wedged workspaces.
+    /// </summary>
+    private async Task AbortInProgressOperationsAsync(CancellationToken ct)
+    {
+        // git dir can be the repo's .git directory, or for worktrees a pointer file.
+        // Query git directly rather than probing file paths.
+        var gitDirResult = await RunGitAsync("rev-parse", "--git-dir", ct: ct, throwOnError: false);
+        if (!gitDirResult.Success || string.IsNullOrWhiteSpace(gitDirResult.StandardOutput))
+            return;
+
+        var gitDir = gitDirResult.StandardOutput.Trim();
+        if (!Path.IsPathRooted(gitDir))
+            gitDir = Path.Combine(RepoPath, gitDir);
+
+        // Each probe: (marker path, abort command)
+        var probes = new (string marker, string command)[]
+        {
+            (Path.Combine(gitDir, "rebase-merge"),  "rebase"),
+            (Path.Combine(gitDir, "rebase-apply"),  "rebase"),
+            (Path.Combine(gitDir, "MERGE_HEAD"),    "merge"),
+            (Path.Combine(gitDir, "CHERRY_PICK_HEAD"), "cherry-pick"),
+            (Path.Combine(gitDir, "REVERT_HEAD"),   "revert")
+        };
+
+        foreach (var (marker, command) in probes)
+        {
+            var exists = File.Exists(marker) || Directory.Exists(marker);
+            if (!exists) continue;
+
+            _logger.LogWarning("[{Agent}] Detected in-progress {Op} state at {Marker} — aborting",
+                _agentId, command, marker);
+            await RunGitAsync(command, "--abort", ct: ct, throwOnError: false);
         }
     }
 

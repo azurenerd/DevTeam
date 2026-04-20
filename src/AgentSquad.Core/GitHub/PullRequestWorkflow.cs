@@ -47,6 +47,31 @@ public partial class PullRequestWorkflow
         public const string LowComplexity = "complexity-low";
         /// <summary>Review risk gating — requires human approval before agent continues.</summary>
         public const string HumanReviewRequired = "human-review-required";
+
+        /// <summary>
+        /// Labels signalling that a PR has progressed past the Software Engineer's
+        /// implementation phase. When any of these are present the SE must not
+        /// re-enter "continue implementation" logic — further changes happen only
+        /// via explicit ChangesRequested events.
+        /// </summary>
+        public static readonly string[] PastImplementationLabels = new[]
+        {
+            ReadyForReview,
+            ArchitectApproved,
+            PmApproved,
+            Approved,
+            TestsAdded
+        };
+
+        /// <summary>
+        /// Returns true if any PR label indicates the PR has progressed past the SE's
+        /// implementation phase (ready-for-review or any downstream approval/test label).
+        /// </summary>
+        public static bool IsPastImplementation(IEnumerable<string>? labels)
+        {
+            if (labels is null) return false;
+            return labels.Any(l => PastImplementationLabels.Contains(l, StringComparer.OrdinalIgnoreCase));
+        }
     }
 
     private readonly ConflictDetector? _conflictDetector;
