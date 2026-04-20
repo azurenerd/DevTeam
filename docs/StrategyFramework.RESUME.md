@@ -9,7 +9,31 @@ plus the dependency edges. Re-import into a new session's SQL db on resume.
 - Done: 32 / 56 (Phase 1 ✅, Phase 2 ✅, CLI→MCP bridge ✅, McpEnhancedStrategy ✅)
 - Pending: 24
 - Solution build: ✅ clean
-- Tests: ✅ 606 / 616 (10 pre-existing Dashboard E2E env failures, unrelated)
+- Tests: ✅ 728 / 728 (was 606/616 — 10 Dashboard E2E env failures are now passing in current runs)
+
+## Resolved follow-ups
+
+- **`agentic-empty-patch`** — ✅ RESOLVED (commit `54ecc47`, 2026-04-20)
+  - **Root cause**: the agentic `copilot --allow-all` session runs
+    `git add -A && git commit` itself during its tool use to checkpoint its
+    progress. After the session ended, `git diff HEAD` inside the worktree was
+    empty — the agent's work was already committed — producing the
+    `patchSizeBytes=0 / failureReason=empty patch` bug that prevented
+    agentic-delegation from ever winning a task.
+  - **Fix**: `WorktreeHandle` now carries the base SHA, and `ExtractPatchAsync`
+    diffs against that base SHA instead of HEAD. This uniformly captures
+    changes whether the strategy committed them, staged them, or left them
+    untracked.
+  - **Also**: `.sandbox/` (agentic CLI scaffolding: HOME/APPDATA/LOCALAPPDATA
+    overrides with deep node_modules paths that blew past Windows MAX_PATH)
+    now excluded via the worktree-local `info/exclude` — robust against the
+    user's global `core.excludesfile` already listing `.sandbox` (which
+    previously broke pathspec-exclude with "paths are ignored by one of your
+    .gitignore files").
+  - **Validation**: live val-e2e T1 run `20260420T061242Z` →
+    `agentic-delegation: succeeded=true, patchSizeBytes=35377`,
+    `winnerStrategyId=agentic-delegation`, shipped as PR #2070. 183/183
+    strategy tests green, 728/728 total.
 
 ## Critical-path follow-up order
 
