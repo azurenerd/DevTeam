@@ -526,6 +526,21 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (recoveredIntegration?.IssueNumber is not null)
                     _integrationIssueNumber = recoveredIntegration.IssueNumber;
 
+                // Re-establish native GitHub blocked-by dependency links. These come from a separate
+                // API call and are NOT restored by LoadTasksAsync (which only reads issue metadata).
+                // AddIssueDependencyAsync is idempotent (422 on duplicate is swallowed), so safe
+                // to call every time — this ensures the UI shows "Blocked by" indicators after
+                // any resume / mini-reset where issues were preserved but links weren't.
+                try
+                {
+                    LogActivity("planning", "🔗 Re-establishing task dependency links from restored issues");
+                    await _taskManager.LinkTaskDependenciesAsync(_taskManager.Tasks.ToList(), ct);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogWarning(ex, "Dependency link restoration failed (non-fatal)");
+                }
+
                 _planningComplete = true;
                 UpdateStatus(AgentStatus.Working,
                     $"Loaded {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)");
