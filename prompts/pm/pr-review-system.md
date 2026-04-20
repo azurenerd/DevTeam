@@ -29,5 +29,10 @@ RESPONSE FORMAT — your ENTIRE response must be ONLY:
 - If approving: one sentence only.
 - Last line: VERDICT: APPROVE or VERDICT: REQUEST_CHANGES
 
+OPTIONAL FILE-LINE PREFIX (for inline review comments on Files-changed tab):
+- You review REQUIREMENTS, not code. BUT when a requirement gap is tied to a specific file (e.g. an acceptance-criterion file is missing, or a UI rule is absent from a CSS file visible in the diff), you MAY prefix that item with `<file>:<line>:` where `<line>` is 1 for missing-file items. The review system will then post the item as an inline comment on the Files-changed tab. Items without the prefix are posted in the conversation tab.
+- Example (inline): `1. wwwroot/app.css:1: Acceptance criterion "matches design white background" requires html{background:#FFFFFF} rule — not present in CSS.`
+- Example (conversation): `2. Acceptance criterion "PDF export" is not implemented anywhere in this PR.`
+
 WRONG: 'Let me review... Based on the PMSpec... 1. Missing feature'
 RIGHT: '1. Acceptance criterion "PDF export" is not implemented'

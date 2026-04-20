@@ -1153,7 +1153,40 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
-                    await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
+                    // WS2 PM inline path: if review body has file:line: prefixed items,
+                    // post them as inline review comments on the Files-changed tab.
+                    // Otherwise fall back to the plain conversation-tab comment.
+                    var pmInlineComments = ExtractInlineCommentsFromText(reviewBody);
+                    if (pmInlineComments.Count > 0 && _config.Review.EnableInlineComments)
+                    {
+                        try
+                        {
+                            var maxInline = _config.Review.MaxInlineCommentsPerReview;
+                            var truncated = pmInlineComments.Take(maxInline).ToList();
+                            var inlineBody =
+                                $"**[ProgramManager] CHANGES REQUESTED**\n\n{reviewBody}\n\n" +
+                                $"_{truncated.Count} inline comment(s) below on specific files._";
+
+                            await _github.CreatePullRequestReviewWithCommentsAsync(
+                                pr.Number, inlineBody, "REQUEST_CHANGES", truncated, ct: ct);
+
+                            Logger.LogInformation(
+                                "PM posted {Count} inline review comments on PR #{Number}",
+                                truncated.Count, pr.Number);
+                        }
+                        catch (Exception inlineEx)
+                        {
+                            Logger.LogWarning(inlineEx,
+                                "PM inline review failed on PR #{Number} — falling back to plain comment",
+                                pr.Number);
+                            await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
+                        }
+                    }
+                    else
+                    {
+                        await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
+                    }
+
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
                     await RememberAsync(MemoryType.Decision,
@@ -2883,6 +2916,41 @@ public class ProgramManagerAgent : AgentBase
         var cut = text[..maxLength];
         var lastPeriod = cut.LastIndexOf('.');
         return lastPeriod > maxLength / 2 ? cut[..(lastPeriod + 1)] : cut + "…";
+    }
+
+    /// <summary>
+    /// WS2 PM inline-comment path: extract file:line: prefixed items from PM review text
+    /// so file-specific feedback (e.g. missing import, wrong CSS rule) lands on the
+    /// Files-changed tab instead of conversation-only. Empty list if no matches.
+    /// </summary>
+    private static List<InlineReviewComment> ExtractInlineCommentsFromText(string? text)
+    {
+        var results = new List<InlineReviewComment>();
+        if (string.IsNullOrWhiteSpace(text)) return results;
+
+        var pattern = @"(?m)^\s*(?:[-*]|\d+\.)?\s*[`""']?([\w./\\\-]+\.[a-zA-Z]{1,8})[`""']?:(\d+):\s*(.+?)(?:\r?\n(?=\s*(?:[-*]|\d+\.))|\r?\n\r?\n|\z)";
+        var regex = new System.Text.RegularExpressions.Regex(
+            pattern,
+            System.Text.RegularExpressions.RegexOptions.Singleline);
+
+        foreach (System.Text.RegularExpressions.Match match in regex.Matches(text))
+        {
+            var file = match.Groups[1].Value.Trim();
+            if (!int.TryParse(match.Groups[2].Value, out var line) || line < 1) continue;
+            var body = match.Groups[3].Value.Trim();
+            if (string.IsNullOrWhiteSpace(body)) continue;
+
+            file = file.Replace('\\', '/');
+
+            results.Add(new InlineReviewComment
+            {
+                FilePath = file,
+                Line = line,
+                Body = $"**[ProgramManager]** {body}"
+            });
+        }
+
+        return results;
     }
 
     /// <summary>
