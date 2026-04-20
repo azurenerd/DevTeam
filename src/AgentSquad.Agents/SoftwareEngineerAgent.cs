@@ -2307,11 +2307,24 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         string[] integrationVerbs = { "wire", "compose", "integrate", "finalize", "final ", "hook up", "connect", "render" };
         if (!integrationVerbs.Any(v => taskText.Contains(v))) return string.Empty;
 
-        string[] forbidden = {
-            "(placeholder)", "timeline placeholder", "heatmap placeholder",
-            "header placeholder", "component placeholder", "lorem ipsum",
-            "\"placeholder\"", "'placeholder'", "coming soon"
+        // Generic forbidden literals — no component names (project-agnostic).
+        // Catches the word "placeholder" as a standalone user-visible label in any form:
+        //   "(placeholder)", "placeholder", 'placeholder', "Widget placeholder", "Panel placeholder", etc.
+        string[] forbiddenLiterals = {
+            "(placeholder)",
+            "\"placeholder\"",
+            "'placeholder'",
+            "lorem ipsum",
+            "coming soon",
+            "todo — fill in",
+            "todo: fill in",
         };
+        // Matches any "<Word> placeholder" or standalone "placeholder" used as rendered text in
+        // markup nodes (e.g., `<p>Timeline placeholder</p>`, `<div>Heatmap placeholder</div>`).
+        // Anchored between a markup boundary (>) and the closing </, or between quotes in attribute values.
+        var placeholderRegex = new System.Text.RegularExpressions.Regex(
+            @"(?:>|""|')\s*(?:[A-Za-z][A-Za-z0-9_-]{0,40}\s+)?placeholder\s*(?:<|""|')",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
         try
         {
@@ -2340,13 +2353,24 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 var content = await GitHub.GetFileContentAsync(file, pr.HeadBranch, ct);
                 if (string.IsNullOrEmpty(content)) continue;
                 var lower = content.ToLowerInvariant();
-                foreach (var f in forbidden)
+
+                string? hit = null;
+                foreach (var lit in forbiddenLiterals)
                 {
-                    if (lower.Contains(f))
+                    if (lower.Contains(lit)) { hit = lit; break; }
+                }
+                if (hit is null)
+                {
+                    var m = placeholderRegex.Match(content);
+                    if (m.Success)
                     {
-                        violations.Add($"- `{file}` contains literal `{f}`");
-                        break; // one violation per file is enough
+                        var snippet = m.Value.Length > 60 ? m.Value.Substring(0, 60) + "…" : m.Value;
+                        hit = snippet.Trim();
                     }
+                }
+                if (hit is not null)
+                {
+                    violations.Add($"- `{file}` contains literal `{hit}`");
                 }
             }
 
