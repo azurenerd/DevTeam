@@ -80,6 +80,24 @@ public class ResearcherAgent : AgentBase
     {
         UpdateStatus(AgentStatus.Idle, "Waiting for research directives from PM");
 
+        // B1 mini-reset bootstrap: even if no research directive ever arrives (because
+        // PM considers research "already done" on a mini-reset with preserved Research.md),
+        // ensure design screenshots exist so PM's visual-diff review has an anchor.
+        // Safe no-op when screenshots are already present.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(5000, ct); // let repo clone finish
+                await EnsureDesignScreenshotsPresentAsync(ct);
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Startup EnsureDesignScreenshotsPresentAsync failed (non-fatal)");
+            }
+        }, ct);
+
         while (!ct.IsCancellationRequested)
         {
             ResearchDirective? currentDirective = null;

@@ -467,6 +467,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         enhancementIssues.Count);
                     return true;
                 }
+
+                // Path 4: Mini-reset bootstrap — Architecture.md has content but issues were cleared.
+                // Without this, the leader SE waits forever for enhancement issues that only it can create.
+                // Only the leader proceeds (CreateEngineeringPlanAsync is a one-writer operation).
+                if (IsLeader())
+                {
+                    Logger.LogInformation(
+                        "Mini-reset recovery: Architecture.md present, no enhancement issues yet. " +
+                        "Leader SE proceeding to create engineering plan.");
+                    return true;
+                }
             }
         }
         catch (Exception ex)
