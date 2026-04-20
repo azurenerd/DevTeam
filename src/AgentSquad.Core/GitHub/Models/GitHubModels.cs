@@ -7,6 +7,7 @@ public record AgentPullRequest
     public string Body { get; init; } = "";
     public string State { get; init; } = "open";
     public string HeadBranch { get; init; } = "";
+    public string HeadSha { get; init; } = "";
     public string BaseBranch { get; init; } = "main";
     public string? AssignedAgent { get; init; }
     public string Url { get; init; } = "";

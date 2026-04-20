@@ -41,7 +41,10 @@ public class ProgramManagerAgent : AgentBase
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
-    private readonly HashSet<int> _reviewedPrNumbers = new();
+    // Maps PR number → head SHA of last review. Re-review triggered when HEAD SHA changes
+    // (e.g., SE pushes fix commits after "CHANGES REQUESTED"). Keying by PR number alone
+    // would permanently blacklist PRs after first review.
+    private readonly Dictionary<int, string> _reviewedPrHeadShas = new();
     private readonly HashSet<int> _forceApprovalPrs = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
     private readonly ConcurrentQueue<ClarificationRequestMessage> _clarificationQueue = new();
@@ -888,7 +891,9 @@ public class ProgramManagerAgent : AgentBase
                 var openPRs = await _github.GetOpenPullRequestsAsync(ct);
                 foreach (var openPr in openPRs)
                 {
-                    if (_reviewedPrNumbers.Contains(openPr.Number)) continue;
+                    if (_reviewedPrHeadShas.TryGetValue(openPr.Number, out var reviewedSha)
+                        && string.Equals(reviewedSha, openPr.HeadSha, StringComparison.OrdinalIgnoreCase))
+                        continue;
                     // PM reviews after TE has added tests (Phase 3 gate)
                     if (openPr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase) &&
                         !openPr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
@@ -903,12 +908,14 @@ public class ProgramManagerAgent : AgentBase
 
             foreach (var prNumber in prNumbersToReview)
             {
-                // Skip if we've already reviewed this PR in this session
-                if (_reviewedPrNumbers.Contains(prNumber))
-                    continue;
-
                 var pr = await _github.GetPullRequestAsync(prNumber, ct);
                 if (pr is null)
+                    continue;
+
+                // Skip if we've already reviewed this exact HEAD SHA. Re-review if HEAD moved
+                // (e.g., SE pushed fixes after CHANGES REQUESTED).
+                if (_reviewedPrHeadShas.TryGetValue(prNumber, out var reviewedSha)
+                    && string.Equals(reviewedSha, pr.HeadSha, StringComparison.OrdinalIgnoreCase))
                     continue;
 
                 // Skip TestEngineer PRs — PM doesn't review test suites, only PE does
@@ -916,7 +923,7 @@ public class ProgramManagerAgent : AgentBase
                 if (authorRole.Contains("TestEngineer", StringComparison.OrdinalIgnoreCase)
                     || authorRole.Contains("Test Engineer", StringComparison.OrdinalIgnoreCase))
                 {
-                    _reviewedPrNumbers.Add(prNumber);
+                    _reviewedPrHeadShas[prNumber] = pr.HeadSha;
                     continue;
                 }
 
@@ -954,7 +961,7 @@ public class ProgramManagerAgent : AgentBase
                 // Skip PRs already PM-approved
                 if (pr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
                 {
-                    _reviewedPrNumbers.Add(prNumber);
+                    _reviewedPrHeadShas[prNumber] = pr.HeadSha;
                     continue;
                 }
 
@@ -963,7 +970,7 @@ public class ProgramManagerAgent : AgentBase
                 if (!_forceApprovalPrs.Contains(prNumber) &&
                     !await _prWorkflow.NeedsReviewFromAsync(prNumber, "ProgramManager", ct))
                 {
-                    _reviewedPrNumbers.Add(prNumber);
+                    _reviewedPrHeadShas[prNumber] = pr.HeadSha;
                     continue;
                 }
 
@@ -1119,7 +1126,7 @@ public class ProgramManagerAgent : AgentBase
                     }, ct);
                 }
 
-                _reviewedPrNumbers.Add(pr.Number);
+                _reviewedPrHeadShas[pr.Number] = pr.HeadSha;
             }
 
             // Reset status after reviews complete so dashboard doesn't show stale "Reviewing PR" text
@@ -1435,8 +1442,8 @@ public class ProgramManagerAgent : AgentBase
             "Review request from {Agent} for PR #{PrNumber}: {Title} ({ReviewType})",
             message.FromAgentId, message.PrNumber, message.PrTitle, message.ReviewType);
 
-        // Clear reviewed flag so reworked PRs get re-reviewed
-        _reviewedPrNumbers.Remove(message.PrNumber);
+        // Clear reviewed SHA so reworked PRs get re-reviewed
+        _reviewedPrHeadShas.Remove(message.PrNumber);
 
         // BUG FIX: Track FinalApproval requests so the PM auto-approves after max rework
         // cycles instead of continuing to request changes in an infinite loop.

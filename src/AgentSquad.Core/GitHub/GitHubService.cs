@@ -1998,6 +1998,7 @@ public class GitHubService : IGitHubService
             Body = pr.Body ?? "",
             State = pr.State.StringValue,
             HeadBranch = pr.Head.Ref,
+            HeadSha = pr.Head.Sha ?? "",
             BaseBranch = pr.Base.Ref,
             AssignedAgent = agentName,
             Url = pr.HtmlUrl,
