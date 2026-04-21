@@ -64,6 +64,15 @@ builder.Services.AddSingleton<HttpGateNotificationService>(sp =>
     return svc;
 });
 
+// HTTP-based strategies data service (polls Runner for strategy execution data)
+builder.Services.AddSingleton<IStrategiesDataService>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    var client = factory.CreateClient("RunnerApi");
+    var logger = sp.GetRequiredService<ILogger<HttpStrategiesDataService>>();
+    return new HttpStrategiesDataService(client, logger);
+});
+
 // Director CLI — runs local copilot processes, no Runner dependency
 builder.Services.AddSingleton<DirectorCliService>();
 
