@@ -4,6 +4,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Frameworks;
 using AgentSquad.Core.Mcp;
 
 namespace AgentSquad.Core.Strategies;
@@ -31,20 +32,37 @@ public static class StrategyFrameworkServiceCollectionExtensions
         services.AddSingleton<IMcpServerLocator, DefaultMcpServerLocator>();
 
         // Baseline ships enabled by default (plan decision).
-        services.AddSingleton<ICodeGenerationStrategy, BaselineStrategy>();
+        services.AddSingleton<BaselineStrategy>();
+        services.AddSingleton<ICodeGenerationStrategy>(sp => sp.GetRequiredService<BaselineStrategy>());
 
         // MCP-enhanced strategy. Active only when the master switch
         // (StrategyFrameworkConfig.Enabled) is on AND "mcp-enhanced" is listed
         // in EnabledStrategies — both default to off / present in config respectively,
         // so wiring the service here is safe.
-        services.AddSingleton<ICodeGenerationStrategy, McpEnhancedStrategy>();
+        services.AddSingleton<McpEnhancedStrategy>();
+        services.AddSingleton<ICodeGenerationStrategy>(sp => sp.GetRequiredService<McpEnhancedStrategy>());
 
         // Agentic-delegation strategy (Phase 3). Wired via DI but NOT in the
         // default EnabledStrategies list — opt-in by design because it runs
         // `copilot --allow-all` inside the sandboxed worktree. Enable only on
         // trusted dev machines.
         services.AddSingleton<AgenticPromptBuilder>();
-        services.AddSingleton<ICodeGenerationStrategy, AgenticDelegationStrategy>();
+        services.AddSingleton<AgenticDelegationStrategy>();
+        services.AddSingleton<ICodeGenerationStrategy>(sp => sp.GetRequiredService<AgenticDelegationStrategy>());
+
+        // ── Framework Adapters ──
+        // Wrap each built-in strategy as an IAgenticFrameworkAdapter for uniform orchestration.
+        services.AddSingleton<IAgenticFrameworkAdapter>(sp =>
+            new BaselineAdapter(sp.GetRequiredService<BaselineStrategy>()));
+        services.AddSingleton<IAgenticFrameworkAdapter>(sp =>
+            new McpEnhancedAdapter(sp.GetRequiredService<McpEnhancedStrategy>()));
+        services.AddSingleton<IAgenticFrameworkAdapter>(sp =>
+            new AgenticDelegationAdapter(sp.GetRequiredService<AgenticDelegationStrategy>()));
+
+        // External framework lifecycle (readiness & installation)
+        services.AddSingleton<SquadReadinessChecker>();
+        services.AddSingleton<IFrameworkLifecycle>(sp =>
+            sp.GetRequiredService<SquadReadinessChecker>());
 
         // Default sink is the null sink; Runner overrides with a SignalR-bound one.
         services.AddSingleton<IStrategyEventSink>(_ => NullStrategyEventSink.Instance);
