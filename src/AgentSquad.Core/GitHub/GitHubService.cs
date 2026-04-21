@@ -483,22 +483,26 @@ public class GitHubService : IGitHubService
                 // Get the set of files in the diff so we only comment on valid files
                 var files = await _client.PullRequest.Files(_owner, _repo, prNumber);
                 TrackRateLimit();
-                var diffFileNames = new HashSet<string>(files.Select(f => f.FileName), StringComparer.OrdinalIgnoreCase);
+                var diffFileNames = new HashSet<string>(
+                    files.Select(f => f.FileName.Replace('\\', '/')),
+                    StringComparer.OrdinalIgnoreCase);
 
                 // Build comments using the line-based API (no position mapping needed)
                 var mappedComments = new List<object>();
                 foreach (var comment in comments)
                 {
-                    if (!diffFileNames.Contains(comment.FilePath))
+                    var normalizedPath = comment.FilePath.Replace('\\', '/');
+                    if (!diffFileNames.Contains(normalizedPath))
                     {
-                        _logger.LogInformation("Inline comment on {File}:{Line} skipped for PR #{Number} — file not in PR diff",
+                        _logger.LogWarning(
+                            "Inline comment on {File}:{Line} skipped for PR #{Number} — file not in PR diff",
                             comment.FilePath, comment.Line, prNumber);
                         continue;
                     }
 
                     mappedComments.Add(new
                     {
-                        path = comment.FilePath,
+                        path = normalizedPath,
                         line = comment.Line,
                         side = "RIGHT",
                         body = comment.Body

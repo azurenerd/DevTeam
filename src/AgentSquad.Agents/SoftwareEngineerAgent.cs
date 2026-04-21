@@ -5117,7 +5117,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
             if (toSubmit.Count == 0) return;
 
-            var eventType = approved ? "APPROVE" : "REQUEST_CHANGES";
+            // Single-PAT setup: APPROVE/REQUEST_CHANGES are forbidden on own PRs.
+            // Always use COMMENT so inline comments land on the Files-changed tab.
+            var eventType = "COMMENT";
             var reviewBody = $"🔧 **[SoftwareEngineer] Inline Review** — {(approved ? "APPROVED" : "CHANGES REQUESTED")}\n\n" +
                 $"{summary}\n\n" +
                 $"_{toSubmit.Count} inline comment(s) below_";

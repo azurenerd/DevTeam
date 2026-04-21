@@ -1023,27 +1023,11 @@ public class ArchitectAgent : AgentBase
                     var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
                     await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
 
-                    // Submit formal GitHub APPROVE review only if agents have separate accounts
-                    if (_config.Review.EnableFormalReviews)
+                    // Submit inline review comments as COMMENT event (single-PAT setup: APPROVE is
+                    // forbidden on own PRs, so we always use COMMENT to keep comments on Files tab)
+                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
                     {
-                        try
-                        {
-                            if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
-                            {
-                                await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "APPROVE", ct);
-                            }
-                            else
-                            {
-                                await _github.AddPullRequestReviewAsync(pr.Number,
-                                    $"🏗️ **[Architect] APPROVED**\n\n{reasoning}", "APPROVE", ct);
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger.LogDebug(ex,
-                                "Formal APPROVE review failed on PR #{Number} (expected in single-PAT setup)",
-                                pr.Number);
-                        }
+                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
                     }
 
                     // Resolve previously-opened inline review threads now that rework is accepted
@@ -1080,10 +1064,10 @@ public class ArchitectAgent : AgentBase
                     await _prWorkflow.RequestChangesAsync(
                         pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}{riskSuffix}", ct);
 
-                    // Submit inline comments as a REQUEST_CHANGES review
+                    // Submit inline comments as COMMENT review (single-PAT: REQUEST_CHANGES forbidden)
                     if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
                     {
-                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "REQUEST_CHANGES", ct);
+                        await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
                     }
 
                     Logger.LogInformation("Architect requested changes on PR #{Number}", pr.Number);
@@ -1296,6 +1280,14 @@ public class ArchitectAgent : AgentBase
             LogActivity("review", "🔍 Reading PR code for architecture review");
             var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
+            // Get actual changed file list so LLM only references real paths in inline comments
+            var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
+            var fileListContext = changedFiles.Count > 0
+                ? "\n\n## Changed Files in This PR\n" +
+                  "Your inline comment `file` paths MUST exactly match one of these:\n" +
+                  string.Join("\n", changedFiles.Select(f => $"- `{f}`")) + "\n"
+                : "";
+
             // Get screenshot images for vision-based review
             var screenshotImages = new List<PullRequestWorkflow.ScreenshotImage>();
             var screenshotContext = "";
@@ -1406,6 +1398,7 @@ public class ArchitectAgent : AgentBase
                 $"## Architecture Document\n{architectureDoc}\n\n" +
                 $"## PM Specification\n{pmSpec}\n\n" +
                 issueContext +
+                fileListContext +
                 $"## Pull Request #{pr.Number}: {pr.Title}\n{pr.Body}\n\n" +
                 codeContext;
 
