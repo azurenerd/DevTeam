@@ -563,6 +563,40 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                 _taskTracker.CompleteStep(restoreStepId);
 
+                // Recover completion state from restored tasks to prevent duplicate work on restart
+                var restoredNonIntegration = _taskManager.Tasks
+                    .Where(t => t.Id != IntegrationTaskId)
+                    .ToList();
+                if (restoredNonIntegration.Count > 0 && restoredNonIntegration.All(EngineeringTaskIssueManager.IsTaskDone))
+                {
+                    _allTasksComplete = true;
+                    Logger.LogInformation("State recovery: all {Count} non-integration tasks are Done — setting _allTasksComplete", restoredNonIntegration.Count);
+
+                    // Check if integration PR was already created and/or merged
+                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                    var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+                    var allPRs = mergedPRs.Concat(openPRs).ToList();
+                    var integrationPR = allPRs.FirstOrDefault(pr =>
+                        pr.Title.Contains("Integration", StringComparison.OrdinalIgnoreCase) ||
+                        pr.HeadBranch.Contains("integration", StringComparison.OrdinalIgnoreCase));
+
+                    if (integrationPR is not null)
+                    {
+                        _integrationPrCreated = true;
+                        Logger.LogInformation("State recovery: found integration PR #{Number} (merged={IsMerged}) — setting _integrationPrCreated",
+                            integrationPR.Number, integrationPR.IsMerged);
+                    }
+
+                    // If all tasks done AND no open PRs AND at least one merged PR, engineering is complete
+                    if (openPRs.Count == 0 && mergedPRs.Count > 0)
+                    {
+                        _integrationPrCreated = true;
+                        _engineeringSignaled = true;
+                        Logger.LogInformation("State recovery: no open PRs + {Count} merged — setting _engineeringSignaled", mergedPRs.Count);
+                        UpdateStatus(AgentStatus.Idle, "Engineering complete (recovered state)");
+                    }
+                }
+
                 _planningComplete = true;
                 UpdateStatus(AgentStatus.Working,
                     $"Loaded {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)");
