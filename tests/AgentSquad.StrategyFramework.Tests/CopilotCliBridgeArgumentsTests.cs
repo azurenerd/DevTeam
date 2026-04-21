@@ -16,7 +16,7 @@ public class CopilotCliBridgeArgumentsTests
         Action<CopilotCliConfig>? configure = null)
     {
         var cfg = new AgentSquadConfig();
-        cfg.CopilotCli.ModelName = "claude-opus-4.7";
+        cfg.CopilotCli.ModelName = "claude-opus-4.6";
         cfg.CopilotCli.SilentMode = true;
         configure?.Invoke(cfg.CopilotCli);
         return new CopilotCliProcessManager(
@@ -36,7 +36,7 @@ public class CopilotCliBridgeArgumentsTests
         Assert.Contains("--no-ask-user", args);
         Assert.Contains("--no-auto-update", args);
         Assert.Contains("--model", args);
-        Assert.Contains("claude-opus-4.7", args);
+        Assert.Contains("claude-opus-4.6", args);
     }
 
     [Fact]

@@ -20,7 +20,7 @@ public class AgenticProcessManagerExtensionTests
         Action<StrategyFrameworkConfig>? configureFramework = null)
     {
         var cfg = new AgentSquadConfig();
-        cfg.CopilotCli.ModelName = "claude-opus-4.7";
+        cfg.CopilotCli.ModelName = "claude-opus-4.6";
         cfg.CopilotCli.SilentMode = true;
         configureCli?.Invoke(cfg.CopilotCli);
 

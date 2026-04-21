@@ -42,7 +42,7 @@ public class AgentUsageTrackerStrategyTests
     {
         var t = new AgentUsageTracker();
         t.RecordStrategyCall("baseline", "claude-sonnet-4.6", 1000, 500);
-        t.RecordStrategyCall("mcp-enhanced", "claude-opus-4.7", 2000, 500);
+        t.RecordStrategyCall("mcp-enhanced", "claude-opus-4.6", 2000, 500);
         Assert.True(t.GetTotalStrategyCost() > 0);
     }
 

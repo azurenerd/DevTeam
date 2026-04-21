@@ -43,7 +43,7 @@ public sealed record CopilotCliRequestOptions
     /// <summary>Target pool. Legacy callers default to <see cref="CopilotCliPool.SingleShot"/>.</summary>
     public CopilotCliPool Pool { get; init; } = CopilotCliPool.SingleShot;
 
-    /// <summary>Override the configured default model (e.g. <c>claude-opus-4.7</c>).</summary>
+    /// <summary>Override the configured default model (e.g. <c>claude-opus-4.6</c>).</summary>
     public string? ModelOverride { get; init; }
 
     /// <summary>Copilot CLI <c>--resume</c> session id for conversational continuity.</summary>
