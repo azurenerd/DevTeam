@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Workspace;
 
 namespace AgentSquad.Core.Strategies;
 
@@ -22,17 +23,23 @@ public class CandidateEvaluator
     private readonly GitWorktreeManager _worktree;
     private readonly IOptionsMonitor<StrategyFrameworkConfig> _cfg;
     private readonly ILlmJudge? _judge;
+    private readonly PlaywrightRunner? _screenshotRunner;
+    private readonly IOptionsMonitor<AgentSquadConfig>? _appCfg;
 
     public CandidateEvaluator(
         ILogger<CandidateEvaluator> logger,
         GitWorktreeManager worktree,
         IOptionsMonitor<StrategyFrameworkConfig> cfg,
-        ILlmJudge? judge = null)
+        ILlmJudge? judge = null,
+        PlaywrightRunner? screenshotRunner = null,
+        IOptionsMonitor<AgentSquadConfig>? appCfg = null)
     {
         _logger = logger;
         _worktree = worktree;
         _cfg = cfg;
         _judge = judge;
+        _screenshotRunner = screenshotRunner;
+        _appCfg = appCfg;
     }
 
     public async Task<EvaluationResult> EvaluateAsync(
@@ -162,6 +169,42 @@ public class CandidateEvaluator
         // Gate3 / Gate4 are stubs in Phase 1 — they pass unless integrators wire them.
         // (The dashboard still sees the gate:started/completed events.)
 
+        // Capture a preview screenshot of the running app (best-effort, never blocks evaluation).
+        byte[]? screenshotBytes = null;
+        if (task.IsWebTask && _screenshotRunner is not null && _screenshotRunner.IsReady)
+        {
+            var wsConfig = _appCfg?.CurrentValue?.Workspace;
+            if (wsConfig is not null && wsConfig.CaptureScreenshots)
+            {
+                try
+                {
+                    // Clone config so CaptureAppScreenshotAsync can mutate AppStartCommand safely
+                    var configSnapshot = new WorkspaceConfig
+                    {
+                        AppStartCommand = wsConfig.AppStartCommand,
+                        AppBaseUrl = wsConfig.AppBaseUrl,
+                        ScreenshotRenderDelaySeconds = wsConfig.ScreenshotRenderDelaySeconds,
+                        BuildCommand = wsConfig.BuildCommand,
+                        PlaywrightBrowsersCachePath = wsConfig.PlaywrightBrowsersCachePath,
+                        CaptureScreenshots = true,
+                    };
+                    screenshotBytes = await _screenshotRunner.CaptureAppScreenshotAsync(
+                        scratch.Path, configSnapshot, ct);
+                    if (screenshotBytes is not null)
+                    {
+                        _logger.LogInformation(
+                            "Captured {Size}-byte preview screenshot for strategy {Strategy} task {Task}",
+                            screenshotBytes.Length, exec.StrategyId, task.TaskId);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Screenshot capture failed for strategy {Strategy} task {Task}",
+                        exec.StrategyId, task.TaskId);
+                }
+            }
+        }
+
         return new CandidateResult
         {
             StrategyId = exec.StrategyId,
@@ -169,6 +212,7 @@ public class CandidateEvaluator
             Patch = patch,
             PatchSizeBytes = System.Text.Encoding.UTF8.GetByteCount(patch),
             Execution = exec,
+            ScreenshotBytes = screenshotBytes,
         };
     }
 

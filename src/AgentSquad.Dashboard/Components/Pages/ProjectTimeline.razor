@@ -1118,17 +1118,16 @@ else
         {
             ("baseline", "Baseline"),
             ("mcp-enhanced", "MCP-Enhanced"),
-            ("agentic", "Agentic Delegation"),
+            ("agentic-delegation", "Agentic Delegation"),
         };
 
         foreach (var (key, label) in strategies)
         {
-            // Winner maps to the canonical ready-for-review URL so existing captures still work
-            // without wiring changes. Non-winning strategies point at their expected per-strategy
-            // path — they 404 until Phase 2b writes them; tile then shows the placeholder.
-            var path = key == winnerKey
-                ? $".screenshots/pr-{pr.Number}-ready-for-review.png"
-                : $".screenshots/pr-{pr.Number}-{key}.png";
+            // Each strategy gets its own screenshot file committed by the evaluator.
+            // The winner ALSO has the canonical ready-for-review capture (taken later from
+            // the real workspace by MarkReadyForReviewWithScreenshotAsync). Try the per-strategy
+            // file first; it exists once the evaluator screenshot wiring is active.
+            var path = $".screenshots/pr-{pr.Number}-{key}.png";
             var url = $"https://raw.githubusercontent.com/{owner}/{repo}/{pr.HeadSha}/{path}";
             results.Add(new ScreenshotCandidate(key, label, url, IsWinner: key == winnerKey));
         }

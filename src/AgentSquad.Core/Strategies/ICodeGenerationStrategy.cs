@@ -85,6 +85,8 @@ public record CandidateResult
     public required StrategyExecutionResult Execution { get; init; }
     /// <summary>LLM scoring output (null when evaluator skipped or gate failed).</summary>
     public CandidateScore? Score { get; init; }
+    /// <summary>PNG screenshot bytes captured after build gate passed (null if capture failed/skipped/non-web).</summary>
+    public byte[]? ScreenshotBytes { get; init; }
 }
 
 /// <summary>Scores from the LLM judge (0-10 integer scale per the doc).</summary>

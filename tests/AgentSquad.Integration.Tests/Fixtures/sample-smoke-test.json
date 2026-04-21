@@ -1,0 +1,49 @@
+{
+  "$schema": "./fixture-schema.json",
+  "name": "sample-smoke-test",
+  "description": "Minimal fixture to validate the loader hydrates InMemoryGitHubService correctly.",
+  "config": {
+    "singlePRMode": true,
+    "projectDescription": "A simple console app"
+  },
+  "branches": ["main"],
+  "files": {
+    "main": {
+      "data.json": "{ \"title\": \"Hello World\" }",
+      "README.md": "# Hello"
+    }
+  },
+  "issues": [
+    {
+      "number": 1,
+      "title": "SoftwareEngineer: Implement Hello World",
+      "body": "Task T1: Implement a hello world app",
+      "state": "open",
+      "labels": ["engineering-task", "wave:W0"]
+    }
+  ],
+  "pullRequests": [
+    {
+      "number": 2,
+      "title": "SoftwareEngineer: Implement Hello World",
+      "headBranch": "agent/se-1/hello-world",
+      "baseBranch": "main",
+      "state": "open",
+      "labels": ["in-progress"],
+      "changedFiles": {
+        "src/Program.cs": "Console.WriteLine(\"Hello World\");"
+      }
+    }
+  ],
+  "agentScripts": [
+    {
+      "promptContains": "implement",
+      "response": "Console.WriteLine(\"Hello World\");"
+    }
+  ],
+  "expect": {
+    "minIssues": 1,
+    "minPullRequests": 1,
+    "branchExists": ["main", "agent/se-1/hello-world"]
+  }
+}

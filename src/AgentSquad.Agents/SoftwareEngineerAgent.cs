@@ -2735,9 +2735,46 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             }
 
             // Capture UI screenshot for visual progress tracking — strategy framework ships in one step.
-            // Best-effort; never blocks the pipeline. The screenshot is embedded in the
-            // subsequent ready-for-review comment (via MarkReadyForReviewWithScreenshotAsync)
-            // rather than posted here, so there's nothing else to do at this point.
+            // Best-effort; never blocks the pipeline. The ready-for-review screenshot is still captured
+            // later by MarkReadyForReviewWithScreenshotAsync from the real workspace.
+            // Here we commit per-candidate preview screenshots so the dashboard gallery shows all strategies.
+            try
+            {
+                foreach (var cand in outcome.Evaluation.Candidates)
+                {
+                    if (cand.ScreenshotBytes is null || cand.ScreenshotBytes.Length == 0)
+                        continue;
+
+                    var screenshotPath = $".screenshots/pr-{pr.Number}-{cand.StrategyId}.png";
+                    await GitHub.CommitBinaryFileAsync(
+                        screenshotPath, cand.ScreenshotBytes,
+                        $"📸 {cand.StrategyId} strategy preview for PR #{pr.Number}",
+                        branchName, ct);
+                    Logger.LogInformation(
+                        "Committed {Strategy} preview screenshot ({Size} bytes) to {Path}",
+                        cand.StrategyId, cand.ScreenshotBytes.Length, screenshotPath);
+                }
+            }
+            catch (Exception screenshotEx)
+            {
+                Logger.LogDebug(screenshotEx,
+                    "Failed to commit candidate screenshots for PR #{PrNumber} — non-blocking", pr.Number);
+            }
+
+            // Write winner-strategy marker into PR body so dashboard can identify which tile is the winner.
+            try
+            {
+                var currentBody = pr.Body ?? "";
+                if (!currentBody.Contains("winner-strategy:", StringComparison.OrdinalIgnoreCase))
+                {
+                    var markerComment = $"\n\n<!-- winner-strategy: {winner.StrategyId} -->";
+                    await GitHub.UpdatePullRequestAsync(pr.Number, body: currentBody + markerComment, ct: ct);
+                }
+            }
+            catch (Exception markerEx)
+            {
+                Logger.LogDebug(markerEx, "Failed to write winner-strategy marker to PR #{PrNumber}", pr.Number);
+            }
 
             _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id,
                 succeeded: true, winnerStrategy: winner.StrategyId);
