@@ -9,6 +9,12 @@ public interface IAgentTaskTracker
     /// <summary>Begin a new step for the given agent and task. Returns the step ID.</summary>
     string BeginStep(string agentId, string taskId, string stepName, string? description = null, string? modelTier = null);
 
+    /// <summary>Begin a child step nested under a parent (e.g., strategy candidate under "Multi-strategy code generation"). Returns the step ID.</summary>
+    string BeginChildStep(string agentId, string taskId, string parentStepId, string stepName, string? description = null, bool isContainer = false);
+
+    /// <summary>Begin a container step that groups child steps. Container steps are excluded from progress counting. Returns the step ID.</summary>
+    string BeginContainerStep(string agentId, string taskId, string stepName, string? description = null);
+
     /// <summary>Record a sub-step within an active step (e.g., a single turn in a multi-turn conversation).</summary>
     void RecordSubStep(string stepId, string description, TimeSpan? duration = null, decimal cost = 0);
 

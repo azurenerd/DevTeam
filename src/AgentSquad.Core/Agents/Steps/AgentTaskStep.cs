@@ -17,6 +17,12 @@ public record AgentTaskStep
     public DateTime? StartedAt { get; set; }
     public DateTime? CompletedAt { get; set; }
 
+    /// <summary>If set, this step is nested under the specified parent step (e.g., a strategy candidate under "Multi-strategy code generation").</summary>
+    public string? ParentStepId { get; init; }
+
+    /// <summary>True when this step is a container for child steps (e.g., "Multi-strategy code generation"). Container steps are excluded from progress counting.</summary>
+    public bool IsContainer { get; init; }
+
     /// <summary>Computed elapsed time from start to completion (or to now if in-progress).</summary>
     public TimeSpan? Elapsed => Status switch
     {
@@ -64,8 +70,8 @@ public record AgentTaskGroup
     public required string TaskId { get; init; }
     public required string DisplayName { get; init; }
     public required IReadOnlyList<AgentTaskStep> Steps { get; init; }
-    public int Completed => Steps.Count(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
-    public int Total => Steps.Count;
+    public int Completed => Steps.Count(s => !s.IsContainer && s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
+    public int Total => Steps.Count(s => !s.IsContainer);
     public DateTime? StartedAt => Steps.Where(s => s.StartedAt.HasValue).Select(s => s.StartedAt!.Value).DefaultIfEmpty().Min();
     public DateTime? CompletedAt => Steps.All(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped or AgentTaskStepStatus.Failed)
         ? Steps.Where(s => s.CompletedAt.HasValue).Select(s => s.CompletedAt!.Value).DefaultIfEmpty().Max()

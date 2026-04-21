@@ -45,6 +45,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private readonly StrategyOrchestrator? _strategyOrchestrator;
     private readonly WinnerApplyService? _winnerApply;
     private readonly IOptionsMonitor<StrategyFrameworkConfig>? _strategyConfig;
+    private readonly StrategyTaskStepBridge? _strategyStepBridge;
 
     private bool _planningComplete;
     // Guards against repeatedly logging the same tracker steps and status messages
@@ -144,7 +145,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         IAgentTaskTracker? taskTracker = null,
         StrategyOrchestrator? strategyOrchestrator = null,
         WinnerApplyService? winnerApply = null,
-        IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null)
+        IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null,
+        StrategyTaskStepBridge? strategyStepBridge = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker)
@@ -160,6 +162,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         _strategyOrchestrator = strategyOrchestrator;
         _winnerApply = winnerApply;
         _strategyConfig = strategyConfig;
+        _strategyStepBridge = strategyStepBridge;
     }
 
     protected override string GetRoleDisplayName() => "Software Engineer";
@@ -2566,10 +2569,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             };
 
             UpdateStatus(AgentStatus.Working, $"Strategy candidates: {task.Name}");
+
+            // Register with the task-step bridge so each strategy candidate gets live dashboard visibility
+            var enabledCount = cfg.EnabledStrategies.Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            var containerStepId = _strategyStepBridge?.RegisterTask(taskCtx.RunId, task.Id, Identity.Id, enabledCount);
+
             var outcome = await _strategyOrchestrator.RunCandidatesAsync(taskCtx, ct);
 
             if (!outcome.HasWinner)
             {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id,
+                    succeeded: false, winnerStrategy: null);
                 Logger.LogInformation(
                     "Strategy framework: no winner for task {TaskId} ({Reason}); falling back",
                     task.Id, outcome.Evaluation.TieBreakReason ?? "");
@@ -2579,6 +2589,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var winner = outcome.Evaluation.Winner!;
             if (string.IsNullOrEmpty(winner.Patch))
             {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogInformation(
                     "Strategy framework: winner {Strategy} produced empty patch for task {TaskId}; falling back",
                     winner.StrategyId, task.Id);
@@ -2589,6 +2600,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // baseline produces only `.strategy-baseline.md` which would ship a no-op PR.
             if (IsStubMarkerOnlyPatch(winner.Patch))
             {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogInformation(
                     "Strategy framework: winner {Strategy} produced stub marker-only patch; falling back to legacy path",
                     winner.StrategyId);
@@ -2599,6 +2611,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var apply = await _winnerApply.ApplyAsync(Workspace.RepoPath, branchName, localHead, winner.Patch, ct);
             if (!apply.Applied)
             {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogWarning(
                     "Strategy framework: winner {Strategy} apply failed for task {TaskId}: {Reason}; falling back",
                     winner.StrategyId, task.Id, apply.FailureReason);
@@ -2611,6 +2624,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             if (!build.Success)
             {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogWarning(
                     "Strategy framework: winner {Strategy} build failed for task {TaskId}; reverting and falling back",
                     winner.StrategyId, task.Id);
@@ -2658,6 +2672,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // subsequent ready-for-review comment (via MarkReadyForReviewWithScreenshotAsync)
             // rather than posted here, so there's nothing else to do at this point.
 
+            _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id,
+                succeeded: true, winnerStrategy: winner.StrategyId);
             Logger.LogInformation(
                 "Strategy framework shipped winner {Strategy} for task {TaskId} on PR #{PrNumber}",
                 winner.StrategyId, task.Id, pr.Number);
@@ -2671,6 +2687,15 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         {
             Logger.LogWarning(ex,
                 "Strategy framework path threw for task {TaskId}; falling back to legacy code-gen", task.Id);
+            // Best-effort unregister — use a fallback runId since the original may not be in scope
+            try
+            {
+                var fallbackRunId = StateStore.LastBootUtc != DateTime.MinValue
+                    ? StateStore.LastBootUtc.ToString("yyyyMMddTHHmmssZ")
+                    : "run-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
+                _strategyStepBridge?.UnregisterTask(fallbackRunId, task.Id, succeeded: false);
+            }
+            catch { /* bridge cleanup must not prevent fallback */ }
             // Only revert UNCOMMITTED changes — never destroy a committed winner.
             // The revert only runs here (pre-commit failure path).
             try { await Workspace.RevertUncommittedChangesAsync(ct); } catch { }

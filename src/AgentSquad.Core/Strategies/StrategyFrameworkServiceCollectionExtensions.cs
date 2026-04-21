@@ -1,5 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.Mcp;
 
 namespace AgentSquad.Core.Strategies;
@@ -56,11 +58,22 @@ public static class StrategyFrameworkServiceCollectionExtensions
     /// <summary>
     /// Called by hosts that expose a SignalR dashboard: replaces the null
     /// <see cref="IStrategyEventSink"/> with <see cref="StrategyEventBroadcaster"/>
-    /// (wired against the <see cref="CandidateStateStore"/> and a provided broadcaster).
+    /// (wired against the <see cref="CandidateStateStore"/> and a provided broadcaster),
+    /// then wraps it with <see cref="StrategyTaskStepBridge"/> for live task-step tracking.
     /// </summary>
     public static IServiceCollection AddStrategyDashboard(this IServiceCollection services)
     {
-        services.Replace(ServiceDescriptor.Singleton<IStrategyEventSink, StrategyEventBroadcaster>());
+        // Register the broadcaster as a named inner implementation
+        services.AddSingleton<StrategyEventBroadcaster>();
+        // The bridge decorates the broadcaster and adds task-step tracking
+        services.AddSingleton<StrategyTaskStepBridge>(sp =>
+            new StrategyTaskStepBridge(
+                sp.GetRequiredService<StrategyEventBroadcaster>(),
+                sp.GetRequiredService<IAgentTaskTracker>(),
+                sp.GetRequiredService<ILogger<StrategyTaskStepBridge>>()));
+        // Expose the bridge as the primary event sink
+        services.Replace(ServiceDescriptor.Singleton<IStrategyEventSink>(sp =>
+            sp.GetRequiredService<StrategyTaskStepBridge>()));
         return services;
     }
 }

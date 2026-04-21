@@ -26,16 +26,26 @@ public class AgentTaskTracker : IAgentTaskTracker
 
     public string BeginStep(string agentId, string taskId, string stepName, string? description = null, string? modelTier = null)
     {
+        return AddStep(agentId, taskId, stepName, description, modelTier, parentStepId: null, isContainer: false);
+    }
+
+    public string BeginChildStep(string agentId, string taskId, string parentStepId, string stepName, string? description = null, bool isContainer = false)
+    {
+        return AddStep(agentId, taskId, stepName, description, modelTier: null, parentStepId: parentStepId, isContainer: isContainer);
+    }
+
+    public string BeginContainerStep(string agentId, string taskId, string stepName, string? description = null)
+    {
+        return AddStep(agentId, taskId, stepName, description, modelTier: null, parentStepId: null, isContainer: true);
+    }
+
+    private string AddStep(string agentId, string taskId, string stepName, string? description, string? modelTier, string? parentStepId, bool isContainer)
+    {
         ArgumentNullException.ThrowIfNull(agentId);
         ArgumentNullException.ThrowIfNull(taskId);
         ArgumentNullException.ThrowIfNull(stepName);
 
         var list = _agentSteps.GetOrAdd(agentId, _ => new List<AgentTaskStep>());
-        int index;
-        lock (list)
-        {
-            index = list.Count;
-        }
 
         var stepId = $"{agentId}-step-{Interlocked.Increment(ref _stepCounter)}";
         var step = new AgentTaskStep
@@ -43,18 +53,22 @@ public class AgentTaskTracker : IAgentTaskTracker
             Id = stepId,
             AgentId = agentId,
             TaskId = taskId,
-            StepIndex = index,
+            StepIndex = 0, // set inside lock
             Name = stepName,
             Description = description,
             Status = AgentTaskStepStatus.InProgress,
             StartedAt = DateTime.UtcNow,
-            ModelUsed = modelTier
+            ModelUsed = modelTier,
+            ParentStepId = parentStepId,
+            IsContainer = isContainer
         };
 
         _stepsById[stepId] = step;
 
         lock (list)
         {
+            step = step with { StepIndex = list.Count };
+            _stepsById[stepId] = step;
             list.Add(step);
             if (list.Count > MaxStepsPerAgent)
                 list.RemoveRange(0, list.Count - MaxStepsPerAgent);
@@ -94,6 +108,13 @@ public class AgentTaskTracker : IAgentTaskTracker
         step.CompletedAt = DateTime.UtcNow;
         _logger.LogDebug("[{AgentId}] Step completed: {StepName} ({Status})", step.AgentId, step.Name, status);
         NotifyChanged(step);
+    }
+
+    /// <summary>Look up a step by its ID. Used by bridge components that need to update step metadata.</summary>
+    public AgentTaskStep? GetStepById(string stepId)
+    {
+        _stepsById.TryGetValue(stepId, out var step);
+        return step;
     }
 
     public void FailStep(string stepId, string reason)
@@ -257,8 +278,9 @@ public class AgentTaskTracker : IAgentTaskTracker
 
         lock (list)
         {
-            var completed = list.Count(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
-            return (completed, list.Count);
+            var leaves = list.Where(s => !s.IsContainer).ToList();
+            var completed = leaves.Count(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
+            return (completed, leaves.Count);
         }
     }
 

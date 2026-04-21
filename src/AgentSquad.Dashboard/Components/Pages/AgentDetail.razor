@@ -233,26 +233,89 @@ else
                                     <div class="step-progress-fill" style="width: @(groupPct)%"></div>
                                 </div>
                                 <div class="step-list">
-                                    @foreach (var step in group.Steps)
+                                    @{ var topLevelSteps = group.Steps.Where(s => s.ParentStepId is null).ToList(); }
+                                    @foreach (var step in topLevelSteps)
                                     {
-                                            <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
-                                            <span class="step-icon">@GetStepIcon(step.Status)</span>
-                                            <span class="step-name @(step.Status == AgentTaskStepStatus.Pending ? "step-name-pending" : "")">@step.Name</span>
-                                            <div class="step-meta">
-                                                @if (!string.IsNullOrEmpty(step.ModelUsed) && step.LlmCallCount > 0)
+                                        @if (step.IsContainer)
+                                        {
+                                            // Container step: render as an expandable sub-section with child steps
+                                            var containerId = $"container-{step.Id}";
+                                            var containerExpanded = _expandedContainerSteps.Contains(step.Id)
+                                                || step.Status == AgentTaskStepStatus.InProgress;
+                                            var childSteps = group.Steps.Where(s => s.ParentStepId == step.Id).ToList();
+                                            var childCompleted = childSteps.Count(s => s.Status is AgentTaskStepStatus.Completed or AgentTaskStepStatus.Skipped);
+                                            <div class="step-item step-container @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
+                                                <div class="step-container-header" @onclick="() => ToggleContainerStep(step.Id)">
+                                                    <span class="step-container-chevron @(containerExpanded ? "expanded" : "")">▶</span>
+                                                    <span class="step-icon">@GetStepIcon(step.Status)</span>
+                                                    <span class="step-name">@step.Name</span>
+                                                    <div class="step-meta">
+                                                        <span class="step-child-count">@childCompleted/@childSteps.Count strategies</span>
+                                                        @if (step.Elapsed.HasValue)
+                                                        {
+                                                            <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
+                                                        }
+                                                        @if (!string.IsNullOrEmpty(step.Description))
+                                                        {
+                                                            <span class="step-strategy-winner">@step.Description</span>
+                                                        }
+                                                    </div>
+                                                </div>
+                                                @if (containerExpanded && childSteps.Count > 0)
                                                 {
-                                                    <span class="step-model-badge">@step.ModelUsed</span>
-                                                }
-                                                @if (step.Elapsed.HasValue)
-                                                {
-                                                    <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
-                                                }
-                                                @if (step.LlmCallCount > 0)
-                                                {
-                                                    <span class="step-llm-count">@step.LlmCallCount calls</span>
+                                                    <div class="step-children">
+                                                        @foreach (var child in childSteps)
+                                                        {
+                                                            <div class="step-item step-child @GetStrategyStepClass(child)">
+                                                                <span class="step-icon">@GetStrategyIcon(child)</span>
+                                                                <span class="step-name">@child.Name</span>
+                                                                <div class="step-meta">
+                                                                    @if (child.Elapsed.HasValue)
+                                                                    {
+                                                                        <span class="step-elapsed">@FormatStepDuration(child.Elapsed.Value)</span>
+                                                                    }
+                                                                    @if (!string.IsNullOrEmpty(child.Description) && child.Status == AgentTaskStepStatus.Failed)
+                                                                    {
+                                                                        <span class="step-failure-reason" title="@child.Description">❌ @TruncateText(child.Description, 60)</span>
+                                                                    }
+                                                                </div>
+                                                                @if (child.SubSteps.Count > 0)
+                                                                {
+                                                                    <div class="step-substeps">
+                                                                        @foreach (var sub in child.SubSteps)
+                                                                        {
+                                                                            <div class="step-substep">@sub.Description</div>
+                                                                        }
+                                                                    </div>
+                                                                }
+                                                            </div>
+                                                        }
+                                                    </div>
                                                 }
                                             </div>
-                                        </div>
+                                        }
+                                        else
+                                        {
+                                            // Regular (leaf) step — original rendering
+                                            <div class="step-item @(step.Status == AgentTaskStepStatus.InProgress ? "step-active" : "")">
+                                                <span class="step-icon">@GetStepIcon(step.Status)</span>
+                                                <span class="step-name @(step.Status == AgentTaskStepStatus.Pending ? "step-name-pending" : "")">@step.Name</span>
+                                                <div class="step-meta">
+                                                    @if (!string.IsNullOrEmpty(step.ModelUsed) && step.LlmCallCount > 0)
+                                                    {
+                                                        <span class="step-model-badge">@step.ModelUsed</span>
+                                                    }
+                                                    @if (step.Elapsed.HasValue)
+                                                    {
+                                                        <span class="step-elapsed">@FormatStepDuration(step.Elapsed.Value)</span>
+                                                    }
+                                                    @if (step.LlmCallCount > 0)
+                                                    {
+                                                        <span class="step-llm-count">@step.LlmCallCount calls</span>
+                                                    }
+                                                </div>
+                                            </div>
+                                        }
                                     }
                                 </div>
                             </div>
@@ -349,6 +412,8 @@ else
     // Tracks task groups the user has explicitly collapsed so we stop force-expanding
     // them just because their status is InProgress/WaitingOnHuman.
     private HashSet<string> _userCollapsedDetailGroups = new();
+    // Tracks which container steps (strategy groups) are expanded
+    private HashSet<string> _expandedContainerSteps = new();
     private int _stepCompleted;
     private int _stepTotal;
 
@@ -609,6 +674,33 @@ else
             _expandedDetailGroups.Add(taskId);
         }
     }
+
+    private void ToggleContainerStep(string stepId)
+    {
+        if (!_expandedContainerSteps.Remove(stepId))
+            _expandedContainerSteps.Add(stepId);
+    }
+
+    private static string GetStrategyIcon(AgentTaskStep child) => child.Status switch
+    {
+        AgentTaskStepStatus.InProgress => "🔬",
+        AgentTaskStepStatus.Completed => "🏆",
+        AgentTaskStepStatus.Skipped => "⏭️",
+        AgentTaskStepStatus.Failed => "💥",
+        _ => "🧪"
+    };
+
+    private static string GetStrategyStepClass(AgentTaskStep child) => child.Status switch
+    {
+        AgentTaskStepStatus.InProgress => "step-active step-strategy-running",
+        AgentTaskStepStatus.Completed => "step-strategy-winner",
+        AgentTaskStepStatus.Skipped => "step-strategy-skipped",
+        AgentTaskStepStatus.Failed => "step-strategy-failed",
+        _ => ""
+    };
+
+    private static string TruncateText(string text, int maxLength)
+        => text.Length <= maxLength ? text : text[..maxLength] + "…";
 
     private static string FormatStepDuration(TimeSpan ts) => ts.TotalMinutes >= 1
         ? $"{ts.Minutes}m {ts.Seconds}s"
