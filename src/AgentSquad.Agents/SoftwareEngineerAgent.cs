@@ -47,6 +47,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private readonly IOptionsMonitor<StrategyFrameworkConfig>? _strategyConfig;
 
     private bool _planningComplete;
+    // Guards against repeatedly logging the same tracker steps and status messages
+    // while the SE is idling waiting for PM to create Enhancement issues. Without this
+    // each 15-second planning poll creates a fresh "Read architecture" / "Task decomposition"
+    // pair in the dashboard, none of which ever completes.
+    private bool _loggedWaitingForPmIssues;
+    private bool _loggedArchitectureRead;
     private bool _planningSignalReceived;
     private bool _architectureReady;
     private bool _resourceRequestPending;
@@ -264,9 +270,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     {
                         if (await CheckForArchitectureAsync(ct))
                         {
-                            var readArchStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Read architecture",
-                                "Architecture document detected, starting engineering plan", Identity.ModelTier);
-                            _taskTracker.CompleteStep(readArchStepId);
+                            if (!_loggedArchitectureRead)
+                            {
+                                var readArchStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Read architecture",
+                                    "Architecture document detected, starting engineering plan", Identity.ModelTier);
+                                _taskTracker.CompleteStep(readArchStepId);
+                                _loggedArchitectureRead = true;
+                            }
                             await CreateEngineeringPlanAsync(ct);
                             // _planningComplete is set inside CreateEngineeringPlanAsync
                             // on success or valid restore paths
@@ -562,10 +572,6 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         UpdateStatus(AgentStatus.Working, "Creating engineering plan from Issues");
         Logger.LogInformation("Starting engineering plan creation from Enhancement issues");
-        LogActivity("task", "📋 Starting engineering plan creation from Enhancement issues");
-
-        var decompStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Task decomposition",
-            "Decomposing enhancement issues into engineering tasks", Identity.ModelTier);
 
         LogActivity("planning", "📋 Reading architecture doc and PM spec for engineering planning");
         var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
@@ -576,11 +582,23 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         if (enhancementIssues.Count == 0)
         {
-            Logger.LogWarning("No open enhancement issues found — PM may not have created them yet, will retry");
+            if (!_loggedWaitingForPmIssues)
+            {
+                Logger.LogWarning("No open enhancement issues found — PM may not have created them yet, will retry");
+                LogActivity("task", "⏳ Waiting for PM to create User Story Issues before engineering planning");
+                _loggedWaitingForPmIssues = true;
+            }
             UpdateStatus(AgentStatus.Idle, "Waiting for PM to create User Story Issues");
             _planningComplete = false;
             return;
         }
+        // Reset the guard so the next stall (if any) logs once again.
+        _loggedWaitingForPmIssues = false;
+
+        LogActivity("task", "📋 Starting engineering plan creation from Enhancement issues");
+
+        var decompStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Task decomposition",
+            "Decomposing enhancement issues into engineering tasks", Identity.ModelTier);
 
         var issuesSummary = string.Join("\n\n", enhancementIssues.Select(i =>
             $"### Issue #{i.Number}: {i.Title}\n{i.Body}"));

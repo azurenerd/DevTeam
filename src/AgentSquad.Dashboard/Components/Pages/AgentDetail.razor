@@ -201,9 +201,12 @@ else
                 </div>
                 @foreach (var group in _taskGroups)
                 {
-                    var isGroupExpanded = _expandedDetailGroups.Contains(group.TaskId)
-                        || group.Status == AgentTaskStepStatus.InProgress
-                        || group.Status == AgentTaskStepStatus.WaitingOnHuman;
+                    // Auto-expand active/waiting groups UNLESS the user explicitly collapsed them.
+                    var userExplicitlyCollapsed = _userCollapsedDetailGroups.Contains(group.TaskId);
+                    var isGroupExpanded = !userExplicitlyCollapsed
+                        && (_expandedDetailGroups.Contains(group.TaskId)
+                            || group.Status == AgentTaskStepStatus.InProgress
+                            || group.Status == AgentTaskStepStatus.WaitingOnHuman);
                     var groupPct = group.Total > 0 ? (int)(100.0 * group.Completed / group.Total) : 0;
 
                     <div class="step-task-group @(group.Status == AgentTaskStepStatus.InProgress ? "step-task-active" : "")">
@@ -343,6 +346,9 @@ else
     private HttpClient? _stepHttp;
     private List<AgentTaskGroup> _taskGroups = [];
     private HashSet<string> _expandedDetailGroups = new();
+    // Tracks task groups the user has explicitly collapsed so we stop force-expanding
+    // them just because their status is InProgress/WaitingOnHuman.
+    private HashSet<string> _userCollapsedDetailGroups = new();
     private int _stepCompleted;
     private int _stepTotal;
 
@@ -579,8 +585,29 @@ else
 
     private void ToggleDetailGroup(string taskId)
     {
-        if (!_expandedDetailGroups.Remove(taskId))
+        // Determine the effective current state so the click always flips it,
+        // even when the group is force-expanded due to InProgress status.
+        var group = _taskGroups.FirstOrDefault(g => g.TaskId == taskId);
+        var autoExpand = group is not null
+            && (group.Status == AgentTaskStepStatus.InProgress
+                || group.Status == AgentTaskStepStatus.WaitingOnHuman);
+        var userCollapsed = _userCollapsedDetailGroups.Contains(taskId);
+        var currentlyExpanded = !userCollapsed
+            && (_expandedDetailGroups.Contains(taskId) || autoExpand);
+
+        if (currentlyExpanded)
+        {
+            // Collapse: clear any manual-expand, and record explicit collapse so auto-expand stops.
+            _expandedDetailGroups.Remove(taskId);
+            if (autoExpand)
+                _userCollapsedDetailGroups.Add(taskId);
+        }
+        else
+        {
+            // Expand: clear any user-collapse, then add to manual-expand set.
+            _userCollapsedDetailGroups.Remove(taskId);
             _expandedDetailGroups.Add(taskId);
+        }
     }
 
     private static string FormatStepDuration(TimeSpan ts) => ts.TotalMinutes >= 1
