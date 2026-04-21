@@ -63,6 +63,10 @@
 53. [Dashboard Strategy Key Mismatch — Use Canonical IDs Everywhere](#54-dashboard-strategy-key-mismatch--use-canonical-ids-everywhere)
 54. [Own-PR Review Downgrade Loses Inline Comment Positions](#55-own-pr-review-downgrade-loses-inline-comment-positions)
 55. [Wave Ordering Collisions — Hash-Based IDs Prevent Task Drops](#56-wave-ordering-collisions--hash-based-ids-prevent-task-drops)
+56. [Premature Enhancement Closure After Mini-Reset — Guard Against Vacuously True Conditions](#57-premature-enhancement-closure-after-mini-reset--guard-against-vacuously-true-conditions)
+57. [In-Memory State Flags Lost on Process Restart — Recover from Durable State](#58-in-memory-state-flags-lost-on-process-restart--recover-from-durable-state)
+58. [EMU GitHub Restrictions — `gh` CLI Fails for Enterprise Managed Users](#59-emu-github-restrictions--gh-cli-fails-for-enterprise-managed-users)
+59. [First Successful End-to-End Run — What Made It Work](#60-first-successful-end-to-end-run--what-made-it-work)
 
 ---
 
@@ -1254,3 +1258,72 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 - Merge (not replace) cache entries on API delay recovery, preserving both waves' tasks.
 
 **Rule:** Any ID generation scheme used in concurrent workflows must be collision-resistant. Sequential counters are dangerous when multiple producers run in parallel. Content-addressed or UUID-based IDs eliminate this class of bug entirely.
+
+---
+
+## 57. Premature Enhancement Closure After Mini-Reset — Guard Against Vacuously True Conditions
+
+**Lesson:** When checking "are all PRs merged?" by testing `openPRs.Count == 0`, a freshly-reset repo with zero PRs satisfies the condition vacuously. This caused PM to close all enhancement issues immediately on startup after a mini-reset.
+
+**What happened:**
+- After a mini-reset (which closes all PRs and issues), the runner started fresh.
+- PM's SinglePRMode closure logic checked `openPRs.Count == 0` — trivially true because no PRs existed yet.
+- PM immediately closed all newly-created enhancement issues and declared "all reviews complete — all merged."
+- This broke a live demo — the user saw issues closing within seconds of creation.
+
+**Fix:**
+- Added a positive-evidence guard: `GetMergedPullRequestsAsync().Count > 0` — there must be at least one actually-merged PR. Applied to both the "all merged" status declaration and the enhancement issue closure path.
+- Same pattern: never treat an empty set as proof of completion. Require at least one positive example.
+
+**Rule:** Boolean conditions that check "nothing is X" (e.g., no open PRs) are dangerous in bootstrapping scenarios where "nothing exists at all" is also true. Always pair them with a positive-evidence check (e.g., at least one merged PR exists). This is the multi-agent equivalent of the "vacuous truth" trap in logic.
+
+---
+
+## 58. In-Memory State Flags Lost on Process Restart — Recover from Durable State
+
+**Lesson:** Flags like `_allTasksComplete`, `_integrationPrCreated`, and `_engineeringSignaled` existed only in memory. When the runner restarted without a reset, these were lost, causing the SE to re-create tasks and PRs that already existed.
+
+**What happened:**
+- Runner was killed and restarted during a demo (no reset script).
+- SE lost all in-memory progress flags.
+- SE re-created T1 and T-FINAL engineering tasks as new GitHub issues (#2312, #2313) and opened duplicate PR #2314.
+- The duplicate artifacts confused the review pipeline and required manual cleanup via REST API.
+
+**Fix:**
+- Added a state recovery block in `CreateEngineeringPlanAsync` after `LoadTasksAsync` restores tasks from GitHub issues.
+- Recovery logic: (1) if all non-integration tasks are Done → `_allTasksComplete = true`, (2) scan merged+open PRs for integration PR → `_integrationPrCreated = true`, (3) if 0 open PRs + merged PRs exist → `_engineeringSignaled = true`.
+- Each recovery is logged at Information level with evidence (PR numbers, task counts).
+
+**Rule:** Every in-memory flag that controls "should I do X?" must either be (a) persisted to durable storage, or (b) recoverable from existing durable state (GitHub issues, PRs, labels) on startup. If neither is true, a process restart will cause duplicate work. The recovery approach is usually cheaper than persistence because the durable state already exists — you just need to read it.
+
+---
+
+## 59. EMU GitHub Restrictions — `gh` CLI Fails for Enterprise Managed Users
+
+**Lesson:** Enterprise Managed User (EMU) accounts cannot use the `gh` CLI for certain operations (closing PRs/issues) due to GraphQL restrictions. REST API with PAT works as a fallback.
+
+**What happened:**
+- Needed to close duplicate PRs and issues created during a restart.
+- `gh pr close` and `gh issue close` failed with authentication/permissions errors specific to EMU accounts.
+- The `.NET User Secrets` store contained a valid PAT that worked with REST API calls.
+
+**Fix:**
+- Use `curl` or `Invoke-RestMethod` with the PAT from `dotnet user-secrets list` as the workaround.
+- Token extraction pattern: `$secrets = dotnet user-secrets list ...; $token = (($secrets | Select-String "GitHubToken") -split "= ")[1].Trim()`
+
+**Rule:** Don't assume the `gh` CLI works in all enterprise environments. Always have a REST API fallback path for critical operations. Store the PAT extraction pattern in your operational runbook.
+
+---
+
+## 60. First Successful End-to-End Run — What Made It Work
+
+**Lesson:** The first complete end-to-end run (all PRs merged, all issues closed, Completion phase reached) succeeded because of the cumulative effect of 6+ targeted fixes, not any single change.
+
+**What happened:**
+- Prior runs failed at various stages: premature issue closure, stuck review gates, SE duplicates on restart, stale status displays, missing TeamMembers.md entries.
+- Session committed 3 fix batches: (1) `bc37be7` with 6 fixes (issue closure, SE stale status, step tracking, TeamMembers), (2) `f7eff0f` fixing premature closure, (3) `c751e49` fixing SE restart recovery.
+- The successful run: PM created enhancements → SE created PR #2357 → TE tested → PM approved → SE merged → PM closed all issues → Completion phase.
+
+**Fix:** N/A — this was a cumulative success. The lesson is that multi-agent systems fail in combinatorial ways. Each individual fix seems small, but their interaction effects are what make the system work. You need to fix ALL the failure modes in a single pass, not just the most recent one.
+
+**Rule:** Multi-agent orchestration systems have emergent failure modes that only surface when all agents interact end-to-end. A "fix → monitor → fix" loop with live runs is essential. Plan for 3-5 fix-and-run cycles to get from "mostly works" to "reliably completes."

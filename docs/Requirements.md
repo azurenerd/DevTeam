@@ -53,6 +53,9 @@
 41. [Strategy Framework (Phases 0–6)](#40-strategy-framework-phases-06)
 42. [SinglePRMode Requirements](#41-singleprmode-requirements)
 43. [WS3 Offline Integration Test Harness](#42-ws3-offline-integration-test-harness)
+44. [SE Restart State Recovery Requirements](#43-se-restart-state-recovery-requirements)
+45. [Premature Enhancement Issue Closure Prevention Requirements](#44-premature-enhancement-issue-closure-prevention-requirements)
+46. [Post-Merge Issue Closure Requirements](#45-post-merge-issue-closure-requirements)
 
 ---
 
@@ -2575,6 +2578,105 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 5. WorkflowTestHarness runs PM agent through initialization → research → PMSpec creation
 6. Assertions verify: 5 enhancement issues created in InMemoryGitHubService, correct labels applied, PMSpec.md content matches expected structure
 7. No network calls made — entire test runs in-process in <5 seconds
+```
+
+---
+
+## 43. SE Restart State Recovery Requirements
+
+> **Context:** When the runner process restarts without a reset, SE in-memory flags (`_allTasksComplete`, `_integrationPrCreated`, `_engineeringSignaled`) are lost, causing duplicate task/PR creation. A fix was implemented in commit `c751e49` to recover state from GitHub on startup.
+
+### REQ-RSR-001: Recover _allTasksComplete on Restart
+
+- **REQ-RSR-001**: On restart, SE MUST recover `_allTasksComplete` by checking if all non-integration tasks loaded from GitHub issues have status "Done".
+
+### REQ-RSR-002: Recover _integrationPrCreated on Restart
+
+- **REQ-RSR-002**: On restart, SE MUST recover `_integrationPrCreated` by scanning merged+open PRs for titles containing "Integration" or branches containing "integration".
+
+### REQ-RSR-003: Recover _engineeringSignaled on Restart
+
+- **REQ-RSR-003**: On restart, SE MUST recover `_engineeringSignaled` when there are 0 open PRs AND at least 1 merged PR (indicating all work completed and merged).
+
+### REQ-RSR-004: Recovery Location in Code Path
+
+- **REQ-RSR-004**: State recovery MUST happen in the task restoration block of `CreateEngineeringPlanAsync`, after `LoadTasksAsync` restores tasks from GitHub.
+
+### REQ-RSR-005: Recovery Logging
+
+- **REQ-RSR-005**: Recovery MUST be logged at Information level for each flag recovered, including source evidence (PR numbers, task counts).
+
+**Scenario: Runner restart without reset doesn't create duplicates**
+```
+1. Runner has completed engineering with 3 merged PRs, 0 open PRs, all tasks Done
+2. Runner process is killed and restarted (no reset script)
+3. SE enters CreateEngineeringPlanAsync → LoadTasksAsync restores tasks from GitHub
+4. State recovery: scans tasks → all Done → sets _allTasksComplete=true
+5. State recovery: scans PRs → finds integration PR #2357 (merged) → sets _integrationPrCreated=true
+6. State recovery: 0 open PRs + 3 merged → sets _engineeringSignaled=true
+7. SE resumes in idle state, does NOT create new tasks or PRs
+```
+
+---
+
+## 44. Premature Enhancement Issue Closure Prevention Requirements
+
+> **Context:** After a mini-reset (which closes all PRs/issues), the PM's `openPRs.Count == 0` check was trivially true with no PRs existing, causing it to prematurely close all enhancement issues and declare "all merged". Fixed in commit `f7eff0f`.
+
+### REQ-PEC-001: Merged PR Evidence for Completion Declaration
+
+- **REQ-PEC-001**: PM MUST NOT declare "all reviews complete — all merged" unless `GetMergedPullRequestsAsync().Count > 0` — there must be at least one actually-merged PR as evidence.
+
+### REQ-PEC-002: Dual Guard for Issue Closure in SinglePRMode
+
+- **REQ-PEC-002**: PM MUST NOT close enhancement issues in SinglePRMode unless BOTH conditions are met: `openPRs.Count == 0` AND `mergedPRs.Count > 0`.
+
+### REQ-PEC-003: Consistent Merged PR Check
+
+- **REQ-PEC-003**: Both guards (status declaration and issue closure) MUST use the same `GetMergedPullRequestsAsync` call to ensure consistency.
+
+### REQ-PEC-004: Post-Reset Monitoring State
+
+- **REQ-PEC-004**: After a mini-reset, PM MUST remain in monitoring state until actual PRs are created and merged.
+
+**Scenario: Mini-reset does not trigger premature closure**
+```
+1. Previous run completed with all PRs merged, all issues closed
+2. User runs minimal-reset.ps1 → all GitHub state cleared
+3. Runner starts fresh → PM enters monitoring
+4. PM checks: openPRs=0, but mergedPRs=0 → guard prevents "all merged" declaration
+5. PM checks: openPRs=0, but mergedPRs=0 → guard prevents enhancement issue closure
+6. PM status remains "Monitoring for review requests"
+7. Later: SE creates PR #2357, it gets reviewed and merged → mergedPRs=1
+8. NOW PM can close enhancements and declare completion
+```
+
+---
+
+## 45. Post-Merge Issue Closure Requirements
+
+> **Context:** Issues were not being closed after their associated PRs were merged. Fixed in commit `bc37be7`.
+
+### REQ-PMC-001: Close Issues on PR Merge
+
+- **REQ-PMC-001**: When a PR is merged, PM MUST close all enhancement issues that are covered by that PR's engineering task.
+
+### REQ-PMC-002: Immediate Issue Closure
+
+- **REQ-PMC-002**: Issue closure MUST happen in the same polling cycle that detects the merge, not deferred.
+
+### REQ-PMC-003: SinglePRMode Full Closure
+
+- **REQ-PMC-003**: In SinglePRMode, when the single PR is merged, ALL enhancement issues MUST be closed (since the single task covers everything).
+
+**Scenario: Issues close after PR merge**
+```
+1. SE creates PR #2357 for task T1 covering enhancements #2330-#2335
+2. PR goes through review → TE tests → Architect approves → PM approves
+3. SE merges PR #2357
+4. PM detects merge in next polling cycle
+5. PM closes enhancement issues #2330-#2335 with comment referencing PR #2357
+6. Final state: 0 open PRs, 0 open issues
 ```
 
 ---
