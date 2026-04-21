@@ -56,6 +56,9 @@
 44. [SE Restart State Recovery Requirements](#43-se-restart-state-recovery-requirements)
 45. [Premature Enhancement Issue Closure Prevention Requirements](#44-premature-enhancement-issue-closure-prevention-requirements)
 46. [Post-Merge Issue Closure Requirements](#45-post-merge-issue-closure-requirements)
+47. [Stuck Issue Recovery Requirements](#46-stuck-issue-recovery-requirements)
+48. [Design Fidelity Fallback Requirements](#47-design-fidelity-fallback-requirements)
+49. [Project Completion Dashboard Banner](#48-project-completion-dashboard-banner)
 
 ---
 
@@ -2677,6 +2680,99 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 4. PM detects merge in next polling cycle
 5. PM closes enhancement issues #2330-#2335 with comment referencing PR #2357
 6. Final state: 0 open PRs, 0 open issues
+```
+
+---
+
+## 46. Stuck Issue Recovery Requirements
+
+> **Context:** After SE signals engineering complete, PM can flag enhancement issues as "needs more work" but no agent picks up the rework — SE is in idle state with `_engineeringSignaled = true` and no reset path. Issues stay open forever. Fixed in commit `7e1eb7f`.
+
+### REQ-SIR-001: Auto-Close With Follow-Up
+
+- **REQ-SIR-001**: When PM determines NEEDS_MORE_WORK for an enhancement issue and all sub-issues are already closed/merged, PM MUST close the original enhancement issue and create a follow-up issue tracking the identified gaps.
+
+### REQ-SIR-002: Follow-Up Issue Labels
+
+- **REQ-SIR-002**: The follow-up issue MUST carry both `enhancement` and `follow-up` labels to distinguish it from original work items.
+
+### REQ-SIR-003: Cross-Reference Comment
+
+- **REQ-SIR-003**: PM MUST add a closing comment to the original enhancement that references the follow-up issue number and summarizes the identified gaps.
+
+### REQ-SIR-004: No Orphaned Open Issues
+
+- **REQ-SIR-004**: The system MUST NOT leave enhancement issues open indefinitely when no agent is capable of acting on them. If all engineering tasks are complete and merged, the issue must be resolved (closed with follow-up or approved).
+
+**Scenario: PM flags gaps after all work merged**
+```
+1. SE completes all tasks → _allTasksComplete = true
+2. Integration PR merges → _engineeringSignaled = true
+3. PM reviews enhancement issue #100 → finds gaps → NEEDS_MORE_WORK
+4. PM creates follow-up issue #101 with 'enhancement' + 'follow-up' labels
+5. PM closes #100 with comment: "Delivered with known gaps. Follow-up: #101"
+6. Result: No orphaned open issues; gaps tracked in new issue for future sprint
+```
+
+---
+
+## 47. Design Fidelity Fallback Requirements
+
+> **Context:** PM's vision review compared PR screenshots against design reference PNGs from `docs/design-screenshots/`. When no PNGs existed, the review had no visual quality rules at all — placeholder pages and blank screenshots could pass. Fixed in commit `7e1eb7f`.
+
+### REQ-DFF-001: Strict Rules Without Design Images
+
+- **REQ-DFF-001**: PM MUST enforce strict visual quality rules even when no design reference PNGs are available. Blank pages, placeholder text (`placeholder`, `Lorem ipsum`, `TODO`, `stub`, `coming soon`), error banners, and stack traces MUST trigger REQUEST_CHANGES.
+
+### REQ-DFF-002: HTML Design Fallback Context
+
+- **REQ-DFF-002**: When no design PNGs exist, PM SHOULD discover HTML design files (matching keywords: `design`, `concept`, `mock`, `wireframe`) outside of `src/` and `node_modules/`, extract structural context (title, headings, CSS classes, SVG/grid indicators), and include it in the review prompt.
+
+### REQ-DFF-003: HTML Context Size Cap
+
+- **REQ-DFF-003**: Extracted HTML design context MUST be capped at 2000 characters to prevent token bloat in the review prompt.
+
+### REQ-DFF-004: Broad File Discovery
+
+- **REQ-DFF-004**: HTML design file discovery MUST NOT be hardcoded to a single filename. It SHOULD use keyword-based matching (design, concept, mock, wireframe) to find relevant files across the repository root.
+
+**Scenario: PM review with no design PNGs but HTML template**
+```
+1. Researcher creates OriginalDesignConcept.html but rendering to PNG fails
+2. PM initiates PR vision review, calls LoadDesignReferenceImagesAsync
+3. No PNGs found in docs/design-screenshots/
+4. PM discovers OriginalDesignConcept.html via keyword match
+5. Extracts: page title, headings, CSS classes (e.g., 'dashboard-grid'), SVG presence
+6. Review prompt includes strict visual rules + design context
+7. PR screenshot showing blank page → REQUEST_CHANGES (blank page rejection)
+```
+
+---
+
+## 48. Project Completion Dashboard Banner
+
+> **Context:** When the system reaches the Completion phase (0 open PRs, 0 open issues), there was no visual indicator on the dashboard. Added in commit `4409310`.
+
+### REQ-PCB-001: Completion Banner Display
+
+- **REQ-PCB-001**: The Agent Overview dashboard page MUST display a prominent "Project Complete" banner when the workflow phase is `Completion`.
+
+### REQ-PCB-002: Banner Styling
+
+- **REQ-PCB-002**: The completion banner MUST use a green gradient background with slide-down animation to provide clear visual distinction from the normal operating state.
+
+### REQ-PCB-003: Informative Content
+
+- **REQ-PCB-003**: The banner MUST include a congratulatory message, summary text indicating all work has been delivered, and a completion emoji/icon.
+
+**Scenario: Dashboard shows completion**
+```
+1. PM closes final enhancement issue after PR merge
+2. GateNotificationService detects 0 open PRs + 0 open issues
+3. Workflow advances to Completion phase
+4. User opens dashboard at /
+5. Green "Project Complete" banner slides down at top of Agent Overview
+6. Banner shows: "🎉 Project Complete — All work delivered and merged"
 ```
 
 ---
