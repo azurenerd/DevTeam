@@ -934,6 +934,9 @@ public class ProgramManagerAgent : AgentBase
             if (prNumbersToReview.Count == 0)
             {
                 Logger.LogDebug("PM review poll: 0 PRs eligible");
+
+                // Check if all open PRs are now PM-approved — if so, signal reviews complete
+                await CheckAndSignalAllReviewsCompleteAsync(ct);
                 return;
             }
 
@@ -1230,11 +1233,54 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // Reset status after reviews complete so dashboard doesn't show stale "Reviewing PR" text
-            UpdateStatus(AgentStatus.Idle, "Monitoring team progress");
+            // Check if all open PRs are now PM-approved → signal reviews complete
+            await CheckAndSignalAllReviewsCompleteAsync(ct);
         }
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to review pull requests");
+        }
+    }
+
+    /// <summary>
+    /// Check if all open PRs are PM-approved (or no open PRs remain).
+    /// If so, update status to signal that all reviews are complete, which
+    /// HealthMonitor uses to emit the reviews.all.approved workflow signal.
+    /// </summary>
+    private async Task CheckAndSignalAllReviewsCompleteAsync(CancellationToken ct)
+    {
+        try
+        {
+            var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+
+            // If there are open PRs that are NOT yet PM-approved, reviews are still pending
+            var unapprovedPrs = openPRs
+                .Where(pr => !pr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            if (unapprovedPrs.Count > 0)
+            {
+                UpdateStatus(AgentStatus.Idle, "Monitoring team progress");
+                return;
+            }
+
+            // All PRs are either PM-approved or there are no open PRs
+            // Set status text that HealthMonitor recognizes for the reviews.all.approved signal
+            if (openPRs.Count > 0)
+            {
+                Logger.LogInformation("All {Count} open PRs are PM-approved — signaling reviews complete", openPRs.Count);
+                UpdateStatus(AgentStatus.Online, "All reviews complete — all PRs approved");
+            }
+            else
+            {
+                Logger.LogInformation("No open PRs remain — all merged. Signaling reviews complete");
+                UpdateStatus(AgentStatus.Online, "All reviews complete — all merged");
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to check review completion status");
+            UpdateStatus(AgentStatus.Idle, "Monitoring team progress");
         }
     }
 

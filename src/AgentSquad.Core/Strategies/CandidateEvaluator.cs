@@ -199,10 +199,24 @@ public class CandidateEvaluator
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogDebug(ex, "Screenshot capture failed for strategy {Strategy} task {Task}",
+                    _logger.LogWarning(ex, "Screenshot capture failed for strategy {Strategy} task {Task} — " +
+                        "this candidate will have no preview in the dashboard gallery",
                         exec.StrategyId, task.TaskId);
                 }
             }
+        }
+
+        // Log outcome for all candidates, including when screenshots were skipped
+        if (screenshotBytes is null)
+        {
+            var reason = !task.IsWebTask ? "not a web task"
+                : _screenshotRunner is null ? "PlaywrightRunner not available"
+                : !_screenshotRunner.IsReady ? "PlaywrightRunner not ready (browser not installed)"
+                : _appCfg?.CurrentValue?.Workspace?.CaptureScreenshots != true ? "CaptureScreenshots disabled"
+                : "capture returned null (app may have failed to start)";
+            _logger.LogWarning(
+                "No screenshot for strategy {Strategy} task {Task}: {Reason}",
+                exec.StrategyId, task.TaskId, reason);
         }
 
         return new CandidateResult

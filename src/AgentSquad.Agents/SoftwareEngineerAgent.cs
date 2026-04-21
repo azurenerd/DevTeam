@@ -2715,6 +2715,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
             await Workspace.CommitAsync(fullMessage, ct);
 
+            // Post-commit validation: ensure required runtime files (e.g. data.json) are tracked
+            // and not gitignored. LLMs frequently generate .gitignore rules that exclude data.json.
+            await ValidateRequiredRuntimeFilesAsync(branchName, ct);
+
             // Publish: treat push failures as PUBLISH errors (NOT generation errors).
             // After a successful commit we must NEVER revert or fall back to legacy —
             // doing so throws away perfectly-good generated code. On push failure, log
@@ -2738,12 +2742,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Best-effort; never blocks the pipeline. The ready-for-review screenshot is still captured
             // later by MarkReadyForReviewWithScreenshotAsync from the real workspace.
             // Here we commit per-candidate preview screenshots so the dashboard gallery shows all strategies.
-            try
+            foreach (var cand in outcome.Evaluation.Candidates)
             {
-                foreach (var cand in outcome.Evaluation.Candidates)
+                try
                 {
                     if (cand.ScreenshotBytes is null || cand.ScreenshotBytes.Length == 0)
+                    {
+                        Logger.LogWarning(
+                            "Strategy {Strategy} has no screenshot bytes for PR #{PrNumber} — skipping commit. " +
+                            "Check CandidateEvaluator logs for capture outcome.",
+                            cand.StrategyId, pr.Number);
                         continue;
+                    }
 
                     var screenshotPath = $".screenshots/pr-{pr.Number}-{cand.StrategyId}.png";
                     await GitHub.CommitBinaryFileAsync(
@@ -2754,11 +2764,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         "Committed {Strategy} preview screenshot ({Size} bytes) to {Path}",
                         cand.StrategyId, cand.ScreenshotBytes.Length, screenshotPath);
                 }
-            }
-            catch (Exception screenshotEx)
-            {
-                Logger.LogDebug(screenshotEx,
-                    "Failed to commit candidate screenshots for PR #{PrNumber} — non-blocking", pr.Number);
+                catch (Exception screenshotEx)
+                {
+                    Logger.LogWarning(screenshotEx,
+                        "Failed to commit {Strategy} screenshot for PR #{PrNumber} — continuing with next candidate",
+                        cand.StrategyId, pr.Number);
+                }
             }
 
             // Write winner-strategy marker into PR body so dashboard can identify which tile is the winner.
@@ -2822,6 +2833,135 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             || blob.Contains("react") || blob.Contains("angular") || blob.Contains("vue")
             || blob.Contains("html") || blob.Contains("ui") || blob.Contains("dashboard")
             || blob.Contains("page") || blob.Contains("frontend");
+    }
+
+    /// <summary>
+    /// After committing generated code, validate that required runtime files (e.g. data.json)
+    /// are tracked in git and not excluded by .gitignore. LLMs frequently generate .gitignore
+    /// rules that exclude data files. Uses git-native checks for accuracy.
+    /// </summary>
+    private async Task ValidateRequiredRuntimeFilesAsync(string branchName, CancellationToken ct)
+    {
+        if (Workspace is null) return;
+
+        // Configurable list of files that must be committed for the app to boot
+        var requiredFiles = new[] { "data.json" };
+
+        try
+        {
+            var repoPath = Workspace.RepoPath;
+
+            foreach (var file in requiredFiles)
+            {
+                // Check if the file is being ignored by .gitignore
+                var checkIgnoreResult = await RunGitCommandAsync(repoPath, $"check-ignore -v {file}", ct);
+
+                if (checkIgnoreResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(checkIgnoreResult.StdOut))
+                {
+                    // File IS being ignored — fix .gitignore
+                    Logger.LogWarning(
+                        "Required file {File} is excluded by .gitignore ({Details}). Auto-fixing.",
+                        file, checkIgnoreResult.StdOut.Trim());
+
+                    await FixGitignoreForRequiredFileAsync(repoPath, file, ct);
+
+                    // Re-verify
+                    var verifyResult = await RunGitCommandAsync(repoPath, $"check-ignore {file}", ct);
+                    if (verifyResult.ExitCode == 0)
+                    {
+                        Logger.LogError(
+                            "Failed to un-ignore required file {File} after .gitignore fix attempt", file);
+                    }
+                    else
+                    {
+                        Logger.LogInformation(
+                            "Successfully un-ignored required file {File} — it will now be tracked", file);
+                        // Stage and commit the .gitignore fix
+                        await RunGitCommandAsync(repoPath, "add -A .gitignore", ct);
+                        await Workspace.CommitAsync(
+                            $"fix: un-ignore required runtime file {file}\n\n" +
+                            $"LLM-generated .gitignore excluded {file}, which is required at runtime.\n" +
+                            $"Removed the exclusion rule to ensure the file is committed.", ct);
+                    }
+                }
+                else
+                {
+                    Logger.LogDebug(
+                        "Required file {File} is not ignored by .gitignore — OK", file);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to validate required runtime files — continuing");
+        }
+    }
+
+    /// <summary>
+    /// Remove .gitignore rules that exclude a required file. Handles common patterns
+    /// like **/data.json, data.json, and /data.json.
+    /// </summary>
+    private async Task FixGitignoreForRequiredFileAsync(string repoPath, string fileName, CancellationToken ct)
+    {
+        // Find .gitignore files in the repo
+        var gitignorePaths = Directory.GetFiles(repoPath, ".gitignore", SearchOption.AllDirectories);
+
+        foreach (var fullPath in gitignorePaths)
+        {
+            try
+            {
+                var lines = await File.ReadAllLinesAsync(fullPath, ct);
+                var filtered = lines.Where(line =>
+                {
+                    var trimmed = line.Trim();
+                    // Remove lines that ignore this specific file
+                    if (trimmed == fileName || trimmed == $"/{fileName}" ||
+                        trimmed == $"**/{fileName}" || trimmed == $"*/{fileName}" ||
+                        trimmed == $"*{fileName}")
+                        return false;
+                    return true;
+                }).ToArray();
+
+                if (filtered.Length < lines.Length)
+                {
+                    // Add a negation rule to explicitly allow the file
+                    var withNegation = filtered.Append($"!{fileName}").Append($"!**/{fileName}").ToArray();
+                    await File.WriteAllLinesAsync(fullPath, withNegation, ct);
+                    Logger.LogInformation(
+                        "Fixed {GitignorePath}: removed {Count} exclusion rule(s) for {File} and added negation",
+                        fullPath, lines.Length - filtered.Length, fileName);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to fix {GitignorePath} for required file {File}",
+                    fullPath, fileName);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Run a git command in the specified directory. Returns exit code and stdout.
+    /// </summary>
+    private static async Task<(int ExitCode, string StdOut)> RunGitCommandAsync(
+        string workDir, string arguments, CancellationToken ct)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("git", arguments)
+        {
+            WorkingDirectory = workDir,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+
+        using var process = System.Diagnostics.Process.Start(psi);
+        if (process is null)
+            return (-1, "");
+
+        var stdout = await process.StandardOutput.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
+        return (process.ExitCode, stdout);
     }
 
     /// <summary>
