@@ -45,6 +45,9 @@ public interface IAgentTaskTracker
     /// <summary>Get all steps grouped by TaskId, with display names and per-task progress.</summary>
     IReadOnlyList<AgentTaskGroup> GetGroupedSteps(string agentId);
 
+    /// <summary>Register a human-friendly display name for a dynamic task ID (e.g., "T1" → "#2221: Implement entire project").</summary>
+    void RegisterTaskDisplayName(string taskId, string displayName);
+
     /// <summary>Get the total count of steps (completed + in-progress + pending) for an agent.</summary>
     (int completed, int total) GetProgress(string agentId);
 

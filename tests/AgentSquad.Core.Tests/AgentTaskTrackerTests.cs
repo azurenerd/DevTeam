@@ -348,7 +348,7 @@ public class AgentTaskTrackerTests : IDisposable
     [InlineData("some-unknown-task", "Some Unknown Task")]
     public void GetTaskDisplayName_MapsCorrectly(string taskId, string expected)
     {
-        Assert.Equal(expected, AgentTaskTracker.GetTaskDisplayName(taskId));
+        Assert.Equal(expected, _tracker.GetTaskDisplayName(taskId));
     }
 
     [Fact]
@@ -361,6 +361,30 @@ public class AgentTaskTrackerTests : IDisposable
 
         Assert.Equal("Engineering Planning", groups[0].DisplayName);
         Assert.Equal("Engineer Orchestration", groups[1].DisplayName);
+    }
+
+    [Fact]
+    public void RegisterTaskDisplayName_OverridesDefaultName()
+    {
+        _tracker.RegisterTaskDisplayName("T1", "#2221: Implement entire project");
+        _tracker.BeginStep("agent-1", "T1", "Generate code");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Single(groups);
+        Assert.Equal("#2221: Implement entire project", groups[0].DisplayName);
+    }
+
+    [Fact]
+    public void RegisterTaskDisplayName_DoesNotOverrideWellKnown()
+    {
+        // Custom name for a well-known key — custom should win
+        _tracker.RegisterTaskDisplayName("pe-planning", "Custom Planning Name");
+        _tracker.BeginStep("agent-1", "pe-planning", "Step 1");
+
+        var groups = _tracker.GetGroupedSteps("agent-1");
+
+        Assert.Equal("Custom Planning Name", groups[0].DisplayName);
     }
 }
 

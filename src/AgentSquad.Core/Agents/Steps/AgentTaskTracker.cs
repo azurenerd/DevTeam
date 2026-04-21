@@ -12,6 +12,7 @@ public class AgentTaskTracker : IAgentTaskTracker
 {
     private readonly ConcurrentDictionary<string, List<AgentTaskStep>> _agentSteps = new();
     private readonly ConcurrentDictionary<string, AgentTaskStep> _stepsById = new();
+    private readonly ConcurrentDictionary<string, string> _customTaskNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<AgentTaskTracker> _logger;
     private int _stepCounter;
 
@@ -235,8 +236,12 @@ public class AgentTaskTracker : IAgentTaskTracker
     }
 
     /// <summary>Converts a TaskId to a human-friendly display name.</summary>
-    internal static string GetTaskDisplayName(string taskId)
+    internal string GetTaskDisplayName(string taskId)
     {
+        // Check agent-registered custom names first (e.g., "T1" → "#2221: Implement entire project")
+        if (_customTaskNames.TryGetValue(taskId, out var customName))
+            return customName;
+
         // Static well-known mappings
         if (WellKnownTaskNames.TryGetValue(taskId, out var name))
             return name;
@@ -270,6 +275,14 @@ public class AgentTaskTracker : IAgentTaskTracker
         ["te-loop"] = "Test Monitoring",
         ["te-review"] = "Test Review",
     };
+
+    /// <inheritdoc />
+    public void RegisterTaskDisplayName(string taskId, string displayName)
+    {
+        ArgumentNullException.ThrowIfNull(taskId);
+        ArgumentNullException.ThrowIfNull(displayName);
+        _customTaskNames[taskId] = displayName;
+    }
 
     public (int completed, int total) GetProgress(string agentId)
     {

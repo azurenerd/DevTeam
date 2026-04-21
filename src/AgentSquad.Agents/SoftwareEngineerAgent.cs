@@ -534,6 +534,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Logger.LogInformation("Restored {Count} tasks from existing engineering-task issues ({Done} done, {Pending} pending)",
                     _taskManager.TotalCount, _taskManager.DoneCount, _taskManager.PendingCount);
 
+                // Add visible planning steps so the dashboard shows what happened during recovery
+                var restoreStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Restore engineering plan",
+                    $"Recovered {_taskManager.TotalCount} tasks from existing issues ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)", Identity.ModelTier);
+
+                // Register display names for restored tasks so dashboard shows meaningful titles
+                RegisterTaskDisplayNames(_taskManager.Tasks);
+
                 // Recover integration issue number if present
                 var recoveredIntegration = _taskManager.Tasks.FirstOrDefault(t => t.Id == IntegrationTaskId);
                 if (recoveredIntegration?.IssueNumber is not null)
@@ -553,6 +560,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 {
                     Logger.LogWarning(ex, "Dependency link restoration failed (non-fatal)");
                 }
+
+                _taskTracker.CompleteStep(restoreStepId);
 
                 _planningComplete = true;
                 UpdateStatus(AgentStatus.Working,
@@ -1188,6 +1197,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var createIssuesStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
             $"Creating {parsedTasks.Count} engineering task issues on GitHub", Identity.ModelTier);
         var createdTasks = await _taskManager.CreateTaskIssuesAsync(parsedTasks, ct);
+
+        // Register display names so dashboard shows "#{issue}: {name}" instead of "T1", "T2", etc.
+        RegisterTaskDisplayNames(createdTasks);
 
         // Track the integration issue number for later self-assignment
         var integrationTask = createdTasks.FirstOrDefault(t => t.Id == IntegrationTaskId);
@@ -5370,6 +5382,22 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         if (wave.StartsWith('W') && int.TryParse(wave.AsSpan(1), out var num))
             return num;
         return 1;
+    }
+
+    /// <summary>
+    /// Registers human-friendly display names for engineering tasks in the task tracker.
+    /// Called on both fresh plan creation and task restoration so the dashboard always
+    /// shows meaningful names like "#2221: Implement entire project" instead of "T1".
+    /// </summary>
+    private void RegisterTaskDisplayNames(IEnumerable<EngineeringTask> tasks)
+    {
+        foreach (var task in tasks)
+        {
+            var displayName = task.IssueNumber.HasValue
+                ? $"#{task.IssueNumber}: {task.Name}"
+                : task.Name;
+            _taskTracker.RegisterTaskDisplayName(task.Id, displayName);
+        }
     }
 
     /// <summary>
