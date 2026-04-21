@@ -17,19 +17,19 @@
 </div>
 
 <div class="stats-row">
-    <div class="stat-card">
+    <div class="stat-card" title="Total number of agents registered in the system (all roles combined)">
         <div class="stat-label">Total Agents</div>
         <div class="stat-value">@_snapshot.TotalAgents</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card" title="Agents that are online and idle, waiting for work to be assigned">
         <div class="stat-label">Online</div>
         <div class="stat-value green">@GetStatusCount(AgentStatus.Online)</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card" title="Agents actively working on a task (AI calls, code generation, PR creation)">
         <div class="stat-label">Working</div>
         <div class="stat-value cyan">@GetStatusCount(AgentStatus.Working)</div>
     </div>
-    <div class="stat-card">
+    <div class="stat-card" title="Agents blocked by a dependency, error, or waiting on human approval">
         <div class="stat-label">Blocked</div>
         <div class="stat-value red">@GetStatusCount(AgentStatus.Blocked)</div>
     </div>
@@ -39,29 +39,29 @@
 <div class="metrics-section">
     <h2>🏗️ Build Health</h2>
     <div class="stats-row">
-        <div class="stat-card">
+        <div class="stat-card" title="Total number of dotnet build invocations across all agents this run">
             <div class="stat-label">Build Attempts</div>
             <div class="stat-value">@GetMetric(BuildTestMetrics.BuildAttempts)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Percentage of build attempts that succeeded on first try or after fixes. Green ≥80%, Yellow ≥50%, Red <50%">
             <div class="stat-label">Build Success Rate</div>
             <div class="stat-value @(BuildSuccessRate >= 80 ? "green" : BuildSuccessRate >= 50 ? "yellow" : "red")">
                 @($"{BuildSuccessRate:F0}")%
             </div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Number of times an agent attempted to fix a broken build by editing code and rebuilding">
             <div class="stat-label">Fix Attempts</div>
             <div class="stat-value yellow">@GetMetric(BuildTestMetrics.BuildFixAttempts)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Full code regenerations triggered when incremental build fixes failed repeatedly">
             <div class="stat-label">Regenerations</div>
             <div class="stat-value yellow">@GetMetric(BuildTestMetrics.BuildRegenerations)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Regenerations that resulted in a successful build afterward">
             <div class="stat-label">Regen Successes</div>
             <div class="stat-value green">@GetMetric(BuildTestMetrics.BuildRegenerationSuccesses)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Commits that were blocked from being pushed because the build failed and could not be fixed">
             <div class="stat-label">Blocked Commits</div>
             <div class="stat-value red">@GetMetric(BuildTestMetrics.BuildBlockedCommits)</div>
         </div>
@@ -72,19 +72,19 @@
 <div class="metrics-section">
     <h2>🧪 Test Health</h2>
     <div class="stats-row">
-        <div class="stat-card">
+        <div class="stat-card" title="Total number of test suite executions (dotnet test) across all agents">
             <div class="stat-label">Test Runs</div>
             <div class="stat-value">@GetMetric(BuildTestMetrics.TestRunsTotal)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Times an agent modified code to fix failing tests and re-ran the test suite">
             <div class="stat-label">Fix Attempts</div>
             <div class="stat-value yellow">@GetMetric(BuildTestMetrics.TestFixAttempts)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Times an agent exhausted all retry attempts and gave up fixing failing tests">
             <div class="stat-label">Max Retries Hit</div>
             <div class="stat-value red">@GetMetric(BuildTestMetrics.TestMaxRetriesReached)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Test cases that were removed by an agent after repeated failures (last resort)">
             <div class="stat-label">Tests Removed</div>
             <div class="stat-value red">@GetMetric(BuildTestMetrics.TestsRemoved)</div>
         </div>
@@ -95,19 +95,19 @@
 <div class="metrics-section">
     <h2>🔄 Rework Health</h2>
     <div class="stats-row">
-        <div class="stat-card">
+        <div class="stat-card" title="Times a PR reviewer (PM or peer) requested changes that triggered a rework cycle">
             <div class="stat-label">Rework Requested</div>
             <div class="stat-value">@GetMetric(BuildTestMetrics.ReworkRequested)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Rework cycles that were successfully completed and the PR re-submitted for review">
             <div class="stat-label">Rework Completed</div>
             <div class="stat-value green">@GetMetric(BuildTestMetrics.ReworkCompleted)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Rework attempts that failed because the reworked code could not build successfully">
             <div class="stat-label">Rework Build-Blocked</div>
             <div class="stat-value red">@GetMetric(BuildTestMetrics.ReworkBuildBlocked)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Percentage of rework requests that were successfully completed. Green ≥80%, Yellow ≥50%, Red <50%">
             <div class="stat-label">Rework Success Rate</div>
             <div class="stat-value @(ReworkSuccessRate >= 80 ? "green" : ReworkSuccessRate >= 50 ? "yellow" : "red")">
                 @($"{ReworkSuccessRate:F0}")%
@@ -120,19 +120,19 @@
 <div class="metrics-section">
     <h2>📦 Commit Quality</h2>
     <div class="stats-row">
-        <div class="stat-card">
+        <div class="stat-card" title="Commits that passed build + test validation and were successfully pushed to the branch">
             <div class="stat-label">Successful Commits</div>
             <div class="stat-value green">@GetMetric(BuildTestMetrics.CommitsSuccessful)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Commits that were blocked from being pushed due to build or test failures">
             <div class="stat-label">Blocked Commits</div>
             <div class="stat-value red">@GetMetric(BuildTestMetrics.CommitsBlocked)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Commits pushed via GitHub API only (no local build/test validation). May contain issues">
             <div class="stat-label">API-Only (unvalidated)</div>
             <div class="stat-value yellow">@GetMetric(BuildTestMetrics.ApiOnlyCommits)</div>
         </div>
-        <div class="stat-card">
+        <div class="stat-card" title="Percentage of commits that passed the build+test gate. Green ≥90%, Yellow ≥70%, Red <70%">
             <div class="stat-label">Commit Gate Pass Rate</div>
             <div class="stat-value @(CommitPassRate >= 90 ? "green" : CommitPassRate >= 70 ? "yellow" : "red")">
                 @($"{CommitPassRate:F0}")%
@@ -165,7 +165,7 @@
 <div class="metrics-section">
     <h2>Active Utilization</h2>
     <div class="utilization-container">
-        <div class="utilization-ring">
+        <div class="utilization-ring" title="Percentage of agents currently working vs total agents. Higher is better utilization">
             <svg width="120" height="120" viewBox="0 0 120 120">
                 <circle class="ring-bg" cx="60" cy="60" r="50" />
                 <circle class="ring-fill" cx="60" cy="60" r="50"
@@ -175,15 +175,15 @@
             <div class="utilization-pct">@($"{UtilizationPct:F0}")%</div>
         </div>
         <div class="utilization-info">
-            <div>
+            <div title="Number of agents currently executing a task vs total registered agents">
                 <div class="info-label">Working Agents</div>
                 <div class="info-value">@GetStatusCount(AgentStatus.Working) / @_snapshot.TotalAgents</div>
             </div>
-            <div>
+            <div title="Agents online but not currently assigned to any task">
                 <div class="info-label">Idle Agents</div>
                 <div class="info-value">@GetStatusCount(AgentStatus.Online)</div>
             </div>
-            <div>
+            <div title="Agents unable to proceed due to a dependency, error, or pending human approval">
                 <div class="info-label">Blocked Agents</div>
                 <div class="info-value">@GetStatusCount(AgentStatus.Blocked)</div>
             </div>
@@ -195,7 +195,7 @@
     <h2>Longest Running Task</h2>
     @if (_snapshot.LongestRunningTask.HasValue)
     {
-        <div class="longest-task">
+        <div class="longest-task" title="The single longest-running active task across all agents. Long durations may indicate a stuck agent or a complex AI generation">
             <span class="task-icon">⏱️</span>
             <div class="task-info">
                 <div class="task-duration">@FormatDuration(_snapshot.LongestRunningTask.Value)</div>
