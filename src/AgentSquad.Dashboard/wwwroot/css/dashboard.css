@@ -961,6 +961,40 @@ main {
     font-size: 1.1rem;
 }
 
+/* ===== Project Complete Banner ===== */
+.project-complete-banner {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    background: linear-gradient(135deg, #0f5132, #198754);
+    color: white;
+    padding: 1.5rem 2rem;
+    border-radius: 12px;
+    margin-bottom: 1.5rem;
+    box-shadow: 0 4px 12px rgba(25, 135, 84, 0.3);
+    animation: slideDown 0.5s ease-out;
+}
+
+.project-complete-banner .complete-icon {
+    font-size: 2.5rem;
+}
+
+.project-complete-banner .complete-content h2 {
+    margin: 0 0 0.25rem 0;
+    font-size: 1.4rem;
+}
+
+.project-complete-banner .complete-content p {
+    margin: 0;
+    opacity: 0.9;
+    font-size: 0.95rem;
+}
+
+@keyframes slideDown {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 /* ===== Blazor Error UI ===== */
 #blazor-error-ui {
     background: var(--bg-card);

@@ -1,0 +1,29 @@
+{
+  "name": "singleprmode-one-task",
+  "description": "Validates SinglePRMode emits exactly one engineering task (T1) that covers all enhancements. Counter-scenario: MultiPRMode decomposes into multiple tasks.",
+  "config": { "singlePRMode": true, "projectDescription": "A simple console calculator app with add, subtract, multiply, divide" },
+  "branches": ["main"],
+  "files": {
+    "main": {
+      "README.md": "# Calculator App",
+      "data.json": "{ \"title\": \"Calculator\" }"
+    }
+  },
+  "issues": [
+    { "number": 200, "title": "Enhancement: Implement addition operation", "body": "Calculator should support addition", "state": "open", "labels": ["enhancement"] },
+    { "number": 201, "title": "Enhancement: Implement subtraction operation", "body": "Calculator should support subtraction", "state": "open", "labels": ["enhancement"] },
+    { "number": 202, "title": "Enhancement: Implement multiplication operation", "body": "Calculator should support multiplication", "state": "open", "labels": ["enhancement"] },
+    { "number": 203, "title": "Enhancement: Implement division operation", "body": "Calculator should support division", "state": "open", "labels": ["enhancement"] }
+  ],
+  "pullRequests": [],
+  "agentScripts": [
+    { "promptContains": "engineering plan", "response": "## Engineering Plan\n\n### T1: Full Calculator Implementation\nImplement all four arithmetic operations (add, subtract, multiply, divide) in a single task covering enhancements #200-#203.\n\nComplexity: High\nWave: W0" },
+    { "promptContains": "implement", "response": "public class Calculator\n{\n    public double Add(double a, double b) => a + b;\n    public double Subtract(double a, double b) => a - b;\n    public double Multiply(double a, double b) => a * b;\n    public double Divide(double a, double b) => b != 0 ? a / b : throw new DivideByZeroException();\n}" }
+  ],
+  "expect": {
+    "minIssues": 4,
+    "minPullRequests": 0,
+    "branchExists": ["main"],
+    "workflowPhase": "EngineeringPlanning"
+  }
+}

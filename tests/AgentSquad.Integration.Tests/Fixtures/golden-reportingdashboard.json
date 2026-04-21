@@ -1,0 +1,42 @@
+{
+  "name": "golden-reportingdashboard",
+  "description": "Golden-case end-to-end: given ReportingDashboard project description, asserts resulting PR chain produces buildable Blazor Server project with header/timeline/heatmap components. Full lifecycle from enhancement creation through merge.",
+  "config": { "singlePRMode": true, "projectDescription": "A Blazor Server reporting dashboard with interactive charts showing team velocity, sprint burndown, and code quality heatmaps. Uses Chart.js for visualizations and includes a responsive header with project selector." },
+  "branches": ["main", "agent/se-1/reporting-dashboard"],
+  "files": {
+    "main": {
+      "README.md": "# ReportingDashboard\nA Blazor Server reporting dashboard",
+      "data.json": "{ \"title\": \"Reporting Dashboard\", \"sprints\": [{ \"name\": \"Sprint 1\", \"velocity\": 42 }] }",
+      "ReportingDashboard.csproj": "<Project Sdk=\"Microsoft.NET.Sdk.Web\">\n  <PropertyGroup>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>"
+    },
+    "agent/se-1/reporting-dashboard": {
+      "Components/Pages/Dashboard.razor": "@page \"/\"\n<div class=\"dashboard-container\">\n  <Header ProjectName=\"@projectName\" />\n  <div class=\"charts-grid\">\n    <VelocityChart Data=\"@velocityData\" />\n    <BurndownChart Data=\"@burndownData\" />\n    <QualityHeatmap Data=\"@heatmapData\" />\n  </div>\n</div>",
+      "Components/Header.razor": "<div class=\"header\" style=\"background:#1a1a2e;color:white;padding:1rem;\">\n  <h1>@ProjectName</h1>\n  <select @onchange=\"OnProjectChanged\">\n    @foreach(var p in Projects) { <option>@p</option> }\n  </select>\n</div>\n@code { [Parameter] public string ProjectName { get; set; } = \"\"; }",
+      "Components/VelocityChart.razor": "<div class=\"chart-card\" style=\"background:#f8f9fa;border:2px dashed #6c63ff;padding:2rem;min-height:200px;\">\n  <h3 style=\"color:#6c63ff;font-weight:bold;\">📊 Team Velocity</h3>\n  <canvas id=\"velocityChart\"></canvas>\n</div>",
+      "Components/BurndownChart.razor": "<div class=\"chart-card\" style=\"background:#f8f9fa;border:2px dashed #e94560;padding:2rem;min-height:200px;\">\n  <h3 style=\"color:#e94560;font-weight:bold;\">📉 Sprint Burndown</h3>\n  <canvas id=\"burndownChart\"></canvas>\n</div>",
+      "Components/QualityHeatmap.razor": "<div class=\"chart-card\" style=\"background:#f8f9fa;border:2px dashed #0f3460;padding:2rem;min-height:200px;\">\n  <h3 style=\"color:#0f3460;font-weight:bold;\">🔥 Code Quality Heatmap</h3>\n  <canvas id=\"heatmapChart\"></canvas>\n</div>",
+      "wwwroot/css/app.css": ".dashboard-container { max-width: 1200px; margin: 0 auto; }\n.charts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 1rem; padding: 1rem; }\n.chart-card { border-radius: 8px; }",
+      "Program.cs": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddRazorComponents().AddInteractiveServerComponents();\nvar app = builder.Build();\napp.UseStaticFiles();\napp.MapRazorComponents<App>();\napp.Run();",
+      ".screenshots/pr-400-ready-for-review.png": "SCREENSHOT_WITH_VISIBLE_COMPONENTS"
+    }
+  },
+  "issues": [
+    { "number": 400, "title": "Enhancement: Build reporting dashboard with velocity, burndown, and heatmap charts", "body": "Create a Blazor Server dashboard with Chart.js visualizations", "state": "open", "labels": ["enhancement"] },
+    { "number": 401, "title": "SoftwareEngineer: Full Dashboard Implementation", "body": "Task T1: Implement all dashboard components including header, velocity chart, burndown chart, and quality heatmap", "state": "open", "labels": ["engineering-task", "wave:W0"] }
+  ],
+  "pullRequests": [
+    { "number": 450, "title": "Software Engineer 1: Full Dashboard Implementation", "headBranch": "agent/se-1/reporting-dashboard", "baseBranch": "main", "state": "open", "labels": ["ready-for-review"], "changedFiles": { "Components/Pages/Dashboard.razor": "...", "Components/Header.razor": "...", "Components/VelocityChart.razor": "...", "Components/BurndownChart.razor": "...", "Components/QualityHeatmap.razor": "...", "Program.cs": "..." } }
+  ],
+  "agentScripts": [
+    { "promptContains": "architecture review", "response": "APPROVED: The implementation follows Blazor Server conventions correctly. Component decomposition is clean with proper parameter passing. Chart.js integration via canvas elements is the standard approach." },
+    { "promptContains": "screenshot", "response": "The screenshot shows a well-structured dashboard with a dark header containing the project name and selector, and three chart cards below in a responsive grid: Team Velocity (purple), Sprint Burndown (red), and Code Quality Heatmap (blue). All sections have visible titles and styled borders." },
+    { "promptContains": "test", "response": "All tests pass.\n- Unit tests: 5 passed\n- Integration tests: 2 passed\n- Build: succeeded" },
+    { "promptContains": "PM review", "response": "APPROVED: All acceptance criteria met. The dashboard displays velocity, burndown, and heatmap visualizations with responsive layout and project selector." }
+  ],
+  "expect": {
+    "minIssues": 2,
+    "minPullRequests": 1,
+    "branchExists": ["main", "agent/se-1/reporting-dashboard"],
+    "fileExists": ["Components/Pages/Dashboard.razor", "Components/Header.razor", "Components/VelocityChart.razor"]
+  }
+}

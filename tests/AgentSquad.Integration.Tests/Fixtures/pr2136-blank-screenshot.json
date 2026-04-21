@@ -1,0 +1,33 @@
+{
+  "name": "pr2136-blank-screenshot",
+  "description": "Replays the PR #2136 scenario where a blank screenshot blocks merge. Validates that needs-human-review label is applied and merge is blocked when screenshot shows blank/white content.",
+  "config": { "singlePRMode": false, "projectDescription": "A Blazor Server reporting dashboard with header, timeline, and heatmap components" },
+  "branches": ["main", "agent/se-1/implement-dashboard"],
+  "files": {
+    "main": {
+      "README.md": "# ReportingDashboard",
+      "data.json": "{ \"title\": \"Reporting Dashboard\" }"
+    },
+    "agent/se-1/implement-dashboard": {
+      "src/Dashboard.razor": "@page \"/\"\n<h1>Dashboard</h1>\n<div class=\"placeholder\">Coming soon</div>",
+      "src/Program.cs": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddRazorPages();\nvar app = builder.Build();\napp.MapRazorPages();\napp.Run();",
+      ".screenshots/pr-2136-ready-for-review.png": "BLANK_SCREENSHOT_PLACEHOLDER"
+    }
+  },
+  "issues": [
+    { "number": 100, "title": "Enhancement: Implement reporting dashboard with header, timeline, and heatmap", "body": "Build a Blazor Server reporting dashboard", "state": "open", "labels": ["enhancement"] },
+    { "number": 101, "title": "SoftwareEngineer: Implement Dashboard Components", "body": "Task T1: Implement header, timeline, and heatmap components for the reporting dashboard", "state": "open", "labels": ["engineering-task", "wave:W0"] }
+  ],
+  "pullRequests": [
+    { "number": 2136, "title": "Software Engineer 1: Implement Dashboard Components", "headBranch": "agent/se-1/implement-dashboard", "baseBranch": "main", "state": "open", "labels": ["ready-for-review"], "changedFiles": { "src/Dashboard.razor": "@page \"/\"\n<h1>Dashboard</h1>\n<div class=\"placeholder\">Coming soon</div>" } }
+  ],
+  "agentScripts": [
+    { "promptContains": "screenshot", "response": "The screenshot shows a blank white page with no visible UI components. The dashboard layout, header, timeline, and heatmap sections are not rendering." },
+    { "promptContains": "review", "response": "NEEDS_REWORK: The PR shows placeholder content only. The dashboard components are not implemented - just empty divs with 'Coming soon' text." }
+  ],
+  "expect": {
+    "minIssues": 2,
+    "minPullRequests": 1,
+    "branchExists": ["main", "agent/se-1/implement-dashboard"]
+  }
+}

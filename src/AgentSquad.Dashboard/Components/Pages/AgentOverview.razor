@@ -61,6 +61,17 @@
     </div>
 }
 
+@if (_isProjectComplete)
+{
+    <div class="project-complete-banner" data-testid="project-complete-banner">
+        <div class="complete-icon">🎉</div>
+        <div class="complete-content">
+            <h2>Project Complete!</h2>
+            <p>All PRs merged and all issues closed — the project has been delivered successfully.</p>
+        </div>
+    </div>
+}
+
 <div class="stats-row">
     <div class="stat-card">
         <div class="stat-label">Total Agents</div>
@@ -420,6 +431,7 @@ else
     private string _chatInput = "";
     private bool _chatSending;
     private bool _refreshing;
+    private bool _isProjectComplete;
 
     // Team composition state
     private string? _teamComposition;
@@ -440,6 +452,8 @@ else
     {
         _agents = DataService.GetAllAgentSnapshots().ToList();
         _hasDeadlock = DataService.HasDeadlock(out _deadlockCycle);
+        var health = DataService.GetExecutionHealthAssessment();
+        _isProjectComplete = health.Phase == "Completion";
     }
 
     private async Task LoadTeamCompositionAsync()

@@ -1,0 +1,33 @@
+{
+  "name": "rework-noop-halts-cycle",
+  "description": "Scripts Architect to produce identical re-emit on round 2. Asserts cycle halts with warning comment and does NOT reach APPROVED. Validates the rework no-op detection.",
+  "config": { "singlePRMode": true, "projectDescription": "A REST API with CRUD endpoints for a todo list" },
+  "branches": ["main", "agent/se-1/implement-api"],
+  "files": {
+    "main": {
+      "README.md": "# Todo API",
+      "data.json": "{ \"title\": \"Todo API\" }"
+    },
+    "agent/se-1/implement-api": {
+      "src/TodoController.cs": "// Incomplete implementation\npublic class TodoController { }",
+      "src/Program.cs": "var builder = WebApplication.CreateBuilder(args);\nvar app = builder.Build();\napp.Run();"
+    }
+  },
+  "issues": [
+    { "number": 300, "title": "Enhancement: Build REST API with CRUD for todos", "body": "Implement GET/POST/PUT/DELETE for todo items", "state": "open", "labels": ["enhancement"] },
+    { "number": 301, "title": "SoftwareEngineer: Implement Todo API", "body": "Task T1: Build REST API with full CRUD operations", "state": "open", "labels": ["engineering-task", "wave:W0"] }
+  ],
+  "pullRequests": [
+    { "number": 350, "title": "Software Engineer 1: Implement Todo API", "headBranch": "agent/se-1/implement-api", "baseBranch": "main", "state": "open", "labels": ["ready-for-review", "rework-round-1"], "changedFiles": { "src/TodoController.cs": "// Incomplete implementation\npublic class TodoController { }" } }
+  ],
+  "agentScripts": [
+    { "promptContains": "architecture review", "response": "NEEDS_REWORK: The TodoController is empty. It needs proper CRUD endpoints with dependency injection, model binding, and error handling." },
+    { "promptContains": "rework", "response": "// Incomplete implementation\npublic class TodoController { }" },
+    { "promptContains": "re-review", "response": "NEEDS_REWORK: The TodoController is still empty. No changes were made from the previous review round." }
+  ],
+  "expect": {
+    "minIssues": 2,
+    "minPullRequests": 1,
+    "branchExists": ["main", "agent/se-1/implement-api"]
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "regression-batch",
+  "description": "Batch regression fixture covering: scaffolding without data.json, clean happy-path with proper data, and stale screenshot filtering. Tests multiple gate conditions.",
+  "config": { "singlePRMode": true, "projectDescription": "A simple web app with a landing page and about page" },
+  "branches": ["main", "agent/se-1/web-app"],
+  "files": {
+    "main": {
+      "README.md": "# SimpleWebApp",
+      "data.json": "{ \"title\": \"Simple Web App\", \"pages\": [\"home\", \"about\"] }"
+    },
+    "agent/se-1/web-app": {
+      "Pages/Index.razor": "@page \"/\"\n<div style=\"background:#e8f5e9;border:2px dashed #4caf50;padding:2rem;min-height:300px;\">\n  <h1 style=\"color:#4caf50;font-weight:bold;\">🏠 Home Page</h1>\n  <p>Welcome to the Simple Web App</p>\n</div>",
+      "Pages/About.razor": "@page \"/about\"\n<div style=\"background:#e3f2fd;border:2px dashed #2196f3;padding:2rem;min-height:300px;\">\n  <h1 style=\"color:#2196f3;font-weight:bold;\">ℹ️ About</h1>\n  <p>About this application</p>\n</div>",
+      "Program.cs": "var builder = WebApplication.CreateBuilder(args);\nbuilder.Services.AddRazorComponents();\nvar app = builder.Build();\napp.MapRazorComponents<App>();\napp.Run();",
+      "data.json": "{ \"title\": \"Simple Web App\", \"pages\": [\"home\", \"about\"] }",
+      ".screenshots/pr-500-ready-for-review.png": "SCREENSHOT_WITH_VISIBLE_SCAFFOLD"
+    }
+  },
+  "issues": [
+    { "number": 500, "title": "Enhancement: Create landing page and about page", "body": "Build a simple web app with home and about pages", "state": "open", "labels": ["enhancement"] },
+    { "number": 501, "title": "SoftwareEngineer: Implement Web Pages", "body": "Task T1: Create home and about pages with proper styling", "state": "open", "labels": ["engineering-task", "wave:W0"] }
+  ],
+  "pullRequests": [
+    { "number": 550, "title": "Software Engineer 1: Implement Web Pages", "headBranch": "agent/se-1/web-app", "baseBranch": "main", "state": "open", "labels": ["ready-for-review"], "changedFiles": { "Pages/Index.razor": "...", "Pages/About.razor": "...", "data.json": "..." } }
+  ],
+  "agentScripts": [
+    { "promptContains": "review", "response": "APPROVED: Both pages are properly implemented with visual scaffold patterns (colored backgrounds, dashed borders, bold labels). The data.json file is present on the PR branch." },
+    { "promptContains": "test", "response": "Build succeeded. All tests pass." },
+    { "promptContains": "screenshot", "response": "The screenshot shows two properly styled scaffold sections: a green Home page section and a blue About page section. Both have visible titles, dashed borders, and colored backgrounds — no blank content." }
+  ],
+  "expect": {
+    "minIssues": 2,
+    "minPullRequests": 1,
+    "branchExists": ["main", "agent/se-1/web-app"],
+    "fileExists": ["Pages/Index.razor", "Pages/About.razor"]
+  }
+}
