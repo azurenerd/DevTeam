@@ -340,15 +340,22 @@ else
                         var tileClass = cand.IsWinner ? "ntl-screenshot-tile ntl-screenshot-winner" : "ntl-screenshot-tile";
                         <a class="@tileClass"
                            href="@cand.ImageUrl" target="_blank" rel="noopener"
-                           title="@(cand.IsWinner ? $"Winning candidate ({cand.MethodLabel}) — click to open on GitHub" : $"{cand.MethodLabel} — click to open on GitHub")">
+                           title="@(cand.IsWinner ? $"Winning candidate ({cand.MethodLabel}) — click to open on GitHub" : $"{cand.MethodLabel}")">
                             <div class="ntl-screenshot-image-wrap">
                                 <img src="@cand.ImageUrl"
                                      alt="PR #@spr.Number @cand.MethodLabel preview"
                                      loading="lazy"
                                      onerror="this.style.display='none'; this.parentElement.classList.add('is-pending');" />
                                 <div class="ntl-screenshot-pending">
-                                    <div class="ntl-screenshot-spinner"></div>
-                                    <span class="ntl-screenshot-pending-text">Capturing…</span>
+                                    @if (cand.IsWinner)
+                                    {
+                                        <div class="ntl-screenshot-spinner"></div>
+                                        <span class="ntl-screenshot-pending-text">Capturing…</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="ntl-screenshot-pending-text">No preview</span>
+                                    }
                                 </div>
                             </div>
                             <div class="ntl-screenshot-tile-footer">
