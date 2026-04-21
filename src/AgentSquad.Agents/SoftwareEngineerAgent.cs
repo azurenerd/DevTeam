@@ -654,6 +654,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Complexity = "High",
                 Dependencies = new List<string>(),
                 ParentIssueNumber = enhancementIssues.FirstOrDefault()?.Number,
+                RelatedEnhancementNumbers = enhancementIssues.Select(e => e.Number).ToList(),
                 Wave = "W0",
                 OwnedFiles = new List<string>(),
                 SkillTags = new List<string> { "fullstack", "foundation" }
@@ -1311,11 +1312,24 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         try
         {
+            // Defense-in-depth: never create extra tasks in SinglePRMode
+            if (Config.Limits.SinglePRMode)
+            {
+                Logger.LogInformation(
+                    "ValidateEnhancementCoverageAsync skipped — SinglePRMode (T1 covers all enhancements)");
+                return;
+            }
+
             // Build set of parent issue numbers that have engineering tasks
-            var coveredParents = _taskManager.Tasks
-                .Where(t => t.ParentIssueNumber.HasValue)
-                .Select(t => t.ParentIssueNumber!.Value)
-                .ToHashSet();
+            // Include both ParentIssueNumber (single parent) and RelatedEnhancementNumbers (multi-parent)
+            var coveredParents = new HashSet<int>();
+            foreach (var t in _taskManager.Tasks)
+            {
+                if (t.ParentIssueNumber.HasValue)
+                    coveredParents.Add(t.ParentIssueNumber.Value);
+                foreach (var related in t.RelatedEnhancementNumbers)
+                    coveredParents.Add(related);
+            }
 
             var uncoveredEnhancements = enhancementIssues
                 .Where(e => !coveredParents.Contains(e.Number))
@@ -6321,6 +6335,8 @@ internal record EngineeringTask
     public List<int> DependencyIssueNumbers { get; init; } = new();
     /// <summary>Parent PM issue number (parsed from issue body "Parent Issue").</summary>
     public int? ParentIssueNumber { get; init; }
+    /// <summary>All enhancement issue numbers this task covers (used in SinglePRMode where one task spans many enhancements).</summary>
+    public List<int> RelatedEnhancementNumbers { get; init; } = new();
     /// <summary>Current GitHub labels on this issue (for status label management).</summary>
     public List<string> Labels { get; init; } = new();
 
