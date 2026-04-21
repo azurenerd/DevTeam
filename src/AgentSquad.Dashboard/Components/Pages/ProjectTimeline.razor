@@ -132,62 +132,55 @@ else
                                 <div @key="@($"issue-{issue.Number}")" class="ntl-node-cluster" style="--node-delay: @(nodeIdx * 0.06)s">
                                     <div class="ntl-spine-dot @(isClosed ? "done" : "active")"></div>
                                     <div class="ntl-connector"></div>
-                                    <div class="ntl-node @(isClosed ? "ntl-node-closed" : "ntl-node-open") @(isSelected ? "ntl-node-selected" : "") @(isAwaitingReview ? "ntl-node-awaiting" : "")"
-                                         @onclick="() => SelectNode(issue.Number)" title="@issue.Title">
-                                        <div class="ntl-node-indicator @(isClosed ? "ind-closed" : "ind-open")"></div>
-                                        <div class="ntl-node-body">
-                                            <span class="ntl-node-num ntl-type-@(group.IsPullRequest ? "pr" : "issue")">@(group.IsPullRequest ? "PR" : "Issue") #@issue.Number</span>
-                                            <span class="ntl-node-title">@TruncateTitle(issue.Title, 34)</span>
+                                    <div class="ntl-cluster-body">
+                                        <div class="ntl-node @(isClosed ? "ntl-node-closed" : "ntl-node-open") @(isSelected ? "ntl-node-selected" : "") @(isAwaitingReview ? "ntl-node-awaiting" : "")"
+                                             @onclick="() => SelectNode(issue.Number)"
+                                             title="@(group.DependsOn.Count > 0 ? $"Blocked by {string.Join(", ", group.DependsOn.Select(d => $"#{d}"))} — {issue.Title}" : issue.Title)">
+                                            <div class="ntl-node-indicator @(isClosed ? "ind-closed" : "ind-open")"></div>
+                                            <div class="ntl-node-body">
+                                                <span class="ntl-node-num ntl-type-@(group.IsPullRequest ? "pr" : "issue")">@(group.IsPullRequest ? "PR" : "Issue") #@issue.Number</span>
+                                                <span class="ntl-node-title">@TruncateTitle(issue.Title, 34)</span>
+                                            </div>
                                         </div>
+
+                                        @* Child issue nodes *@
+                                        @if (group.ChildIssues.Count > 0)
+                                        {
+                                            <div class="ntl-children">
+                                                @foreach (var child in group.ChildIssues)
+                                                {
+                                                    var childClosed = child.State == "closed";
+                                                    <div class="ntl-child-node @(childClosed ? "ntl-child-closed" : "ntl-child-open")"
+                                                         @onclick="() => SelectNode(child.Number)" @onclick:stopPropagation="true"
+                                                         title="@child.Title">
+                                                        <div class="ntl-child-indicator @(childClosed ? "ind-closed" : "ind-open")"></div>
+                                                        <span class="ntl-child-label">Issue #@child.Number @TruncateTitle(child.Title, 24)</span>
+                                                    </div>
+                                                }
+                                            </div>
+                                        }
+
+                                        @* Linked PR nodes (shown as children in engineering view) *@
+                                        @if (_devViewMode == "engineering" && group.LinkedPRs.Count > 0)
+                                        {
+                                            <div class="ntl-children">
+                                                @foreach (var pr in group.LinkedPRs)
+                                                {
+                                                    var prMerged = pr.IsMerged;
+                                                    var prClosed = pr.State == "closed";
+                                                    var prSelected = _selectedPr == pr.Number;
+                                                    var prClass = prMerged ? "ntl-child-merged" : prClosed ? "ntl-child-closed" : "ntl-child-open";
+                                                    var indClass = prMerged ? "ind-merged" : prClosed ? "ind-closed" : "ind-open";
+                                                    <div @key="@($"pr-{pr.Number}")" class="ntl-child-node ntl-child-pr @prClass @(prSelected ? "ntl-child-selected" : "")"
+                                                         @onclick="() => SelectPr(pr.Number)" @onclick:stopPropagation="true"
+                                                         title="@pr.Title" role="button">
+                                                        <div class="ntl-child-indicator @indClass"></div>
+                                                        <span class="ntl-child-label">PR #@pr.Number @TruncateTitle(pr.Title, 24)</span>
+                                                    </div>
+                                                }
+                                            </div>
+                                        }
                                     </div>
-
-                                    @* Dependency badge for wave items *@
-                                    @if (group.DependsOn.Count > 0)
-                                    {
-                                        <div class="ntl-dep-badge" title="Blocked by @(string.Join(", ", group.DependsOn.Select(d => $"#{d}")))">
-                                            🔗 @(string.Join(", ", group.DependsOn.Select(d => $"#{d}")))
-                                        </div>
-                                    }
-
-                                    @* Child issue nodes *@
-                                    @if (group.ChildIssues.Count > 0)
-                                    {
-                                        <div class="ntl-children">
-                                            @foreach (var child in group.ChildIssues)
-                                            {
-                                                var childClosed = child.State == "closed";
-                                                <div class="ntl-child-connector"></div>
-                                                <div class="ntl-child-node @(childClosed ? "ntl-child-closed" : "ntl-child-open")"
-                                                     @onclick="() => SelectNode(child.Number)" @onclick:stopPropagation="true"
-                                                     title="@child.Title">
-                                                    <div class="ntl-child-indicator @(childClosed ? "ind-closed" : "ind-open")"></div>
-                                                    <span class="ntl-child-label">Issue #@child.Number @TruncateTitle(child.Title, 24)</span>
-                                                </div>
-                                            }
-                                        </div>
-                                    }
-
-                                    @* Linked PR nodes (shown as children in engineering view) *@
-                                    @if (_devViewMode == "engineering" && group.LinkedPRs.Count > 0)
-                                    {
-                                        <div class="ntl-children">
-                                            @foreach (var pr in group.LinkedPRs)
-                                            {
-                                                var prMerged = pr.IsMerged;
-                                                var prClosed = pr.State == "closed";
-                                                var prSelected = _selectedPr == pr.Number;
-                                                var prClass = prMerged ? "ntl-child-merged" : prClosed ? "ntl-child-closed" : "ntl-child-open";
-                                                var indClass = prMerged ? "ind-merged" : prClosed ? "ind-closed" : "ind-open";
-                                                <div class="ntl-child-connector"></div>
-                                                <div @key="@($"pr-{pr.Number}")" class="ntl-child-node ntl-child-pr @prClass @(prSelected ? "ntl-child-selected" : "")"
-                                                     @onclick="() => SelectPr(pr.Number)" @onclick:stopPropagation="true"
-                                                     title="@pr.Title" role="button">
-                                                    <div class="ntl-child-indicator @indClass"></div>
-                                                    <span class="ntl-child-label">PR #@pr.Number @TruncateTitle(pr.Title, 24)</span>
-                                                </div>
-                                            }
-                                        </div>
-                                    }
                                 </div>
                             }
                         </div>
@@ -594,6 +587,41 @@ else
                     AssignedAgent = pr.AssignedAgent
                 });
             }
+        }
+
+        // --- Step 2a: Anchor Research/PMSpec/Architect phases when preserved across a mini-reset ---
+        // After a mini-reset the current run has no new Researcher/PM/Architect PRs (the docs
+        // were kept on disk), so Steps 1/2 leave those phases empty and the timeline starts
+        // abruptly at Development. Reach back into the full raw PR list and graft the most
+        // recent PR of each doc-phase prefix as a synthetic item if the phase is otherwise
+        // empty — giving the user visible "Research ✓ / PM Spec ✓ / Architecture ✓" columns.
+        string[] docPrefixes = { "Researcher:", "ProgramManager:", "Architect:" };
+        foreach (var prefix in docPrefixes)
+        {
+            bool alreadyPresent = _issues.Any(i => i.Title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+            if (alreadyPresent) continue;
+
+            var anchorPr = _rawPullRequests
+                .Where(p => p.Title.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(p => p.CreatedAt)
+                .FirstOrDefault();
+            if (anchorPr is null) continue;
+
+            _syntheticPrNumbers.Add(anchorPr.Number);
+            _issues.Add(new AgentIssue
+            {
+                Number = anchorPr.Number,
+                Title = anchorPr.Title,
+                Body = anchorPr.Body,
+                State = anchorPr.IsMerged ? "closed" : anchorPr.State,
+                CreatedAt = anchorPr.CreatedAt,
+                UpdatedAt = anchorPr.UpdatedAt,
+                Labels = anchorPr.Labels,
+                Url = anchorPr.Url,
+                AssignedAgent = anchorPr.AssignedAgent
+            });
+            if (!_pullRequests.Any(p => p.Number == anchorPr.Number))
+                _pullRequests.Add(anchorPr);
         }
 
         // --- Step 2b: Remove older engineering-task duplicates ---

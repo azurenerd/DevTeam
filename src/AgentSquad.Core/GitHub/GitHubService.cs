@@ -520,8 +520,44 @@ public class GitHubService : IGitHubService
                         "Line-based review API returned {StatusCode} on PR #{Number}: {Error}. Falling back.",
                         (int)response.StatusCode, prNumber, errorBody);
 
-                    // If "own pull request" error, downgrade to COMMENT event and inline the feedback
                     bool isOwnPrError = errorBody.Contains("own pull request", StringComparison.OrdinalIgnoreCase);
+
+                    if (isOwnPrError && mappedComments.Count > 0)
+                    {
+                        // GitHub forbids APPROVE/REQUEST_CHANGES on your own PR, but DOES allow a
+                        // COMMENT-event review with inline review comments attached. Retry the same
+                        // raw-HTTP /reviews call with event=COMMENT so comments stay inline on the
+                        // Files-changed tab instead of being concatenated into the body (a prior
+                        // fallback path would lose inline positioning).
+                        var retryPayload = new
+                        {
+                            body = body + "\n\n_(Downgraded to COMMENT: original verdict was " + eventType.ToUpperInvariant() + " but GitHub forbids that on own PR.)_",
+                            @event = "COMMENT",
+                            commit_id = commitId,
+                            comments = mappedComments
+                        };
+                        var retryJson = System.Text.Json.JsonSerializer.Serialize(retryPayload);
+                        var retryResponse = await httpClient.PostAsync(
+                            $"https://api.github.com/repos/{_owner}/{_repo}/pulls/{prNumber}/reviews",
+                            new StringContent(retryJson, Encoding.UTF8, "application/json"), ct);
+
+                        if (retryResponse.IsSuccessStatusCode)
+                        {
+                            _logger.LogInformation(
+                                "Own-PR downgrade: submitted COMMENT review on PR #{Number} with {Count} inline comments intact on Files-changed tab",
+                                prNumber, mappedComments.Count);
+                            TrackRateLimit();
+                            return;
+                        }
+
+                        var retryError = await retryResponse.Content.ReadAsStringAsync(ct);
+                        _logger.LogWarning(
+                            "Own-PR COMMENT retry also failed ({Status}): {Error}. Last-resort: body-only COMMENT review.",
+                            (int)retryResponse.StatusCode, retryError);
+                    }
+
+                    // Last-resort fallback: body-only review via Octokit. Only reached when both the
+                    // original and the COMMENT retry failed, or when this was not an own-PR error.
                     var reviewEvent = isOwnPrError
                         ? PullRequestReviewEvent.Comment
                         : eventType.ToUpperInvariant() switch
@@ -531,7 +567,6 @@ public class GitHubService : IGitHubService
                             _ => PullRequestReviewEvent.Comment
                         };
 
-                    // Append inline comments as formatted text so feedback isn't lost
                     var fullBody = body;
                     if (isOwnPrError && mappedComments.Count > 0)
                     {
@@ -542,7 +577,7 @@ public class GitHubService : IGitHubService
                             sb.AppendLine($"- **`{c.FilePath}:{c.Line}`** — {c.Body}");
                         }
                         fullBody = sb.ToString();
-                        _logger.LogInformation("Downgraded {Event} to COMMENT on own PR #{Number}, appended {Count} inline comments to body",
+                        _logger.LogWarning("Downgraded {Event} to COMMENT on own PR #{Number} via body fallback (inline retry failed), {Count} comments moved to body",
                             eventType, prNumber, comments.Count);
                     }
 
