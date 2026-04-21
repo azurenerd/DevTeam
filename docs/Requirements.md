@@ -51,6 +51,8 @@
 39. [Visual Scaffold Placeholder Requirements](#38-visual-scaffold-placeholder-requirements)
 40. [Planned Future Work](#39-planned-future-work)
 41. [Strategy Framework (Phases 0–6)](#40-strategy-framework-phases-06)
+42. [SinglePRMode Requirements](#41-singleprmode-requirements)
+43. [WS3 Offline Integration Test Harness](#42-ws3-offline-integration-test-harness)
 
 ---
 
@@ -828,6 +830,20 @@ Code PRs go through a **sequential three-phase** review pipeline. Each phase has
 3. Engineer reworks → commits fixes → TE re-tests → updates screenshots → PM re-reviews
 4. Max `MaxPmReworkCycles` (default 3) rework attempts before force-approval
 
+### REQ-REV-008: Inline Review Comment Delivery
+
+- **REQ-REV-008a**: Inline review comments (file-level and line-level) MUST use the `COMMENT` event type when submitting the review via the GitHub API. The `APPROVE` and `REQUEST_CHANGES` event types MUST NOT be used for the review-submit call, because single-PAT setups (where the same token creates PRs and reviews) receive a 422 rejection from GitHub when attempting to approve or request changes on a self-authored PR.
+- **REQ-REV-008b**: `DiffPositionMapper` MUST filter out-of-diff comments — any comment targeting a line not present in the PR diff SHALL be silently dropped rather than causing a 422 error. The filtering MUST be logged at `Information` level for visibility during debugging and audit.
+- **REQ-REV-008c**: The overall review verdict (APPROVED vs. CHANGES_REQUESTED) SHALL still be communicated via PR comments and labels (existing mechanism in REQ-REV-001); the `COMMENT` event type on the review-submit API is solely for delivering inline annotations without triggering GitHub's self-review restrictions.
+
+**Scenario: Inline Review Under Single-PAT Setup**
+1. SE authors PR #42 using PAT `ghp_agent`
+2. Architect reviews PR #42 — AI produces 3 inline comments on specific code lines
+3. `DiffPositionMapper` validates each comment targets a line present in the diff; 1 comment is out-of-diff → filtered (logged at Information)
+4. Review submitted with event type `COMMENT` (not `APPROVE`) → 2 inline comments posted successfully
+5. Architect posts "[Architect] APPROVED" as a regular PR comment and adds `architect-approved` label
+6. No 422 error — single PAT works end-to-end
+
 ---
 
 ## 13. Rework & Feedback Loop Requirements
@@ -1148,6 +1164,17 @@ Each phase of the sequential pipeline has its **own independent retry limit**:
 - **REQ-DASH-012b**: `ValidatePortHealth` samples 20 ports across the 5100–5899 range and records `OccupiedPortCount` and `LastPortCheckUtc` on `PlaywrightRunner`. It MUST log a warning when more than 50% of the sampled ports are occupied, and MUST log a warning when the base/derived port itself is occupied — these signals indicate resource exhaustion or a leaked app-under-test process.
 - **REQ-DASH-012c**: `CleanupStaleBackups(rootPath)` is invoked by the health service. It scans the workspace root for `*.playwright-bak` files older than 1 hour and restores them (recovering the original source file / launchSettings / appsettings). This self-heals the "agent crashed mid-launch and left source files patched" failure mode.
 - **REQ-DASH-012d**: The `/health/playwright` REST endpoint on the Runner (mapped in `Program.cs`) exposes the current browser health plus `OccupiedPortCount` and `LastPortCheckUtc` so the dashboard `PlaywrightStatusBadge` and external monitoring can surface port-space pressure in real time.
+
+### REQ-DASH-013: Strategy Gallery
+
+- **REQ-DASH-013a**: The `/strategies` dashboard page MUST include a **strategy gallery** section that displays candidate screenshots for each completed strategy run. All candidate screenshots SHALL be rendered as tile cards; the winning candidate's tile MUST be visually highlighted (e.g., border color, badge, or glow effect).
+- **REQ-DASH-013b**: Non-winner candidate tiles that have no screenshot (e.g., the candidate failed before the screenshot capture phase) MUST display a "No preview" placeholder instead of a broken image or empty tile.
+- **REQ-DASH-013c**: Screenshot images are sourced from `.screenshots/pr-{N}-{strategyId}.png` artifacts committed to the repository by `CandidateEvaluator`.
+
+### REQ-DASH-014: Step Item Tooltips
+
+- **REQ-DASH-014a**: Step items displayed in the Agent Detail page and the Steps sub-tab (see REQ-STEP-005) MUST show a detailed tooltip on mouseover. The tooltip SHALL include: step description, elapsed duration, sub-step list (if any), and metadata entries (LLM call count, token usage).
+- **REQ-DASH-014b**: Tooltip rendering MUST be non-blocking — hover state SHALL NOT interfere with step list scrolling or auto-refresh cycles.
 
 ---
 
@@ -2283,6 +2310,7 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 | Duplicate ready-for-review after architect approval | MODERATE | PM and Architect re-posted "ready for review" comments after each scan, spamming the PR | State-transition comment guard was in-memory only; on the next loop the agent didn't see its own prior comment and posted again | Comprehensive dedup guard reads existing PR comments as single source of truth before posting any state-transition marker (covers PM + Architect + other reviewer paths). See REQ-REV-004f. |
 | MarkDoneAsync crash on already-closed issue | MODERATE | Runner crashed mid-loop when SE tried to close an issue that GitHub had already auto-closed via `Closes #N` merge | `MarkDoneAsync` threw on the Octokit 422 "issue already closed" response | Swallow the already-closed condition; treat as success |
 | Inline review comments lost on own-PR 422 | MODERATE | When SE/PM reviewed their own PR and the review-submit API returned 422, the inline comment payload was dropped entirely | Comment flow aborted on the outer review-submit failure | Fall back to per-comment create API so inline feedback is preserved even when the consolidated review submit 422s |
+| Inline review APPROVE/REQUEST_CHANGES 422 with single PAT | MODERATE | Submitting a review with APPROVE or REQUEST_CHANGES event type on a PR authored by the same PAT owner returns 422 | GitHub API forbids approving your own PR | Use COMMENT event type for all inline review submissions so reviews work under single-PAT setups. See REQ-REV-008. |
 | UI test port 5000 failure | CRITICAL | `dotnet run` silently bound to port 5000 (or whatever was in `launchSettings.json`) instead of the derived unique port, so Playwright tests saw "App did not respond" | `launchSettings.json` overrides `ASPNETCORE_URLS` and the `--urls` argument when a launch profile is active | Inject `--no-launch-profile` into every `dotnet run` app-start invocation; also `NeutralizeLaunchSettings` as belt-and-suspenders. See REQ-TEST-010g. |
 | Agent-crashed patched source left in workspace | MODERATE | If the agent crashed during UI test launch, `*.playwright-bak` files were never restored and the source tree stayed patched (comments around `app.Urls.Add`, etc.) | No janitor for stale backups | `PlaywrightHealthService.CleanupStaleBackups` restores any `*.playwright-bak` older than 1 hour during its 5-minute health sweep. See REQ-DASH-012c. |
 | Non-200 readiness check wrongly failed UI tests | CRITICAL | Apps that redirect to `/login` on the root URL returned 302 and `WaitForAppReadyAsync` treated that as "not ready" until timeout | Readiness check required 2xx only | Any HTTP response now counts as readiness (socket + pipeline live). See REQ-TEST-009d. |
@@ -2474,5 +2502,79 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 **REQ-STRAT-009b**: Never silently retry a failed val-e2e run — surface the failure mode + ndjson + logs to the operator (live runs spend real pool tokens against the Copilot CLI).
 
 **REQ-STRAT-009c**: `ExperimentDataDirectory` config default is relative (`"experiment-data"`) and resolves against the runner's cwd (bin directory under `dotnet run --no-build`). Set an absolute path in `appsettings.json` if ndjson artifacts need to land at the repo root.
+
+### REQ-STRAT-010: Per-Candidate Screenshot Capture
+
+**REQ-STRAT-010a**: After the build gate passes in `CandidateEvaluator`, the evaluator MUST capture a Playwright screenshot of the built application for each surviving candidate. The screenshot SHALL be stored as `CandidateResult.ScreenshotBytes` (byte array) on the candidate result record.
+
+**REQ-STRAT-010b**: Screenshots MUST be committed to the repository at `.screenshots/pr-{N}-{strategyId}.png`, where `{N}` is the PR number and `{strategyId}` is the canonical strategy identifier (see REQ-STRAT-012). This provides a durable visual record of each candidate's output.
+
+**REQ-STRAT-010c**: If screenshot capture fails (e.g., Playwright unavailable, app fails to start), the candidate MUST NOT be eliminated — screenshot capture is best-effort observability, not a hard gate. The failure SHALL be logged at Warning level and `ScreenshotBytes` SHALL be null.
+
+### REQ-STRAT-011: Winner-Strategy PR Body Marker
+
+**REQ-STRAT-011a**: After the winner is selected and applied, the SE MUST write a machine-readable marker into the PR body: `<!-- winner-strategy: {key} -->`, where `{key}` is the canonical strategy ID of the winning candidate.
+
+**REQ-STRAT-011b**: The marker enables downstream tooling (dashboard, CI, analytics) to determine which strategy produced the winning patch without parsing ndjson experiment data. Parsers SHOULD use regex `<!-- winner-strategy: (\S+) -->` to extract the key.
+
+### REQ-STRAT-012: Canonical Strategy IDs
+
+**REQ-STRAT-012a**: Strategy identifiers MUST be one of the canonical values: `baseline`, `mcp-enhanced`, `agentic-delegation`. These IDs MUST match exactly (case-sensitive) across all components: `StrategyOrchestrator`, `CandidateEvaluator`, dashboard `/strategies` page, experiment-data ndjson records, `.screenshots/` file names, and the `<!-- winner-strategy: -->` PR body marker.
+
+**REQ-STRAT-012b**: Adding a new strategy ID requires updating the canonical set in configuration and ensuring all components recognize the new value. Unknown strategy IDs encountered at runtime MUST be logged at Warning level but MUST NOT crash the pipeline.
+
+---
+
+## 41. SinglePRMode Requirements
+
+### REQ-SPR-001: Single Engineering Task in SinglePRMode
+
+- **REQ-SPR-001a**: When `SinglePRMode` is enabled (`AgentSquad:SinglePRMode=true`), the SE MUST create exactly **one** engineering task (T1) that covers ALL enhancements from the PM's Enhancement issues. The task title and description SHALL consolidate all enhancement scope into a single work item.
+- **REQ-SPR-001b**: `EngineeringTask.RelatedEnhancementNumbers` MUST track all enhancement issue numbers that T1 covers. This provides defense-in-depth traceability — even though there is only one task, the link from task to parent enhancements MUST be explicit and queryable.
+- **REQ-SPR-001c**: The single task's complexity SHALL be set to High (SE-tier) since it encompasses the full project scope.
+
+### REQ-SPR-002: Enhancement Coverage Validation Skip
+
+- **REQ-SPR-002a**: `ValidateEnhancementCoverageAsync` (see REQ-SE-009) MUST be skipped entirely when SinglePRMode is enabled, because by definition the single task covers all enhancements.
+- **REQ-SPR-002b**: The skip MUST be enforced at both the **call site** (the leader SE's plan-creation path SHALL not invoke validation) AND as an **inner guard** within `ValidateEnhancementCoverageAsync` itself (early return if SinglePRMode is true). This dual-guard pattern provides defense-in-depth against future callers that bypass the outer check.
+
+**Scenario: SinglePRMode Task Creation**
+```
+1. PM creates 5 Enhancement Issues (#10-#14)
+2. SinglePRMode=true in configuration
+3. SE enters Phase 1 → reads all 5 enhancements + PMSpec + Architecture
+4. SE creates ONE engineering task T1: "Full Implementation" covering enhancements #10-#14
+5. T1.RelatedEnhancementNumbers = [10, 11, 12, 13, 14]
+6. ValidateEnhancementCoverageAsync skipped (outer call-site guard + inner SinglePRMode guard)
+7. SE assigns T1 to itself → creates single PR with all changes
+8. Review pipeline proceeds normally with the single PR
+```
+
+---
+
+## 42. WS3 Offline Integration Test Harness
+
+### REQ-WS3-001: Offline Integration Test Infrastructure
+
+- **REQ-WS3-001a**: The WS3 integration test harness MUST enable full workflow-stage integration tests to run **offline** — without any live GitHub API calls, live Copilot CLI invocations, or external network dependencies.
+- **REQ-WS3-001b**: The harness comprises three core test doubles: `InMemoryGitHubService` (implements `IGitHubService` with in-memory state for issues, PRs, comments, labels), `WorkflowTestHarness` (orchestrates agent lifecycle and phase progression in a test context), and `ScriptedCopilotCli` (returns pre-recorded AI responses for deterministic test execution).
+- **REQ-WS3-001c**: All three test doubles MUST be registered in the DI container via the harness setup, replacing their production counterparts. Agent code under test SHALL require zero modifications — the same agent classes used in production run inside the harness.
+
+### REQ-WS3-002: Fixture-Driven Test Discovery
+
+- **REQ-WS3-002a**: Integration test scenarios SHALL be defined as JSON fixture files located under `tests/AgentSquad.Integration.Tests/Fixtures/`. Each fixture describes: initial state (issues, PRs, labels), scripted AI responses, expected outcomes (created artifacts, phase transitions, final states).
+- **REQ-WS3-002b**: Test discovery MUST be fixture-driven — adding a new `.json` fixture file under the Fixtures directory SHALL automatically register a new test case without requiring any C# code changes. The test runner enumerates fixture files and generates `[Theory]` / `[MemberData]` test cases dynamically.
+- **REQ-WS3-002c**: Fixture files MUST be self-contained — all inputs required for the test scenario (project description, enhancement issues, scripted AI responses, expected outputs) are encoded in the fixture JSON. No implicit external dependencies.
+
+**Scenario: WS3 Offline Integration Test Run**
+```
+1. Developer adds new fixture: Fixtures/pm-creates-5-enhancements.json
+2. Fixture defines: project description, expected PM behavior, 5 enhancement issue templates, scripted AI responses
+3. `dotnet test tests/AgentSquad.Integration.Tests` discovers the new fixture automatically
+4. Test harness boots DI container with InMemoryGitHubService + ScriptedCopilotCli
+5. WorkflowTestHarness runs PM agent through initialization → research → PMSpec creation
+6. Assertions verify: 5 enhancement issues created in InMemoryGitHubService, correct labels applied, PMSpec.md content matches expected structure
+7. No network calls made — entire test runs in-process in <5 seconds
+```
 
 ---
