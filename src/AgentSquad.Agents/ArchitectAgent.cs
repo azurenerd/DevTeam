@@ -100,6 +100,15 @@ public class ArchitectAgent : AgentBase
             {
                 _architectureComplete = true;
                 Logger.LogInformation("Architect recovered: Architecture.md already exists with valid sections, moving to PR review mode");
+                _reasoningLog.Log(new AgentReasoningEvent
+                {
+                    AgentId = Identity.Id,
+                    AgentDisplayName = Identity.DisplayName,
+                    EventType = AgentReasoningEventType.Decision,
+                    Phase = "Architecture",
+                    Summary = "Architecture.md already exists — skipping design phase",
+                    Detail = "Detected existing architecture document with valid System Components sections (>200 chars). Transitioning directly to PR review/monitoring mode."
+                });
             }
         }
         catch (Exception ex)
@@ -286,6 +295,15 @@ public class ArchitectAgent : AgentBase
             existingArch.Contains("## System Components", StringComparison.OrdinalIgnoreCase))
         {
             Logger.LogInformation("Architecture.md already exists with content, skipping design");
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = Identity.Id,
+                AgentDisplayName = Identity.DisplayName,
+                EventType = AgentReasoningEventType.Decision,
+                Phase = "Architecture Design",
+                Summary = "Architecture.md already complete — signaling downstream agents",
+                Detail = "Idempotency check found existing architecture with System Components section. Skipping design and signaling ArchitectureComplete."
+            });
             // Still signal downstream so PE isn't stuck
             await _messageBus.PublishAsync(new StatusUpdateMessage
             {

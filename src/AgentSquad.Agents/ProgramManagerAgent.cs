@@ -239,6 +239,16 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogInformation(
                     "Research.md already exists with content — skipping research kickoff");
 
+                _reasoningLog.Log(new AgentReasoningEvent
+                {
+                    AgentId = Identity.Id,
+                    AgentDisplayName = Identity.DisplayName,
+                    EventType = AgentReasoningEventType.Decision,
+                    Phase = "Project Kickoff",
+                    Summary = "Research.md already exists — skipping research phase",
+                    Detail = "Detected existing research document with valid section headings. Signaling downstream agents to proceed directly."
+                });
+
                 // Still signal downstream agents so they can proceed
                 await _messageBus.PublishAsync(new StatusUpdateMessage
                 {
@@ -316,6 +326,16 @@ public class ProgramManagerAgent : AgentBase
 
             Logger.LogInformation(
                 "Sent research kickoff task {TaskId} to Researcher via message bus", taskId);
+
+            _reasoningLog.Log(new AgentReasoningEvent
+            {
+                AgentId = Identity.Id,
+                AgentDisplayName = Identity.DisplayName,
+                EventType = AgentReasoningEventType.Planning,
+                Phase = "Project Kickoff",
+                Summary = $"Initiated research phase for '{projectName}'",
+                Detail = $"Created GitHub issue #{kickoffIssueNumber} and dispatched research task to Researcher agent."
+            });
 
             UpdateStatus(AgentStatus.Idle, "Project kickoff complete, monitoring team");
         }

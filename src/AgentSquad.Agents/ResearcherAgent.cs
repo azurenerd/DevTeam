@@ -117,6 +117,16 @@ public class ResearcherAgent : AgentBase
                             directive.Topic);
                         currentDirective = null; // Don't re-enqueue on success
 
+                        _reasoningLog.Log(new AgentReasoningEvent
+                        {
+                            AgentId = Identity.Id,
+                            AgentDisplayName = Identity.DisplayName,
+                            EventType = AgentReasoningEventType.Decision,
+                            Phase = "Research",
+                            Summary = $"Research for '{directive.Topic}' already exists — skipping",
+                            Detail = "Found existing research section in Research.md matching this topic. Ensuring design screenshots and signaling completion."
+                        });
+
                         // B1: even when Research.md already exists (e.g., preserved across mini-resets),
                         // ensure design screenshots are present in the repo — downstream PM review depends on them.
                         try { await EnsureDesignScreenshotsPresentAsync(ct); }

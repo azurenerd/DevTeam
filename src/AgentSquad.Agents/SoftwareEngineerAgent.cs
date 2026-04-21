@@ -1249,6 +1249,16 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             _taskManager.TotalCount, enhancementIssues.Count);
         LogActivity("task", $"📋 Engineering plan created: {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues");
 
+        _reasoningLog.Log(new AgentReasoningEvent
+        {
+            AgentId = Identity.Id,
+            AgentDisplayName = Identity.DisplayName,
+            EventType = AgentReasoningEventType.Planning,
+            Phase = "Engineering Planning",
+            Summary = $"Created engineering plan: {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues",
+            Detail = $"Tasks: {string.Join(", ", _taskManager.Tasks.Select(t => $"{t.Name} ({t.Complexity})"))}"
+        });
+
         var taskSummary = string.Join(", ", _taskManager.Tasks.Select(t => $"{t.Id}:{t.Name}({t.Complexity})"));
         await RememberAsync(MemoryType.Decision,
             $"Created engineering plan with {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues",
@@ -2113,6 +2123,15 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Logger.LogInformation(
                     "Strategy framework produced winning candidate for PR #{PrNumber} (task {TaskId}); skipping legacy code-gen",
                     pr.Number, task.Id);
+                _reasoningLog.Log(new AgentReasoningEvent
+                {
+                    AgentId = Identity.Id,
+                    AgentDisplayName = Identity.DisplayName,
+                    EventType = AgentReasoningEventType.Decision,
+                    Phase = "Code Generation",
+                    Summary = $"Strategy framework succeeded for PR #{pr.Number} — using winning candidate",
+                    Detail = $"Task: {task.Name}. Multi-strategy orchestrator produced and applied winning patch with build verification."
+                });
                 await FinalizeReadyForReviewAsync(pr, task, ct);
                 return;
             }
