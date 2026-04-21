@@ -3537,6 +3537,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                     await RememberAsync(MemoryType.Action,
                         $"Merged tested PR #{pr.Number}: {pr.Title}", ct: ct);
+
+                    // If this was the integration PR, signal engineering complete
+                    if (_integrationPrCreated && _allTasksComplete && !_engineeringSignaled)
+                    {
+                        await CloseIntegrationIssueAsync(
+                            $"✅ Integration PR #{pr.Number} merged successfully.", ct);
+                        await SignalEngineeringCompleteAsync(ct);
+                    }
                 }
                 else if (result == MergeAttemptResult.ConflictBlocked)
                 {
@@ -4622,6 +4630,16 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Sync and mark ready for review
             await SyncBranchWithMainAsync(pr.Number, ct);
             await MarkReadyForReviewWithScreenshotAsync(pr, ct);
+
+            // Integration PRs run tests locally via CommitViaLocalWorkspaceAsync.
+            // Add tests-added label so MergeTestedPRsAsync can merge after PM approval
+            // (the TE won't pick up integration PRs since it already marked coverage complete).
+            var integrationLabels = pr.Labels
+                .Append(PullRequestWorkflow.Labels.TestsAdded)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            await GitHub.UpdatePullRequestAsync(pr.Number, labels: integrationLabels, ct: ct);
+            Logger.LogInformation("Added tests-added label to integration PR #{PrNumber} (tests ran locally)", pr.Number);
 
             await MessageBus.PublishAsync(new ReviewRequestMessage
             {

@@ -442,18 +442,37 @@ public class ProgramManagerAgent : AgentBase
         try
         {
             var content = await _github.GetFileContentAsync("TeamMembers.md", null, ct);
-            if (content is not null)
-            {
-                Logger.LogDebug("TeamMembers.md already exists");
-                return;
-            }
 
-            // Create the initial TeamMembers.md with core agents
+            // Get all core agents that should be listed
             var coreAgents = _registry.GetAllAgents()
                 .Where(a => a.Identity.Role is AgentRole.ProgramManager or AgentRole.Researcher
                     or AgentRole.Architect or AgentRole.SoftwareEngineer or AgentRole.TestEngineer)
                 .ToList();
 
+            if (content is not null)
+            {
+                // Doc exists — add any core agents that are missing
+                var updated = content;
+                foreach (var agent in coreAgents)
+                {
+                    if (updated.Contains(agent.Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var since = agent.Identity.CreatedAt.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+                    var row = $"| {agent.Identity.DisplayName} | {agent.Identity.Role} | Online | {agent.Identity.ModelTier} | — | {since} | Internal Bus |";
+                    updated = updated.TrimEnd() + "\n" + row + "\n";
+                    Logger.LogInformation("Adding missing core agent {Name} to TeamMembers.md", agent.Identity.DisplayName);
+                }
+
+                if (updated != content)
+                {
+                    await _github.CreateOrUpdateFileAsync("TeamMembers.md", updated,
+                        "Add missing core agents to TeamMembers.md", null, ct);
+                }
+                return;
+            }
+
+            // Create the initial TeamMembers.md with core agents
             var doc = """
                 # Team Members
 
@@ -1290,12 +1309,12 @@ public class ProgramManagerAgent : AgentBase
             if (openPRs.Count > 0)
             {
                 Logger.LogInformation("All {Count} open PRs are PM-approved — signaling reviews complete", openPRs.Count);
-                UpdateStatus(AgentStatus.Online, "All reviews complete — all PRs approved");
+                UpdateStatus(AgentStatus.Idle, "All reviews complete — all PRs approved");
             }
             else
             {
                 Logger.LogInformation("No open PRs remain — all merged. Signaling reviews complete");
-                UpdateStatus(AgentStatus.Online, "All reviews complete — all merged");
+                UpdateStatus(AgentStatus.Idle, "All reviews complete — all merged");
             }
         }
         catch (Exception ex)
@@ -1365,7 +1384,26 @@ public class ProgramManagerAgent : AgentBase
                 var subIssues = await _github.GetSubIssuesAsync(issue.Number, ct);
 
                 if (subIssues.Count == 0)
+                {
+                    // In SinglePRMode, enhancement issues won't have sub-issues.
+                    // Close them once all PRs are merged (no open code PRs remain).
+                    if (_config.Limits.SinglePRMode)
+                    {
+                        var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+                        if (openPRs.Count == 0)
+                        {
+                            await _github.AddIssueCommentAsync(issue.Number,
+                                $"✅ **PM Final Review — APPROVED (SinglePRMode)**\n\n" +
+                                "All engineering work has been merged. Closing as complete.", ct);
+                            await _github.CloseIssueAsync(issue.Number, ct);
+                            _reviewedEnhancementIssues.Add(issue.Number);
+                            Logger.LogInformation("PM closed enhancement issue #{Number} (SinglePRMode, all merged): {Title}",
+                                issue.Number, issue.Title);
+                            LogActivity("review", $"✅ Closed user story #{issue.Number}: {issue.Title}");
+                        }
+                    }
                     continue; // No engineering tasks linked yet — skip
+                }
 
                 var allClosed = subIssues.All(s =>
                     string.Equals(s.State, "closed", StringComparison.OrdinalIgnoreCase));

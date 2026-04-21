@@ -1437,9 +1437,17 @@ public abstract class EngineerAgentBase : AgentBase
     {
         _ = Metrics?.RecordReworkRequestedAsync(Identity.Id, ct);
         var rework = reworkBatch[0]; // Use first item for PR number/title
+        var reworkTaskId = $"rework-pr-{rework.PrNumber}";
+
+        var reworkStepId = _taskTracker.BeginStep(Identity.Id, reworkTaskId, "Address review feedback",
+            $"Reworking PR #{rework.PrNumber} based on reviewer feedback", Identity.ModelTier);
+
         var pr = await GitHub.GetPullRequestAsync(rework.PrNumber, ct);
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+        {
+            _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Skipped);
             return;
+        }
 
         // Determine if this is TE source-bug feedback (uses separate counter + limit)
         var isTeSourceBug = reworkBatch.Any(r =>
@@ -1653,6 +1661,11 @@ public abstract class EngineerAgentBase : AgentBase
 
                     if (committed)
                     {
+                        _taskTracker.CompleteStep(reworkStepId);
+
+                        var screenshotStepId = _taskTracker.BeginStep(Identity.Id, reworkTaskId, "Capture screenshot & re-request review",
+                            $"Taking screenshot and marking PR #{pr.Number} ready for re-review", Identity.ModelTier);
+
                         var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {allReviewers}.\n\n";
                         if (!string.IsNullOrWhiteSpace(changesSummary))
                             commentBody += changesSummary;
@@ -1665,6 +1678,8 @@ public abstract class EngineerAgentBase : AgentBase
 
                         await SyncBranchWithMainAsync(pr.Number, ct);
                         await MarkReadyForReviewWithScreenshotAsync(pr, ct);
+
+                        _taskTracker.CompleteStep(screenshotStepId);
 
                         await MessageBus.PublishAsync(new ReviewRequestMessage
                         {
@@ -1688,6 +1703,7 @@ public abstract class EngineerAgentBase : AgentBase
                     {
                         // Build-blocked rework — notify on PR but don't re-request review.
                         // Re-enqueue so next loop iteration retries (or hits max cycles for force-approval).
+                        _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
                         Logger.LogWarning("{Role} {Name} rework for PR #{PrNumber} blocked by build errors",
                             Identity.Role, Identity.DisplayName, pr.Number);
                         _ = Metrics?.RecordReworkBuildBlockedAsync(Identity.Id, ct);
@@ -1702,6 +1718,7 @@ public abstract class EngineerAgentBase : AgentBase
                 else
                 {
                     // AI failed to produce FILE: blocks — re-enqueue so retry/force-approval can proceed.
+                    _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
                     Logger.LogWarning(
                         "{Role} {Name} rework on PR #{PrNumber} produced no FILE: blocks — no code changes committed. " +
                         "Skipping ready-for-review to avoid pointless re-review of unchanged code",
@@ -1717,6 +1734,7 @@ public abstract class EngineerAgentBase : AgentBase
         }
         catch (Exception ex)
         {
+            _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
             Logger.LogError(ex, "{Role} {Name} failed rework on PR #{PrNumber}",
                 Identity.Role, Identity.DisplayName, rework.PrNumber);
 
@@ -1724,6 +1742,9 @@ public abstract class EngineerAgentBase : AgentBase
             foreach (var item in reworkBatch)
                 ReworkQueue.Enqueue(item);
         }
+
+        // Reset status after rework — prevent stale "Addressing feedback" display
+        UpdateStatus(AgentStatus.Idle, "Rework cycle complete, checking tasks");
     }
 
     /// <summary>
