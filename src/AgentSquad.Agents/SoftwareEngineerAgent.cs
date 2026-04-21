@@ -2853,64 +2853,25 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     }
 
     /// <summary>
-    /// After committing generated code, validate that required runtime files (e.g. data.json)
-    /// are tracked in git and not excluded by .gitignore. LLMs frequently generate .gitignore
-    /// rules that exclude data files. Uses git-native checks for accuracy.
+    /// After committing generated code, validate that runtime files are present.
+    /// This is project-agnostic: it scans for *.sample.*, *.template.*, *.example.*
+    /// files and ensures the corresponding actual file exists. Also fixes .gitignore
+    /// rules that exclude files matching sample/template counterparts.
     /// </summary>
     private async Task ValidateRequiredRuntimeFilesAsync(string branchName, CancellationToken ct)
     {
         if (Workspace is null) return;
 
-        // Configurable list of files that must be committed for the app to boot
-        var requiredFiles = new[] { "data.json" };
-
         try
         {
             var repoPath = Workspace.RepoPath;
 
-            foreach (var file in requiredFiles)
-            {
-                // Phase 1: Check if the file is being ignored by .gitignore
-                var checkIgnoreResult = await RunGitCommandAsync(repoPath, $"check-ignore -v {file}", ct);
+            // Phase 1: Scan for sample/template/example files whose actual counterpart is missing.
+            // E.g. data.sample.json exists → data.json should too; config.template.yaml → config.yaml.
+            await MaterializeMissingSampleFilesAsync(repoPath, ct);
 
-                if (checkIgnoreResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(checkIgnoreResult.StdOut))
-                {
-                    // File IS being ignored — fix .gitignore
-                    Logger.LogWarning(
-                        "Required file {File} is excluded by .gitignore ({Details}). Auto-fixing.",
-                        file, checkIgnoreResult.StdOut.Trim());
-
-                    await FixGitignoreForRequiredFileAsync(repoPath, file, ct);
-
-                    // Re-verify
-                    var verifyResult = await RunGitCommandAsync(repoPath, $"check-ignore {file}", ct);
-                    if (verifyResult.ExitCode == 0)
-                    {
-                        Logger.LogError(
-                            "Failed to un-ignore required file {File} after .gitignore fix attempt", file);
-                    }
-                    else
-                    {
-                        Logger.LogInformation(
-                            "Successfully un-ignored required file {File} — it will now be tracked", file);
-                        // Stage and commit the .gitignore fix
-                        await RunGitCommandAsync(repoPath, "add -A .gitignore", ct);
-                        await Workspace.CommitAsync(
-                            $"fix: un-ignore required runtime file {file}\n\n" +
-                            $"LLM-generated .gitignore excluded {file}, which is required at runtime.\n" +
-                            $"Removed the exclusion rule to ensure the file is committed.", ct);
-                    }
-                }
-                else
-                {
-                    Logger.LogDebug(
-                        "Required file {File} is not ignored by .gitignore — OK", file);
-                }
-
-                // Phase 2: Ensure the file actually EXISTS (not just un-ignored).
-                // LLMs commonly create data.sample.json but forget to create data.json itself.
-                await EnsureRequiredFileExistsAsync(repoPath, file, ct);
-            }
+            // Phase 2: Check for .gitignore rules that exclude files which have sample counterparts.
+            await FixGitignoreForMaterializedFilesAsync(repoPath, ct);
         }
         catch (Exception ex)
         {
@@ -2919,95 +2880,129 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     }
 
     /// <summary>
-    /// Ensures a required runtime file (e.g. data.json) actually exists in the workspace.
-    /// Searches all app directories for the file; if missing, copies from the nearest
-    /// template/sample variant. Stages and commits the new file so it ships with the PR.
+    /// Scans the workspace for *.sample.*, *.template.*, *.example.* files.
+    /// For each one, if the corresponding actual file (without the .sample/.template/.example
+    /// suffix) is missing, copies the sample to create it. Commits all created files.
+    /// This is fully project-agnostic — works for data.json, config.yaml, .env, etc.
     /// </summary>
-    private async Task EnsureRequiredFileExistsAsync(string repoPath, string fileName, CancellationToken ct)
+    private async Task MaterializeMissingSampleFilesAsync(string repoPath, CancellationToken ct)
     {
-        // Find app project directories (non-test csproj files)
-        var appDirs = Directory.EnumerateFiles(repoPath, "*.csproj", SearchOption.AllDirectories)
-            .Where(f => !Path.GetRelativePath(repoPath, f).Contains("test", StringComparison.OrdinalIgnoreCase))
-            .Select(f => Path.GetDirectoryName(f)!)
-            .Distinct()
+        var suffixes = new[] { ".sample", ".template", ".example" };
+        var createdFiles = new List<string>();
+
+        // Find all sample/template/example files in non-test directories
+        var allFiles = Directory.EnumerateFiles(repoPath, "*.*", SearchOption.AllDirectories)
+            .Where(f =>
+            {
+                var rel = Path.GetRelativePath(repoPath, f);
+                // Skip test dirs, bin/obj, .git, node_modules, .candidates
+                return !rel.Contains($"{Path.DirectorySeparatorChar}.git{Path.DirectorySeparatorChar}")
+                    && !rel.StartsWith(".git" + Path.DirectorySeparatorChar)
+                    && !rel.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
+                    && !rel.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                    && !rel.Contains($"{Path.DirectorySeparatorChar}node_modules{Path.DirectorySeparatorChar}")
+                    && !rel.Contains($"{Path.DirectorySeparatorChar}.candidates{Path.DirectorySeparatorChar}")
+                    && !rel.Contains($"{Path.DirectorySeparatorChar}.candidates-eval{Path.DirectorySeparatorChar}");
+            })
             .ToList();
 
-        if (appDirs.Count == 0)
+        foreach (var sampleFile in allFiles)
         {
-            Logger.LogDebug("No app project directories found — skipping {File} existence check", fileName);
-            return;
+            var fileName = Path.GetFileName(sampleFile);
+
+            // Check if this file matches the pattern: name.sample.ext or name.template.ext
+            foreach (var suffix in suffixes)
+            {
+                // Pattern: "data.sample.json" → actual file "data.json"
+                var idx = fileName.IndexOf(suffix + ".", StringComparison.OrdinalIgnoreCase);
+                if (idx < 0)
+                {
+                    // Also handle: "data.json.sample" → actual file "data.json"
+                    if (fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        var actualName = fileName[..^suffix.Length];
+                        if (string.IsNullOrEmpty(actualName)) continue;
+                        var actualPath = Path.Combine(Path.GetDirectoryName(sampleFile)!, actualName);
+                        if (!File.Exists(actualPath))
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(actualPath)!);
+                            File.Copy(sampleFile, actualPath);
+                            createdFiles.Add(Path.GetRelativePath(repoPath, actualPath));
+                            Logger.LogInformation(
+                                "Materialized {Actual} from {Sample} — LLM created sample but not the runtime file",
+                                Path.GetRelativePath(repoPath, actualPath),
+                                Path.GetRelativePath(repoPath, sampleFile));
+                        }
+                    }
+                    continue;
+                }
+
+                // "data.sample.json" → "data.json"
+                var actualFileName = fileName[..idx] + fileName[(idx + suffix.Length)..];
+                if (string.IsNullOrEmpty(actualFileName) || actualFileName == ".") continue;
+
+                var actualFilePath = Path.Combine(Path.GetDirectoryName(sampleFile)!, actualFileName);
+                if (!File.Exists(actualFilePath))
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(actualFilePath)!);
+                    File.Copy(sampleFile, actualFilePath);
+                    createdFiles.Add(Path.GetRelativePath(repoPath, actualFilePath));
+                    Logger.LogInformation(
+                        "Materialized {Actual} from {Sample} — LLM created sample but not the runtime file",
+                        Path.GetRelativePath(repoPath, actualFilePath),
+                        Path.GetRelativePath(repoPath, sampleFile));
+                }
+                break; // Only match first suffix pattern per file
+            }
         }
 
-        var baseName = Path.GetFileNameWithoutExtension(fileName);
-        var ext = Path.GetExtension(fileName);
-        bool anyCreated = false;
-
-        foreach (var appDir in appDirs)
+        if (createdFiles.Count > 0)
         {
-            // Candidate paths where the app might look for data.json
-            var candidatePaths = new[]
-            {
-                Path.Combine(appDir, fileName),
-                Path.Combine(appDir, "Data", fileName),
-                Path.Combine(appDir, "wwwroot", fileName),
-                Path.Combine(appDir, "wwwroot", "data", fileName),
-            };
+            await RunGitCommandAsync(repoPath, "add -A", ct);
+            var fileList = string.Join(", ", createdFiles.Take(5));
+            if (createdFiles.Count > 5) fileList += $" (+{createdFiles.Count - 5} more)";
+            await Workspace.CommitAsync(
+                $"fix: create {createdFiles.Count} missing runtime file(s) from samples\n\n" +
+                $"LLM generated sample/template files but did not create the actual runtime files.\n" +
+                $"Materialized: {fileList}", ct);
+        }
+    }
 
-            // If any candidate already exists, this app dir is fine
-            if (candidatePaths.Any(File.Exists))
-                continue;
+    /// <summary>
+    /// Checks .gitignore rules for any files that were just materialized from samples.
+    /// If a materialized file would be ignored, fixes the .gitignore.
+    /// </summary>
+    private async Task FixGitignoreForMaterializedFilesAsync(string repoPath, CancellationToken ct)
+    {
+        // Get list of untracked files that should be tracked
+        var statusResult = await RunGitCommandAsync(repoPath, "status --porcelain", ct);
+        if (statusResult.ExitCode != 0) return;
 
-            // Search for template/sample variants to copy from
-            var templateCandidates = new[]
-            {
-                Path.Combine(appDir, $"{baseName}.sample{ext}"),
-                Path.Combine(appDir, $"{baseName}.template{ext}"),
-                Path.Combine(appDir, $"{baseName}.example{ext}"),
-                Path.Combine(appDir, "Data", $"{baseName}.sample{ext}"),
-                Path.Combine(appDir, "Data", $"{baseName}.template{ext}"),
-                Path.Combine(repoPath, $"{baseName}.template{ext}"),
-                Path.Combine(repoPath, $"{baseName}.sample{ext}"),
-            };
+        var untrackedFiles = statusResult.StdOut
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(line => line.StartsWith("??") || line.StartsWith("!!"))
+            .Select(line => line[3..].Trim().Trim('"'))
+            .ToList();
 
-            var source = templateCandidates.FirstOrDefault(File.Exists);
-            if (source is null)
-            {
-                // No template found — look for any matching JSON test data
-                var testData = Directory.EnumerateFiles(repoPath, $"valid-full*{ext}", SearchOption.AllDirectories)
-                    .Concat(Directory.EnumerateFiles(repoPath, $"valid*{ext}", SearchOption.AllDirectories))
-                    .Where(f => Path.GetRelativePath(repoPath, f).Contains("TestData", StringComparison.OrdinalIgnoreCase))
-                    .FirstOrDefault();
-                if (testData is not null) source = testData;
-            }
-
-            if (source is null)
+        bool anyFixed = false;
+        foreach (var file in untrackedFiles)
+        {
+            var checkResult = await RunGitCommandAsync(repoPath, $"check-ignore -v \"{file}\"", ct);
+            if (checkResult.ExitCode == 0 && !string.IsNullOrWhiteSpace(checkResult.StdOut))
             {
                 Logger.LogWarning(
-                    "Required file {File} missing in {AppDir} and no template/sample found to copy from. " +
-                    "The app will likely show a 'file not found' error.",
-                    fileName, Path.GetRelativePath(repoPath, appDir));
-                continue;
+                    "File {File} is excluded by .gitignore ({Details}). Auto-fixing.",
+                    file, checkResult.StdOut.Trim());
+                await FixGitignoreForRequiredFileAsync(repoPath, Path.GetFileName(file), ct);
+                anyFixed = true;
             }
-
-            // Copy to the first candidate path (project root is most common)
-            var dest = candidatePaths[0];
-            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-            File.Copy(source, dest, overwrite: false);
-            anyCreated = true;
-            Logger.LogInformation(
-                "Created required file {Dest} from {Source} — LLM created the sample but forgot the actual file",
-                Path.GetRelativePath(repoPath, dest),
-                Path.GetRelativePath(repoPath, source));
         }
 
-        if (anyCreated)
+        if (anyFixed)
         {
-            // Stage and commit the newly-created files
-            await RunGitCommandAsync(repoPath, $"add -A {fileName}", ct);
+            await RunGitCommandAsync(repoPath, "add -A", ct);
             await Workspace.CommitAsync(
-                $"fix: create missing {fileName} from template\n\n" +
-                $"LLM generated a sample/template but did not create the actual {fileName}.\n" +
-                $"Copied from nearest template to ensure the app boots correctly.", ct);
+                "fix: un-ignore runtime files excluded by LLM-generated .gitignore", ct);
         }
     }
 
