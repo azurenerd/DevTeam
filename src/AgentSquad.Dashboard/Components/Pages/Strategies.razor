@@ -103,6 +103,7 @@
         <table class="recent-table" data-testid="strategies-recent-table">
             <thead>
                 <tr>
+                    <th></th>
                     <th>Task</th>
                     <th>Winner</th>
                     <th>Candidates</th>
@@ -114,7 +115,9 @@
             <tbody>
                 @foreach (var task in _recentTasks)
                 {
-                    <tr>
+                    var isExpanded = _expandedTasks.Contains(task.TaskId);
+                    <tr class="recent-row @(isExpanded ? "expanded" : "")" @onclick="() => ToggleExpand(task.TaskId)">
+                        <td class="expand-toggle">@(isExpanded ? "▾" : "▸")</td>
                         <td><span class="task-id">@task.TaskId</span></td>
                         <td>
                             @if (task.WinnerStrategyId is string w)
@@ -131,6 +134,100 @@
                         <td>@(task.EvaluationElapsedSec?.ToString("0.0") ?? "-")s</td>
                         <td>@(task.CompletedAt?.ToLocalTime().ToString("HH:mm:ss") ?? "-")</td>
                     </tr>
+                    @if (isExpanded)
+                    {
+                        <tr class="detail-row">
+                            <td colspan="7">
+                                <div class="candidate-detail-grid">
+                                    @foreach (var candidate in task.Candidates.Values.OrderByDescending(c => TotalScore(c)).ThenBy(c => c.StrategyId))
+                                    {
+                                        var isWinner = string.Equals(task.WinnerStrategyId, candidate.StrategyId, StringComparison.OrdinalIgnoreCase);
+                                        <div class="candidate-detail-card @(isWinner ? "is-winner" : "") @(candidate.Succeeded == false ? "is-failed" : "")">
+                                            @* Header *@
+                                            <div class="cd-header">
+                                                <span class="cd-name">
+                                                    @if (isWinner) { <span class="cd-trophy">🏆</span> }
+                                                    @candidate.StrategyId
+                                                </span>
+                                                <span class="cd-state cd-state-@(candidate.State.ToString().ToLowerInvariant())">@candidate.State</span>
+                                            </div>
+
+                                            @* Progress pipeline *@
+                                            <div class="cd-pipeline">
+                                                <span class="cd-pip @(candidate.State >= CandidateState.Running ? "pip-done" : "")">Started</span>
+                                                <span class="cd-pip-arrow">→</span>
+                                                <span class="cd-pip @(candidate.Succeeded == true || candidate.State >= CandidateState.Scored ? "pip-done" : candidate.Succeeded == false ? "pip-fail" : "")">
+                                                    @(candidate.Succeeded == true ? "Built ✓" : candidate.Succeeded == false ? "Failed ✗" : "Building…")
+                                                </span>
+                                                <span class="cd-pip-arrow">→</span>
+                                                <span class="cd-pip @(candidate.State >= CandidateState.Scored ? "pip-done" : "")">
+                                                    @(candidate.State >= CandidateState.Scored ? "Scored ✓" : "Scoring…")
+                                                </span>
+                                                @if (isWinner)
+                                                {
+                                                    <span class="cd-pip-arrow">→</span>
+                                                    <span class="cd-pip pip-winner">Winner 🏆</span>
+                                                }
+                                            </div>
+
+                                            @* Scores *@
+                                            @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
+                                            {
+                                                <div class="cd-scores">
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Acceptance</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Design</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Readability</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-total">
+                                                        Total: <strong>@TotalScore(candidate)</strong>/30
+                                                    </div>
+                                                </div>
+                                            }
+                                            else if (candidate.Succeeded == false)
+                                            {
+                                                <div class="cd-no-scores">Not scored — did not pass build gate</div>
+                                            }
+                                            else
+                                            {
+                                                <div class="cd-no-scores">Scores not available</div>
+                                            }
+
+                                            @* Metrics *@
+                                            <div class="cd-metrics">
+                                                @if (candidate.ElapsedSec.HasValue)
+                                                {
+                                                    <span class="cd-metric">⏱ @(candidate.ElapsedSec.Value.ToString("0.1"))s</span>
+                                                }
+                                                @if (candidate.TokensUsed.HasValue)
+                                                {
+                                                    <span class="cd-metric">🔤 @(candidate.TokensUsed.Value.ToString("N0")) tokens</span>
+                                                }
+                                            </div>
+
+                                            @* Failure reason *@
+                                            @if (candidate.Succeeded == false && !string.IsNullOrEmpty(candidate.FailureReason))
+                                            {
+                                                <div class="cd-failure">
+                                                    <span class="cd-failure-label">Failure:</span> @candidate.FailureReason
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+                                </div>
+                            </td>
+                        </tr>
+                    }
                 }
             </tbody>
         </table>
@@ -165,6 +262,54 @@
     .empty-state { opacity: .6; padding: 1rem 0; font-style: italic; }
     .muted { opacity: .55; }
     .alert-banner { background: rgba(77, 171, 247, .08); border-left: 3px solid #4dabf7; padding: .75rem 1rem; border-radius: 4px; margin: 1rem 0; }
+
+    /* Expandable recent rows */
+    .recent-row { cursor: pointer; transition: background .15s; }
+    .recent-row:hover { background: rgba(255,255,255,.03); }
+    .recent-row.expanded { background: rgba(255,255,255,.02); }
+    .expand-toggle { width: 1.5rem; text-align: center; opacity: .5; font-size: .85em; }
+    .detail-row td { padding: 0 !important; border-bottom: 1px solid var(--border, #2d3240); }
+
+    /* Candidate detail grid */
+    .candidate-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .75rem; padding: .75rem 1rem 1rem; }
+    .candidate-detail-card { background: var(--card-bg, #1a1e26); border: 1px solid var(--border, #2d3240); border-radius: 6px; padding: .85rem; transition: border-color .15s; }
+    .candidate-detail-card.is-winner { border: 1px solid gold; background: rgba(255, 215, 0, .04); }
+    .candidate-detail-card.is-failed { opacity: .7; }
+
+    .cd-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: .5rem; }
+    .cd-name { font-weight: 600; font-size: .95em; }
+    .cd-trophy { margin-right: .25rem; }
+    .cd-state { font-size: .7em; text-transform: uppercase; letter-spacing: .05em; padding: .15rem .4rem; border-radius: 3px; }
+    .cd-state-running { background: rgba(77, 171, 247, .15); color: #4dabf7; }
+    .cd-state-completed { background: rgba(81, 207, 102, .15); color: #51cf66; }
+    .cd-state-scored { background: rgba(255, 212, 59, .15); color: #ffd43b; }
+    .cd-state-winner { background: rgba(255, 215, 0, .2); color: gold; }
+
+    /* Progress pipeline */
+    .cd-pipeline { display: flex; align-items: center; gap: .25rem; font-size: .75em; margin-bottom: .65rem; flex-wrap: wrap; }
+    .cd-pip { padding: .15rem .35rem; border-radius: 3px; background: rgba(255,255,255,.05); opacity: .45; }
+    .cd-pip.pip-done { opacity: 1; background: rgba(81, 207, 102, .12); color: #51cf66; }
+    .cd-pip.pip-fail { opacity: 1; background: rgba(255, 107, 107, .12); color: #ff6b6b; }
+    .cd-pip.pip-winner { opacity: 1; background: rgba(255, 215, 0, .15); color: gold; }
+    .cd-pip-arrow { opacity: .3; }
+
+    /* Score bars */
+    .cd-scores { margin-bottom: .5rem; }
+    .cd-score-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
+    .cd-score-label { width: 5.5rem; font-size: .75em; opacity: .65; text-align: right; }
+    .cd-score-bar-bg { flex: 1; height: 6px; background: rgba(255,255,255,.06); border-radius: 3px; overflow: hidden; }
+    .cd-score-bar { height: 100%; background: linear-gradient(90deg, #4dabf7, #51cf66); border-radius: 3px; transition: width .3s; }
+    .cd-score-val { font-size: .75em; font-family: monospace; width: 2.5rem; opacity: .8; }
+    .cd-score-total { text-align: right; font-size: .8em; margin-top: .25rem; opacity: .8; }
+    .cd-no-scores { font-size: .8em; opacity: .4; font-style: italic; margin-bottom: .5rem; }
+
+    /* Metrics */
+    .cd-metrics { display: flex; gap: .75rem; font-size: .8em; opacity: .7; margin-bottom: .35rem; }
+    .cd-metric { font-family: monospace; }
+
+    /* Failure */
+    .cd-failure { font-size: .8em; color: #ff6b6b; background: rgba(255,107,107,.06); padding: .35rem .5rem; border-radius: 4px; margin-top: .35rem; }
+    .cd-failure-label { font-weight: 600; }
 </style>
 
 @code {
@@ -173,6 +318,16 @@
     private EnabledStrategiesInfo? _enabled;
     private HubConnection? _hub;
     private bool _refreshing;
+    private readonly HashSet<string> _expandedTasks = new();
+
+    private void ToggleExpand(string taskId)
+    {
+        if (!_expandedTasks.Remove(taskId))
+            _expandedTasks.Add(taskId);
+    }
+
+    private static int TotalScore(CandidateSnapshot c)
+        => (c.AcScore ?? 0) + (c.DesignScore ?? 0) + (c.ReadabilityScore ?? 0);
 
     protected override async Task OnInitializedAsync()
     {
