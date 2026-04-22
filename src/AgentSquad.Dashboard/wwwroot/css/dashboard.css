@@ -3900,7 +3900,17 @@ div[title] .config-agent-name {
     font-size: 0.9rem;
     font-weight: 600;
     cursor: pointer;
-    transition: background 0.15s;
+    transition: background 0.4s ease, transform 0.3s ease, box-shadow 0.4s ease;
+}
+.config-save-btn--saved {
+    background: #1a7f37;
+    box-shadow: 0 0 12px rgba(46, 160, 67, 0.4);
+    animation: save-pulse 0.5s ease;
+}
+@keyframes save-pulse {
+    0%   { transform: scale(1); }
+    40%  { transform: scale(1.05); }
+    100% { transform: scale(1); }
 }
 .config-save-btn:hover:not(:disabled) {
     background: #2ea043;

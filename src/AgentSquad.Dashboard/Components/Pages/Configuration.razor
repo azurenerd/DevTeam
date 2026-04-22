@@ -1400,11 +1400,15 @@ else if (_config is not null)
             {
                 <div class="config-save-error">⚠️ @_saveError</div>
             }
-            <button class="config-save-btn" @onclick="SaveConfig" disabled="@_saving" data-testid="config-save-btn">
+            <button class="config-save-btn @(_saveSuccess ? "config-save-btn--saved" : "")" @onclick="SaveConfig" disabled="@(_saving || _saveSuccess)" data-testid="config-save-btn">
                 @if (_saving)
                 {
                     <span class="config-spinner"></span>
                     <span>Saving...</span>
+                }
+                else if (_saveSuccess)
+                {
+                    <span>✅ Saved!</span>
                 }
                 else
                 {
@@ -1924,7 +1928,7 @@ else if (_config is not null)
             _saveSuccess = true;
             _ = Task.Run(async () =>
             {
-                await Task.Delay(3000);
+                await Task.Delay(5000);
                 _saveSuccess = false;
                 await InvokeAsync(StateHasChanged);
             });
