@@ -6,6 +6,7 @@
 @using Microsoft.Extensions.Options
 @using AgentSquad.Core.Prompts
 @using AgentSquad.Core.GitHub.Models
+@using AgentSquad.Core.Frameworks
 @inject IConfigurationService ConfigService
 @inject IDashboardDataService DataService
 @inject IPromptTemplateService PromptService
@@ -323,12 +324,51 @@ else if (_config is not null)
                         </div>
                         <div class="config-field" title="External framework — delegates the task to Squad (Brady Gaster's multi-agent team). Squad coordinates multiple AI sub-agents (lead developer, frontend, backend, tester) working in parallel inside the worktree. Requires Squad CLI installed. Slowest but most thorough for complex tasks.">
                             <label>Squad (multi-agent team) 🆕</label>
-                            <label class="config-toggle">
-                                <input type="checkbox" checked="@IsStrategyEnabled(StrategySquad)"
-                                    @onchange="e => SetStrategyEnabled(StrategySquad, (bool)(e.Value ?? false))" />
-                                <span class="config-toggle-slider"></span>
-                            </label>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <label class="config-toggle">
+                                    <input type="checkbox" checked="@IsStrategyEnabled(StrategySquad)"
+                                        @onchange="e => SetStrategyEnabled(StrategySquad, (bool)(e.Value ?? false))" />
+                                    <span class="config-toggle-slider"></span>
+                                </label>
+                                @if (_squadReadinessChecking)
+                                {
+                                    <span style="font-size: 0.75rem; color: #64748b;">⏳ Checking...</span>
+                                }
+                                else if (_squadReadiness is not null)
+                                {
+                                    @if (_squadReadiness.Status == FrameworkReadiness.Ready)
+                                    {
+                                        <span style="font-size: 0.75rem; color: #16a34a;" title="@_squadReadiness.Message">✅ Ready</span>
+                                    }
+                                    else if (_squadReadiness.Status == FrameworkReadiness.InstallRequired)
+                                    {
+                                        <span style="font-size: 0.75rem; color: #d97706;" title="@_squadReadiness.Message">⚠️ Install Required</span>
+                                        <button class="btn-sm" style="font-size: 0.7rem; padding: 2px 8px; cursor: pointer;" @onclick="InstallSquadAsync" disabled="@_squadInstalling">
+                                            @(_squadInstalling ? "Installing..." : "Install Now")
+                                        </button>
+                                    }
+                                    else
+                                    {
+                                        <span style="font-size: 0.75rem; color: #dc2626;" title="@_squadReadiness.Message">❌ @_squadReadiness.Status</span>
+                                    }
+                                }
+                                <button class="btn-sm" style="font-size: 0.65rem; padding: 1px 6px; cursor: pointer; background: transparent; border: 1px solid #94a3b8; border-radius: 3px;" @onclick="CheckSquadReadinessAsync" disabled="@_squadReadinessChecking" title="Run readiness check for Squad CLI and all dependencies">
+                                    🔍 Check
+                                </button>
+                            </div>
                         </div>
+                        @if (_squadReadiness is not null && _squadReadiness.MissingDependencies.Count > 0)
+                        {
+                            <div style="margin-top: 4px; margin-bottom: 8px; padding: 6px 10px; background: #fef3cd; border: 1px solid #fbbf24; border-radius: 4px; font-size: 0.78rem; color: #92400e;">
+                                <strong>Missing dependencies:</strong> @string.Join(", ", _squadReadiness.MissingDependencies)
+                            </div>
+                        }
+                        @if (_squadInstallMessage is not null)
+                        {
+                            <div style="margin-top: 4px; margin-bottom: 8px; padding: 6px 10px; background: @(_squadInstallSuccess ? "#d1fae5" : "#fee2e2"); border: 1px solid @(_squadInstallSuccess ? "#34d399" : "#f87171"); border-radius: 4px; font-size: 0.78rem; color: @(_squadInstallSuccess ? "#065f46" : "#991b1b");">
+                                @_squadInstallMessage
+                            </div>
+                        }
                     </div>
 
                     @if (_config.StrategyFramework.Enabled && GetEnabledStrategyCount() == 0)
@@ -1659,6 +1699,13 @@ else if (_config is not null)
     private const string StrategyAgentic = "agentic-delegation";
     private const string StrategySquad = "squad";
 
+    // Squad readiness state
+    private FrameworkReadinessResult? _squadReadiness;
+    private bool _squadReadinessChecking;
+    private bool _squadInstalling;
+    private string? _squadInstallMessage;
+    private bool _squadInstallSuccess;
+
     private bool IsStrategyEnabled(string id)
         => _config?.StrategyFramework.EnabledStrategies
             .Any(s => string.Equals(s, id, StringComparison.OrdinalIgnoreCase)) ?? false;
@@ -1676,6 +1723,69 @@ else if (_config is not null)
 
     private int GetEnabledStrategyCount()
         => _config?.StrategyFramework.EnabledStrategies.Count ?? 0;
+
+    private async Task CheckSquadReadinessAsync()
+    {
+        _squadReadinessChecking = true;
+        _squadInstallMessage = null;
+        StateHasChanged();
+        try
+        {
+            var checker = ServiceProvider.GetService<SquadReadinessChecker>();
+            if (checker is null)
+            {
+                _squadReadiness = new FrameworkReadinessResult(
+                    FrameworkReadiness.Error, "SquadReadinessChecker not registered in DI", Array.Empty<string>());
+                return;
+            }
+            _squadReadiness = await checker.CheckReadinessAsync(CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            _squadReadiness = new FrameworkReadinessResult(
+                FrameworkReadiness.Error, $"Check failed: {ex.Message}", Array.Empty<string>());
+        }
+        finally
+        {
+            _squadReadinessChecking = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task InstallSquadAsync()
+    {
+        _squadInstalling = true;
+        _squadInstallMessage = null;
+        StateHasChanged();
+        try
+        {
+            var checker = ServiceProvider.GetService<SquadReadinessChecker>();
+            if (checker is null)
+            {
+                _squadInstallMessage = "SquadReadinessChecker not available in DI.";
+                _squadInstallSuccess = false;
+                return;
+            }
+            var result = await checker.EnsureInstalledAsync(CancellationToken.None);
+            _squadInstallSuccess = result.Succeeded;
+            _squadInstallMessage = result.Message;
+            if (result.Succeeded)
+            {
+                // Re-check readiness after install
+                _squadReadiness = await checker.CheckReadinessAsync(CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            _squadInstallSuccess = false;
+            _squadInstallMessage = $"Install failed: {ex.Message}";
+        }
+        finally
+        {
+            _squadInstalling = false;
+            StateHasChanged();
+        }
+    }
 
     // Per-agent accordion expansion tracking
     private readonly HashSet<string> _expandedAgentPanels = new();

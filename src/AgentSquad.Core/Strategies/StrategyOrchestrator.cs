@@ -307,10 +307,29 @@ public class StrategyOrchestrator
                 }
                 else
                 {
-                    // External adapter path: convert to FrameworkInvocation, execute, convert back.
-                    var fwResult = await adapter!.ExecuteAsync(
-                        ToFrameworkInvocation(invocation), timeoutCts.Token);
+                    // External adapter path: pre-execution gate → execute → post-execution gate.
+                    var fwInvocation = ToFrameworkInvocation(invocation);
+
+                    if (FrameworkExecutionGate.RequiresPreExecutionGate(strategyId))
+                    {
+                        var preGate = FrameworkExecutionGate.CreatePreExecutionGate(
+                            strategyId, task.TaskId, task.TaskTitle, timeout);
+                        _logger.LogInformation(
+                            "[FrameworkGate] PRE {FrameworkId} task {TaskId}: {Summary}",
+                            preGate.FrameworkId, preGate.TaskId, preGate.Summary);
+                    }
+
+                    var fwResult = await adapter!.ExecuteAsync(fwInvocation, timeoutCts.Token);
                     exec = FromFrameworkResult(fwResult);
+
+                    if (FrameworkExecutionGate.RequiresPreExecutionGate(strategyId))
+                    {
+                        var postGate = FrameworkExecutionGate.CreatePostExecutionGate(
+                            strategyId, task.TaskId, fwResult);
+                        _logger.LogInformation(
+                            "[FrameworkGate] POST {FrameworkId} task {TaskId}: {Summary}",
+                            postGate.FrameworkId, postGate.TaskId, postGate.Summary);
+                    }
                 }
 
                 if (exec.Succeeded)
