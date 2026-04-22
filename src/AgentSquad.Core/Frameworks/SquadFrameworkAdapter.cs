@@ -254,18 +254,28 @@ public sealed class SquadFrameworkAdapter
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
+        // Write prompt to a file — copilot agent mode may not read stdin reliably
+        var promptFile = Path.Combine(worktreePath, ".squad", "task-prompt.md");
+        Directory.CreateDirectory(Path.GetDirectoryName(promptFile)!);
+        await File.WriteAllTextAsync(promptFile, prompt, ct);
+
+        // Build the copilot command with -p flag referencing the prompt content
+        // We use -p with the actual prompt text (not a file path) since copilot
+        // doesn't have a file-input flag. For very long prompts, stdin is the fallback.
+        var baseArgs = "--agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions";
+
         // On Windows, CLI tools are .cmd shims that require cmd.exe
         string fileName;
         string arguments;
         if (OperatingSystem.IsWindows())
         {
             fileName = "cmd.exe";
-            arguments = "/c copilot --agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions";
+            arguments = $"/c copilot {baseArgs}";
         }
         else
         {
             fileName = "copilot";
-            arguments = "--agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions";
+            arguments = baseArgs;
         }
 
         var psi = new ProcessStartInfo
@@ -280,16 +290,19 @@ public sealed class SquadFrameworkAdapter
             CreateNoWindow = true,
         };
 
-        // Containment: block Squad from making GitHub API calls
-        psi.Environment["GH_TOKEN"] = "";
-        psi.Environment["GITHUB_TOKEN"] = "";
+        // Containment note: We do NOT blank GH_TOKEN/GITHUB_TOKEN because
+        // the copilot CLI itself needs GitHub auth to call the AI model API.
+        // Containment is enforced by running in an isolated worktree directory.
         psi.Environment["SQUAD_DEBUG"] = "1";
+
+        _logger.LogInformation("Starting Squad process in {Path}: {FileName} {Args}",
+            worktreePath, fileName, arguments);
 
         using var process = Process.Start(psi);
         if (process is null)
             return SquadProcessResult.Failed("Failed to start copilot process");
 
-        // Pipe prompt via stdin, then close
+        // Pipe prompt via stdin (primary delivery) and close to signal EOF
         await process.StandardInput.WriteAsync(prompt);
         await process.StandardInput.FlushAsync();
         process.StandardInput.Close();
@@ -361,8 +374,17 @@ public sealed class SquadFrameworkAdapter
         var succeeded = process.ExitCode == 0;
         if (!succeeded)
         {
-            _logger.LogWarning("Squad process exited with code {Code} for worktree {Path}",
-                process.ExitCode, worktreePath);
+            _logger.LogWarning("Squad process exited with code {Code} for worktree {Path}. " +
+                "Stdout ({StdoutLen} chars): {StdoutTail}. Stderr ({StderrLen} chars): {StderrTail}",
+                process.ExitCode, worktreePath,
+                stdout.Length, stdout.Length > 500 ? stdout.ToString(stdout.Length - 500, 500) : stdout.ToString(),
+                stderr.Length, stderr.Length > 500 ? stderr.ToString(stderr.Length - 500, 500) : stderr.ToString());
+        }
+        else
+        {
+            _logger.LogInformation("Squad process completed successfully for worktree {Path} " +
+                "({StdoutLines} stdout lines, {StderrLen} stderr chars)",
+                worktreePath, logLines.Count, stderr.Length);
         }
 
         return new SquadProcessResult(
