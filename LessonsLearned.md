@@ -68,6 +68,7 @@
 58. [EMU GitHub Restrictions — `gh` CLI Fails for Enterprise Managed Users](#59-emu-github-restrictions--gh-cli-fails-for-enterprise-managed-users)
 59. [First Successful End-to-End Run — What Made It Work](#60-first-successful-end-to-end-run--what-made-it-work)
 60. [External Agentic Framework Integration — Spike Before You Abstract](#61-external-agentic-framework-integration--spike-before-you-abstract)
+61. [Standalone Dashboard DI Must Mirror Runner Registrations](#62-standalone-dashboard-di-must-mirror-runner-registrations)
 
 ---
 
@@ -1351,3 +1352,21 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 **Fix:** Always spike first. Run the framework in a real environment, inspect every output, file, and side effect before designing interfaces. The abstractions should fit the reality, not the documentation.
 
 **Rule:** When integrating external tools into an orchestration system: (1) prove headless execution works, (2) audit all side effects and containment requirements, (3) map actual telemetry sources (not assumed ones), (4) fix any evaluation biases before adding new competitors, (5) THEN design the minimal abstraction that fits what you've proven. Defer mass renaming and UI polish until the integration is working end-to-end.
+
+## 62. Standalone Dashboard DI Must Mirror Runner Registrations
+
+**Problem:** AgentSquad has two hosting modes — the Runner (full orchestration host) and the standalone Dashboard Host (lightweight UI-only mode on port 5051). They have separate DI registration paths: `AddStrategyFramework()` in the Runner vs `AddStandaloneStubs()` in `StandaloneServiceRegistration.cs`. Every time a new service is registered in the Runner's DI container and consumed by a Dashboard page (e.g., via `ServiceProvider.GetService<T>()`), the standalone Dashboard will fail at runtime because the service was never registered there.
+
+**What went wrong (repeatedly):**
+- `SquadReadinessChecker` was registered in `AddStrategyFramework()` (Runner-side), but the Configuration page calls `ServiceProvider.GetService<SquadReadinessChecker>()`. When the standalone Dashboard tried to resolve it, it returned null and the UI showed an error.
+- This is a recurring pattern, not a one-time mistake. The same class of bug has appeared with other services that were added to the Runner but forgotten in the standalone Dashboard registration.
+- The failure only surfaces at runtime when someone clicks the relevant UI element — there's no compile-time or startup-time check that catches missing registrations.
+
+**Why it's easy to miss:**
+1. The Runner and Dashboard share the same Blazor component library (`AgentSquad.Dashboard`), but have different DI containers.
+2. When developing against the Runner (which registers everything), the pages work perfectly — the bug only appears in standalone mode.
+3. `GetService<T>()` returns null silently instead of throwing, so the failure manifests as a UI error message rather than a crash with a clear stack trace.
+
+**Fix:** When adding ANY new service that a Dashboard page or component might resolve — either directly via `GetService<T>()` or through constructor injection — you MUST also register it (or a stub/mock) in `StandaloneServiceRegistration.AddStandaloneStubs()` (`src/AgentSquad.Dashboard.Host/StandaloneServiceRegistration.cs`).
+
+**Rule:** Treat the standalone Dashboard DI container as a first-class deployment target. Every new feature that adds a service registration consumed by Blazor components requires a corresponding entry in `StandaloneServiceRegistration.cs`. Add this as a mandatory step in the implementation checklist for any feature that touches DI.
