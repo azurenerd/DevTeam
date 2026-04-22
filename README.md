@@ -56,48 +56,53 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     AgentSquad.Runner (Host, port 5050)                      │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │                     AgentSquad.Orchestrator                           │  │
-│  │  ┌───────────────┐  ┌───────────────┐  ┌──────────────────────────┐  │  │
-│  │  │ AgentRegistry  │  │ SpawnManager  │  │ WorkflowStateMachine     │  │  │
-│  │  └───────┬───────┘  └───────┬───────┘  │ Init → Research → Arch → │  │  │
-│  │          │                  │           │ Plan → Dev → Test →      │  │  │
-│  │  ┌───────┴───────┐  ┌──────┴────────┐  │ Review → Finalization    │  │  │
-│  │  │ HealthMonitor  │  │DeadlockDetect │  └──────────────────────────┘  │  │
-│  │  └───────────────┘  └───────────────┘                                │  │
-│  └────────────────────────────┬─────────────────────────────────────────┘  │
-│                               │                                            │
-│  ┌────────────────────────────┴─────────────────────────────────────────┐  │
-│  │                   InProcessMessageBus (Channels)                     │  │
-│  │          pub/sub: TaskAssignment, StatusUpdate, HelpRequest,         │  │
-│  │          ResourceRequest, ReviewRequest, SpawnSme, SmeResult         │  │
-│  └──┬──────┬──────┬──────────┬──────────┬──────────┬──────────┬─────┬──┘  │
-│     │      │      │          │          │          │          │     │      │
-│  ┌──┴──┐┌──┴──┐┌──┴───┐┌────┴───┐┌─────────┴─────────┐┌─────┴─┐┌──┴───┐  │
-│  │ PM  ││Rschr││Archt ││ SE     ││  SE Workers (×n)  ││ TE    ││ SME  │  │
-│  │Agent││Agent││Agent ││Leader  ││  (dynamic pool)   ││Agent  ││(×n)  │  │
-│  └──┬──┘└──┬──┘└──┬───┘└────┬───┘└─────────┬─────────┘└────┬──┘└──┬───┘  │
-│     └──────┴──────┴─────────┴─────────┴─────────┴─────────┴──────┘      │
-│              GitHubService (60s TTL cache) · REST API                     │
-│              CopilotCliChatCompletionService · MCP Servers                │
-│              AgentStateStore (SQLite) · AgentMemoryStore                  │
-│              LocalWorkspace · BuildRunner · TestRunner                    │
-│              PlaywrightRunner.LaunchVerifiedAppAsync (self-healing)       │
-│              PlaywrightHealthService (background port/browser monitor)    │
-└──────────────────────────┬────────────────┬─────────────────────────────┘
-                           │                │
-            ┌──────────────┴───────┐  ┌─────┴──────────────────────────────┐
-            │   GitHub (Remote)    │  │  Dashboard.Host (port 5051)        │
-            │  PRs · Issues · Code │  │  Blazor Server (standalone)        │
-            │  Research.md         │  │  15 pages: Overview, Timeline,     │
-            │  PMSpec.md           │  │  Metrics, Health, PRs, Issues,     │
-            │  Architecture.md     │  │  Eng Plan, Team, Director CLI,     │
-            │  EngineeringPlan.md  │  │  Approvals, Config, Agent Detail,  │
-            │  TeamComposition.md  │  │  Reasoning, GitHub Feed, Repo      │
-            └──────────────────────┘  └────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph Runner["🖥️ AgentSquad.Runner — Host · port 5050"]
+        direction TB
+        subgraph Orch["🎛️ AgentSquad.Orchestrator"]
+            AR[AgentRegistry] ~~~ SM[SpawnManager]
+            WSM["WorkflowStateMachine<br/><i>Init → Research → Arch → Plan<br/>→ Dev → Test → Review → Done</i>"]
+            HM[HealthMonitor] ~~~ DD[DeadlockDetect]
+        end
+
+        BUS["📡 InProcessMessageBus · Channels<br/><i>TaskAssignment · StatusUpdate · HelpRequest<br/>ResourceRequest · ReviewRequest · SpawnSme · SmeResult</i>"]
+
+        subgraph Team["👥 Agent Team"]
+            direction LR
+            PM["🎯 PM"] ~~~ RS["🔍 Researcher"] ~~~ ARCH["🏗️ Architect"] ~~~ SE["⚡ SE Leader"]
+            SEW["👨‍💻 SE Workers ×n"] ~~~ TE["🧪 Test Engineer"] ~~~ SME["🎓 SME ×n"]
+        end
+
+        subgraph Infra["⚙️ Shared Infrastructure"]
+            GHS["GitHubService · 60s TTL cache · REST API"]
+            CCS["CopilotCliChatCompletionService · MCP Servers"]
+            DB["AgentStateStore · AgentMemoryStore — SQLite"]
+            WK["LocalWorkspace · BuildRunner · TestRunner"]
+            PW["PlaywrightRunner · PlaywrightHealthService"]
+        end
+    end
+
+    GH["🐙 GitHub — Remote<br/>PRs · Issues · Code<br/>Research.md · PMSpec.md<br/>Architecture.md · EngineeringPlan.md<br/>TeamComposition.md"]
+    DASH["📊 Dashboard.Host — port 5051<br/>Blazor Server — standalone<br/>15 pages: Overview · Timeline · Metrics<br/>Health · PRs · Issues · Eng Plan · Team<br/>Director CLI · Approvals · Config<br/>Agent Detail · Reasoning · Feed · Repo"]
+
+    Orch -->|coordinates| BUS
+    BUS -->|routes messages| Team
+    Team -->|uses| Infra
+    Infra -->|artifacts| GH
+    Infra -->|feeds data| DASH
+
+    classDef purple fill:#6a0dad,stroke:#bf00ff,stroke-width:2px,color:#fff
+    classDef pink fill:#c2185b,stroke:#ff4081,stroke-width:2px,color:#fff
+    classDef blue fill:#0277bd,stroke:#00b0ff,stroke-width:2px,color:#fff
+    classDef deepPurple fill:#4a148c,stroke:#ea80fc,stroke-width:2px,color:#fff
+    classDef cyan fill:#006064,stroke:#00e5ff,stroke-width:2px,color:#fff
+
+    class AR,SM,WSM,HM,DD purple
+    class BUS pink
+    class PM,RS,ARCH,SE,SEW,TE,SME blue
+    class GHS,CCS,DB,WK,PW deepPurple
+    class GH,DASH cyan
 ```
 
 ## Quick Start
@@ -193,52 +198,38 @@ Standalone mode lets you restart the dashboard without disrupting running agents
 
 ## How It Works
 
-```
-You provide a project description
-         │
-         ▼
-┌─ Initialization ──────────────────────────────────────────────────────┐
-│  PM spawns → Researcher, Architect, SE, Engineers, Test Engineer      │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Research ────────────────────────────────────────────────────────────┐
-│  Researcher conducts multi-turn technical research → Research.md     │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Architecture ────────────────────────────────────────────────────────┐
-│  PM writes PMSpec.md (business spec with user stories)               │
-│  Architect designs system → Architecture.md (reviewed by SE)         │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Engineering Planning ────────────────────────────────────────────────┐
-│  SE decomposes Architecture into tasks with dependencies             │
-│  PM proposes team composition (core agents + SME specialists)        │
-│  Human gate → approve team → EngineeringPlan.md                      │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Parallel Development ────────────────────────────────────────────────┐
-│  SE assigns tasks to engineers based on complexity                    │
-│  Engineers create PRs with implementation (local build verification)  │
-│  SE + Architect review PRs → approve or request rework               │
-│  SME agents provide specialist input on-demand                       │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Testing ─────────────────────────────────────────────────────────────┐
-│  Test Engineer scans approved PRs → generates test strategy          │
-│  Creates test PRs: unit → integration → UI/E2E (Playwright)         │
-│  Classifies failures as test bugs vs source bugs → routes rework     │
-└──────────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─ Review & Finalization ───────────────────────────────────────────────┐
-│  PM conducts final review for business alignment                     │
-│  All PRs merged → project complete                                   │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    START(["📋 You provide a project description"])
+
+    INIT["🚀 <b>Initialization</b><br/>PM spawns → Researcher, Architect,<br/>SE, Engineers, Test Engineer"]
+
+    RESEARCH["🔍 <b>Research</b><br/>Researcher conducts multi-turn<br/>technical research → Research.md"]
+
+    ARCHITECTURE["🏗️ <b>Architecture</b><br/>PM writes PMSpec.md — business spec with user stories<br/>Architect designs system → Architecture.md — reviewed by SE"]
+
+    PLANNING["📝 <b>Engineering Planning</b><br/>SE decomposes Architecture into tasks with dependencies<br/>PM proposes team composition — core agents + SME specialists<br/>Human gate → approve team → EngineeringPlan.md"]
+
+    DEV["⚡ <b>Parallel Development</b><br/>SE assigns tasks to engineers based on complexity<br/>Engineers create PRs with implementation — local build verification<br/>SE + Architect review PRs → approve or request rework<br/>SME agents provide specialist input on-demand"]
+
+    TEST["🧪 <b>Testing</b><br/>Test Engineer scans approved PRs → generates test strategy<br/>Creates test PRs: unit → integration → UI/E2E — Playwright<br/>Classifies failures as test bugs vs source bugs → routes rework"]
+
+    FINAL["✅ <b>Review & Finalization</b><br/>PM conducts final review for business alignment<br/>All PRs merged → project complete"]
+
+    START --> INIT --> RESEARCH --> ARCHITECTURE
+    ARCHITECTURE --> PLANNING --> DEV --> TEST --> FINAL
+
+    classDef start fill:#4a148c,stroke:#ea80fc,stroke-width:2px,color:#fff
+    classDef purple fill:#6a0dad,stroke:#bf00ff,stroke-width:2px,color:#fff
+    classDef pink fill:#c2185b,stroke:#ff4081,stroke-width:2px,color:#fff
+    classDef blue fill:#0277bd,stroke:#00b0ff,stroke-width:2px,color:#fff
+    classDef green fill:#1b5e20,stroke:#69f0ae,stroke-width:2px,color:#fff
+
+    class START start
+    class INIT,PLANNING purple
+    class RESEARCH,DEV blue
+    class ARCHITECTURE,TEST pink
+    class FINAL green
 ```
 
 ## Agent Roles
@@ -305,12 +296,23 @@ The judge receives sanitized diffs (capped at `MaxJudgePatchChars`) for all surv
 
 Winners are selected using a strict priority cascade:
 
-```
-1. Sole Survivor     → only one candidate passed all gates → automatic winner
-2. LLM Rank          → sort by AC ↓ → Design ↓ → Readability ↓
-3. Token Efficiency   → fewer tokens used (tiebreaker)
-4. Speed             → faster execution time (tiebreaker)
-5. Alphabetical ID   → stable deterministic fallback
+```mermaid
+flowchart LR
+    S1["1️⃣ Sole Survivor<br/><i>only one candidate<br/>passed all gates</i>"]
+    S2["2️⃣ LLM Rank<br/><i>AC ↓ → Design ↓<br/>→ Readability ↓</i>"]
+    S3["3️⃣ Token Efficiency<br/><i>fewer tokens used</i>"]
+    S4["4️⃣ Speed<br/><i>faster execution</i>"]
+    S5["5️⃣ Alphabetical ID<br/><i>stable fallback</i>"]
+
+    S1 --> S2 --> S3 --> S4 --> S5
+
+    classDef purple fill:#6a0dad,stroke:#bf00ff,stroke-width:2px,color:#fff
+    classDef pink fill:#c2185b,stroke:#ff4081,stroke-width:2px,color:#fff
+    classDef blue fill:#0277bd,stroke:#00b0ff,stroke-width:2px,color:#fff
+
+    class S1,S5 purple
+    class S2,S4 pink
+    class S3 blue
 ```
 
 If no LLM judge is configured, scoring is skipped and winner selection uses only the token/speed/ID tiebreakers.
