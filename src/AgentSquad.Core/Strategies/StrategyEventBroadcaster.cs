@@ -56,6 +56,9 @@ public sealed class StrategyEventBroadcaster : IStrategyEventSink
                 case StrategyEvents.CandidateScored when payload is CandidateScoredEvent sc:
                     _store.RecordScored(sc);
                     break;
+                case StrategyEvents.CandidateDetail when payload is CandidateDetailEvent dt:
+                    _store.RecordDetail(dt);
+                    break;
                 case StrategyEvents.WinnerSelected when payload is WinnerSelectedEvent w:
                     _store.RecordWinner(w);
                     break;

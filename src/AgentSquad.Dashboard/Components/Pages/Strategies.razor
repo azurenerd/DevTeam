@@ -1,6 +1,7 @@
 @page "/strategies"
 @rendermode InteractiveServer
 @using AgentSquad.Core.Strategies
+@using AgentSquad.Core.Strategies.Contracts
 @using AgentSquad.Dashboard.Services
 @using Microsoft.AspNetCore.SignalR.Client
 @using Microsoft.Extensions.Logging
@@ -189,77 +190,201 @@
                                                 }
                                             </div>
 
-                                            @* Scores *@
-                                            @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
-                                            {
-                                                <div class="cd-scores">
-                                                    <div class="cd-score-row">
-                                                        <span class="cd-score-label">Acceptance</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
-                                                        <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
-                                                    </div>
-                                                    <div class="cd-score-row">
-                                                        <span class="cd-score-label">Design</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
-                                                        <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
-                                                    </div>
-                                                    <div class="cd-score-row">
-                                                        <span class="cd-score-label">Readability</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
-                                                        <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
-                                                    </div>
-                                                    <div class="cd-score-total">
-                                                        Total: <strong>@TotalScore(candidate)</strong>/30
-                                                    </div>
-                                                </div>
+                                            @* Tabbed detail view *@
+                                            @{
+                                                var tabKey = $"{task.TaskId}_{candidate.StrategyId}";
+                                                var activeTab = _activeTabs.GetValueOrDefault(tabKey, "overview");
                                             }
-                                            else if (candidate.Survived == false && candidate.State >= CandidateState.Evaluated)
-                                            {
-                                                <div class="cd-no-scores">Not scored — failed gate: @(candidate.FailureReason ?? "unknown")</div>
-                                            }
-                                            else if (!string.IsNullOrEmpty(candidate.JudgeSkippedReason))
-                                            {
-                                                <div class="cd-no-scores cd-judge-skipped">
-                                                    No LLM judge scoring — <strong>@candidate.JudgeSkippedReason</strong>
-                                                </div>
-                                            }
-                                            else if (candidate.Succeeded == false)
-                                            {
-                                                <div class="cd-no-scores">Not scored — strategy execution failed</div>
-                                            }
-                                            else
-                                            {
-                                                <div class="cd-no-scores">Scores not available</div>
-                                            }
-
-                                            @* Metrics *@
-                                            <div class="cd-metrics">
-                                                @if (candidate.ElapsedSec.HasValue)
-                                                {
-                                                    <span class="cd-metric">⏱ @(candidate.ElapsedSec.Value.ToString("0.1"))s</span>
-                                                }
-                                                @if (candidate.TokensUsed.HasValue)
-                                                {
-                                                    <span class="cd-metric">🔤 @(candidate.TokensUsed.Value.ToString("N0")) tokens</span>
-                                                }
+                                            <div class="cd-tabs">
+                                                <button class="cd-tab @(activeTab == "overview" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "overview"))" @onclick:stopPropagation="true">Overview</button>
+                                                <button class="cd-tab @(activeTab == "files" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "files"))" @onclick:stopPropagation="true">
+                                                    Files @if (candidate.ExecutionSummary?.FilesChanged.Count > 0) { <span class="cd-tab-badge">@candidate.ExecutionSummary.FilesChanged.Count</span> }
+                                                </button>
+                                                <button class="cd-tab @(activeTab == "metrics" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "metrics"))" @onclick:stopPropagation="true">Metrics</button>
+                                                <button class="cd-tab @(activeTab == "logs" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "logs"))" @onclick:stopPropagation="true">
+                                                    Logs @if (candidate.ExecutionSummary?.DiagnosticLog.Count > 0) { <span class="cd-tab-badge">@candidate.ExecutionSummary.DiagnosticLog.Count</span> }
+                                                </button>
                                             </div>
 
-                                            @* Failure reason *@
-                                            @if (candidate.Succeeded == false && !string.IsNullOrEmpty(candidate.FailureReason))
-                                            {
-                                                <div class="cd-failure">
-                                                    <span class="cd-failure-label">Failure:</span> @candidate.FailureReason
-                                                </div>
-                                            }
+                                            <div class="cd-tab-content">
+                                                @if (activeTab == "overview")
+                                                {
+                                                    @* Scores *@
+                                                    @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
+                                                    {
+                                                        <div class="cd-scores">
+                                                            <div class="cd-score-row">
+                                                                <span class="cd-score-label">Acceptance</span>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
+                                                                <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
+                                                            </div>
+                                                            <div class="cd-score-row">
+                                                                <span class="cd-score-label">Design</span>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
+                                                                <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
+                                                            </div>
+                                                            <div class="cd-score-row">
+                                                                <span class="cd-score-label">Readability</span>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
+                                                                <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
+                                                            </div>
+                                                            <div class="cd-score-total">
+                                                                Total: <strong>@TotalScore(candidate)</strong>/30
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                    else if (candidate.Survived == false && candidate.State >= CandidateState.Evaluated)
+                                                    {
+                                                        <div class="cd-no-scores">Not scored — failed gate: @(candidate.FailureReason ?? "unknown")</div>
+                                                    }
+                                                    else if (!string.IsNullOrEmpty(candidate.JudgeSkippedReason))
+                                                    {
+                                                        <div class="cd-no-scores cd-judge-skipped">
+                                                            No LLM judge scoring — <strong>@candidate.JudgeSkippedReason</strong>
+                                                        </div>
+                                                    }
+                                                    else if (candidate.Succeeded == false)
+                                                    {
+                                                        <div class="cd-no-scores">Not scored — strategy execution failed</div>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="cd-no-scores">Scores not available</div>
+                                                    }
 
-                                            @* Screenshot *@
-                                            @if (!string.IsNullOrEmpty(candidate.ScreenshotBase64))
-                                            {
-                                                <div class="cd-screenshot">
-                                                    <div class="cd-screenshot-label">Preview Screenshot</div>
-                                                    <img src="data:image/png;base64,@candidate.ScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img" />
-                                                </div>
-                                            }
+                                                    @* Judge Reasoning *@
+                                                    @if (!string.IsNullOrEmpty(candidate.ExecutionSummary?.JudgeReasoning))
+                                                    {
+                                                        <div class="cd-reasoning">
+                                                            <div class="cd-reasoning-label">Judge Reasoning</div>
+                                                            <div class="cd-reasoning-text">@candidate.ExecutionSummary.JudgeReasoning</div>
+                                                        </div>
+                                                    }
+
+                                                    @* Key metrics row *@
+                                                    <div class="cd-metrics">
+                                                        @if (candidate.ElapsedSec.HasValue)
+                                                        {
+                                                            <span class="cd-metric">⏱ @(candidate.ElapsedSec.Value.ToString("0.1"))s</span>
+                                                        }
+                                                        @if (candidate.TokensUsed.HasValue)
+                                                        {
+                                                            <span class="cd-metric">🔤 @(candidate.TokensUsed.Value.ToString("N0")) tokens</span>
+                                                        }
+                                                        @if (candidate.ExecutionSummary is { } s)
+                                                        {
+                                                            <span class="cd-metric">📁 @s.FilesChanged.Count files</span>
+                                                            <span class="cd-metric">+@s.TotalLinesAdded / -@s.TotalLinesRemoved lines</span>
+                                                        }
+                                                    </div>
+
+                                                    @* Failure reason *@
+                                                    @if (candidate.Succeeded == false && !string.IsNullOrEmpty(candidate.FailureReason))
+                                                    {
+                                                        <div class="cd-failure">
+                                                            <span class="cd-failure-label">Failure:</span> @candidate.FailureReason
+                                                        </div>
+                                                    }
+
+                                                    @* Screenshot *@
+                                                    @if (!string.IsNullOrEmpty(candidate.ScreenshotBase64))
+                                                    {
+                                                        <div class="cd-screenshot">
+                                                            <div class="cd-screenshot-label">Preview Screenshot</div>
+                                                            <img src="data:image/png;base64,@candidate.ScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img" />
+                                                        </div>
+                                                    }
+                                                }
+                                                else if (activeTab == "files")
+                                                {
+                                                    @if (candidate.ExecutionSummary?.FilesChanged is { Count: > 0 } files)
+                                                    {
+                                                        <div class="cd-file-tree">
+                                                            @foreach (var file in files.OrderBy(f => f.Path))
+                                                            {
+                                                                <div class="cd-file-row">
+                                                                    <span class="cd-file-type cd-file-type-@(file.Type.ToLowerInvariant())">@FileTypeIcon(file.Type)</span>
+                                                                    <span class="cd-file-path" title="@file.Path">@file.Path</span>
+                                                                    @if (!file.IsBinary)
+                                                                    {
+                                                                        <span class="cd-file-stats">
+                                                                            @if (file.LinesAdded > 0) { <span class="cd-file-add">+@file.LinesAdded</span> }
+                                                                            @if (file.LinesRemoved > 0) { <span class="cd-file-del">-@file.LinesRemoved</span> }
+                                                                        </span>
+                                                                    }
+                                                                    else
+                                                                    {
+                                                                        <span class="cd-file-stats muted">binary</span>
+                                                                    }
+                                                                </div>
+                                                            }
+                                                            <div class="cd-file-summary">
+                                                                @files.Count file(s) · <span class="cd-file-add">+@files.Sum(f => f.LinesAdded)</span> <span class="cd-file-del">-@files.Sum(f => f.LinesRemoved)</span> · @FormatBytes(candidate.ExecutionSummary.PatchSizeBytes) patch
+                                                            </div>
+                                                        </div>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="cd-empty-tab">No file changes recorded.</div>
+                                                    }
+                                                }
+                                                else if (activeTab == "metrics")
+                                                {
+                                                    <div class="cd-metrics-detail">
+                                                        <div class="cd-metric-row">
+                                                            <span class="cd-metric-label">Elapsed Time</span>
+                                                            <span class="cd-metric-value">@(candidate.ElapsedSec?.ToString("0.1") ?? "—")s</span>
+                                                        </div>
+                                                        <div class="cd-metric-row">
+                                                            <span class="cd-metric-label">Tokens Used</span>
+                                                            <span class="cd-metric-value">@(candidate.TokensUsed?.ToString("N0") ?? "unknown")</span>
+                                                        </div>
+                                                        @if (candidate.ExecutionSummary is { } sm)
+                                                        {
+                                                            <div class="cd-metric-row">
+                                                                <span class="cd-metric-label">Files Changed</span>
+                                                                <span class="cd-metric-value">@sm.FilesChanged.Count</span>
+                                                            </div>
+                                                            <div class="cd-metric-row">
+                                                                <span class="cd-metric-label">Lines Added</span>
+                                                                <span class="cd-metric-value cd-file-add">+@sm.TotalLinesAdded</span>
+                                                            </div>
+                                                            <div class="cd-metric-row">
+                                                                <span class="cd-metric-label">Lines Removed</span>
+                                                                <span class="cd-metric-value cd-file-del">-@sm.TotalLinesRemoved</span>
+                                                            </div>
+                                                            <div class="cd-metric-row">
+                                                                <span class="cd-metric-label">Patch Size</span>
+                                                                <span class="cd-metric-value">@FormatBytes(sm.PatchSizeBytes)</span>
+                                                            </div>
+                                                        }
+                                                        @if (candidate.ExecutionSummary?.Scores is { } sc)
+                                                        {
+                                                            <div class="cd-metric-divider"></div>
+                                                            <div class="cd-metric-row">
+                                                                <span class="cd-metric-label">Judge Score</span>
+                                                                <span class="cd-metric-value">@sc.Total / 30 (AC=@sc.AcceptanceCriteria, Design=@sc.Design, Read=@sc.Readability)</span>
+                                                            </div>
+                                                        }
+                                                    </div>
+                                                }
+                                                else if (activeTab == "logs")
+                                                {
+                                                    @if (candidate.ExecutionSummary?.DiagnosticLog is { Count: > 0 } log)
+                                                    {
+                                                        <div class="cd-log-viewer">
+                                                            @foreach (var logLine in log)
+                                                            {
+                                                                <div class="cd-log-line">@logLine</div>
+                                                            }
+                                                        </div>
+                                                    }
+                                                    else
+                                                    {
+                                                        <div class="cd-empty-tab">No diagnostic logs captured.</div>
+                                                    }
+                                                }
+                                            </div>
                                         </div>
                                     }
                                 </div>
@@ -358,6 +483,47 @@
     .cd-screenshot-label { font-size: .7em; text-transform: uppercase; letter-spacing: .05em; opacity: .5; margin-bottom: .3rem; }
     .cd-screenshot-img { width: 100%; border-radius: 4px; border: 1px solid var(--border, #2d3240); cursor: pointer; transition: transform .15s; }
     .cd-screenshot-img:hover { transform: scale(1.02); box-shadow: 0 4px 12px rgba(0,0,0,.4); }
+
+    /* Tabs */
+    .cd-tabs { display: flex; gap: .25rem; border-bottom: 1px solid var(--border, #2d3240); margin-bottom: .65rem; }
+    .cd-tab { background: none; border: none; color: inherit; padding: .35rem .6rem; font-size: .75em; cursor: pointer; opacity: .5; border-bottom: 2px solid transparent; transition: opacity .15s, border-color .15s; font-family: inherit; }
+    .cd-tab:hover { opacity: .8; }
+    .cd-tab.active { opacity: 1; border-bottom-color: #4dabf7; }
+    .cd-tab-badge { background: rgba(77, 171, 247, .2); color: #4dabf7; padding: .05rem .3rem; border-radius: 8px; font-size: .85em; margin-left: .25rem; }
+    .cd-tab-content { min-height: 3rem; }
+
+    /* Judge Reasoning */
+    .cd-reasoning { margin-bottom: .5rem; }
+    .cd-reasoning-label { font-size: .7em; text-transform: uppercase; letter-spacing: .05em; opacity: .5; margin-bottom: .25rem; }
+    .cd-reasoning-text { font-size: .8em; line-height: 1.45; background: rgba(255,255,255,.03); padding: .5rem; border-radius: 4px; border-left: 2px solid rgba(77,171,247,.3); white-space: pre-wrap; }
+
+    /* File tree */
+    .cd-file-tree { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: .78em; }
+    .cd-file-row { display: flex; align-items: center; gap: .5rem; padding: .2rem 0; border-bottom: 1px solid rgba(255,255,255,.03); }
+    .cd-file-type { width: 1.2rem; text-align: center; font-size: .85em; }
+    .cd-file-type-added { color: #51cf66; }
+    .cd-file-type-modified { color: #ffd43b; }
+    .cd-file-type-deleted { color: #ff6b6b; }
+    .cd-file-type-renamed { color: #4dabf7; }
+    .cd-file-path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .cd-file-stats { text-align: right; white-space: nowrap; }
+    .cd-file-add { color: #51cf66; }
+    .cd-file-del { color: #ff6b6b; }
+    .cd-file-summary { margin-top: .5rem; padding-top: .4rem; border-top: 1px solid var(--border, #2d3240); font-size: .85em; opacity: .7; }
+
+    /* Metrics detail */
+    .cd-metrics-detail { display: grid; gap: .35rem; }
+    .cd-metric-row { display: flex; justify-content: space-between; align-items: center; padding: .25rem 0; border-bottom: 1px solid rgba(255,255,255,.03); font-size: .85em; }
+    .cd-metric-label { opacity: .6; }
+    .cd-metric-value { font-family: monospace; font-weight: 500; }
+    .cd-metric-divider { height: 1px; background: var(--border, #2d3240); margin: .35rem 0; }
+
+    /* Log viewer */
+    .cd-log-viewer { font-family: 'Cascadia Code', 'Fira Code', monospace; font-size: .72em; max-height: 300px; overflow-y: auto; background: rgba(0,0,0,.2); border-radius: 4px; padding: .5rem; }
+    .cd-log-line { padding: .1rem 0; line-height: 1.4; white-space: pre-wrap; word-break: break-all; border-bottom: 1px solid rgba(255,255,255,.02); }
+
+    /* Empty tab */
+    .cd-empty-tab { opacity: .4; font-style: italic; font-size: .85em; padding: .5rem 0; }
 </style>
 
 @code {
@@ -367,11 +533,17 @@
     private HubConnection? _hub;
     private bool _refreshing;
     private readonly HashSet<string> _expandedTasks = new();
+    private readonly Dictionary<string, string> _activeTabs = new();
 
     private void ToggleExpand(string taskId)
     {
         if (!_expandedTasks.Remove(taskId))
             _expandedTasks.Add(taskId);
+    }
+
+    private void SetTab(string key, string tab)
+    {
+        _activeTabs[key] = tab;
     }
 
     private static int TotalScore(CandidateSnapshot c)
@@ -427,6 +599,22 @@
         if (d.TotalMinutes < 60) return $"{(int)d.TotalMinutes}m {d.Seconds}s";
         return $"{(int)d.TotalHours}h {d.Minutes}m";
     }
+
+    private static string FileTypeIcon(string type) => type switch
+    {
+        "Added" => "+",
+        "Modified" => "~",
+        "Deleted" => "−",
+        "Renamed" => "→",
+        _ => "?",
+    };
+
+    private static string FormatBytes(int bytes) => bytes switch
+    {
+        < 1024 => $"{bytes} B",
+        < 1024 * 1024 => $"{bytes / 1024.0:0.1} KB",
+        _ => $"{bytes / (1024.0 * 1024.0):0.1} MB",
+    };
 
     public async ValueTask DisposeAsync()
     {

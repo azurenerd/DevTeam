@@ -100,6 +100,9 @@ public sealed class StrategyTaskStepBridge : IStrategyEventSink
                 case StrategyEvents.CandidateScored when payload is CandidateScoredEvent e:
                     OnCandidateScored(e);
                     break;
+                case StrategyEvents.CandidateDetail:
+                    // Detail events are informational for the store; no task-step side effect needed.
+                    break;
                 case StrategyEvents.WinnerSelected when payload is WinnerSelectedEvent e:
                     OnWinnerSelected(e);
                     break;

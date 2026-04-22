@@ -171,6 +171,15 @@ public class StrategyOrchestrator
                     screenshotBase64), ct);
             }
         }
+
+        // Emit detail events with full execution summary (file changes, logs, metrics).
+        foreach (var c in evalResult.Candidates)
+        {
+            var summary = BuildExecutionSummary(c, judgeSkippedReason);
+            await _events.EmitAsync(StrategyEvents.CandidateDetail,
+                new CandidateDetailEvent(task.RunId, task.TaskId, c.StrategyId, summary), ct);
+        }
+
         if (evalResult.Winner is not null)
         {
             await _events.EmitAsync(StrategyEvents.WinnerSelected, new WinnerSelectedEvent(
@@ -447,6 +456,53 @@ public class StrategyOrchestrator
         TokensUsed = fr.TokensUsed,
         Log = fr.Log,
     };
+
+    /// <summary>
+    /// Build a post-execution summary from evaluation result data (patch, metrics, logs, scores).
+    /// Centralizes diff parsing via <see cref="PatchAnalyzer"/>.
+    /// </summary>
+    private static CandidateExecutionSummary BuildExecutionSummary(
+        CandidateResult c, string? judgeSkippedReason)
+    {
+        var fileChanges = PatchAnalyzer.Parse(c.Patch);
+        var fileSummaries = fileChanges.Select(f => new FileChangeSummary
+        {
+            Path = f.Path,
+            Type = f.Type.ToString(),
+            LinesAdded = f.LinesAdded,
+            LinesRemoved = f.LinesRemoved,
+            IsBinary = f.IsBinary,
+        }).ToList();
+
+        // Truncate diagnostic log to last 200 lines for dashboard display
+        const int maxLogLines = 200;
+        var log = c.Execution.Log;
+        if (log.Count > maxLogLines)
+            log = log.Skip(log.Count - maxLogLines).ToList();
+
+        return new CandidateExecutionSummary
+        {
+            StrategyId = c.StrategyId,
+            Survived = c.Survived,
+            FailedGate = c.FailedGate,
+            FailureDetail = c.FailureDetail,
+            JudgeReasoning = c.Score?.Reasoning,
+            JudgeSkippedReason = c.Survived ? judgeSkippedReason : null,
+            FilesChanged = fileSummaries,
+            TotalLinesAdded = fileSummaries.Sum(f => f.LinesAdded),
+            TotalLinesRemoved = fileSummaries.Sum(f => f.LinesRemoved),
+            PatchSizeBytes = c.PatchSizeBytes,
+            ElapsedSec = c.Execution.Elapsed.TotalSeconds,
+            TokensUsed = c.Execution.TokensUsed,
+            DiagnosticLog = log,
+            Scores = c.Score is not null ? new ScoreSummary
+            {
+                AcceptanceCriteria = c.Score.AcceptanceCriteriaScore,
+                Design = c.Score.DesignScore,
+                Readability = c.Score.ReadabilityScore,
+            } : null,
+        };
+    }
 }
 
 public record OrchestrationOutcome(TaskContext Task, EvaluationResult Evaluation)

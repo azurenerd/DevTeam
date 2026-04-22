@@ -146,6 +146,22 @@ public sealed class CandidateStateStore
         OnChange?.Invoke(snapshot);
     }
 
+    public void RecordDetail(CandidateDetailEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        if (!task.Candidates.TryGetValue(e.StrategyId, out var existing)) return;
+
+        var updated = existing with { ExecutionSummary = e.Summary };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, ex) => ex with { Candidates = ex.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
     public void RecordWinner(WinnerSelectedEvent e)
     {
         var key = (e.RunId, e.TaskId);
@@ -228,6 +244,8 @@ public sealed record CandidateSnapshot
     public bool? Survived { get; init; }
     /// <summary>Why the LLM judge was skipped, e.g. "sole-survivor". Null when judge ran normally.</summary>
     public string? JudgeSkippedReason { get; init; }
+    /// <summary>Post-execution summary with file changes, metrics, logs, and judge reasoning. Null until detail event received.</summary>
+    public CandidateExecutionSummary? ExecutionSummary { get; init; }
 }
 
 public sealed record TaskSnapshot

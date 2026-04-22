@@ -13,6 +13,7 @@ public static class StrategyEvents
     public const string WinnerSelected       = "winner:selected";
     public const string GateStarted          = "gate:started";
     public const string GateCompleted        = "gate:completed";
+    public const string CandidateDetail      = "candidate:detail";
 }
 
 public record CandidateStartedEvent(string RunId, string TaskId, string StrategyId, DateTimeOffset At);
@@ -32,3 +33,15 @@ public record CandidateEvaluatedEvent(
 
 public record CandidateScoredEvent(string RunId, string TaskId, string StrategyId, int AcScore, int DesignScore, int ReadabilityScore, string? ScreenshotBase64 = null);
 public record WinnerSelectedEvent(string RunId, string TaskId, string StrategyId, string TieBreakReason, double EvaluationElapsedSec);
+
+/// <summary>
+/// Emitted after evaluation with the full execution summary for a candidate.
+/// Carries file changes parsed from the patch, diagnostic logs, metrics, and judge reasoning.
+/// Separate from <see cref="CandidateEvaluatedEvent"/> to keep the lightweight event small
+/// and avoid breaking existing SignalR subscribers.
+/// </summary>
+public record CandidateDetailEvent(
+    string RunId,
+    string TaskId,
+    string StrategyId,
+    CandidateExecutionSummary Summary);
