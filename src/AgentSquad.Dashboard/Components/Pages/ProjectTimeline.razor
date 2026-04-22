@@ -1112,7 +1112,7 @@ else
         var owner = m.Groups[1].Value;
         var repo = m.Groups[2].Value;
 
-        // Three code-generation strategies from StrategyOrchestrator. Keys match on-disk
+        // Code-generation strategies from StrategyOrchestrator. Keys match on-disk
         // filenames once wiring is implemented (Phase 2b). Winner resolution: body marker
         // `<!-- winner-strategy: {key} -->` takes priority; else fall back to "baseline".
         var winnerKey = "baseline";
@@ -1128,6 +1128,7 @@ else
             ("baseline", "Baseline"),
             ("mcp-enhanced", "MCP-Enhanced"),
             ("agentic-delegation", "Agentic Delegation"),
+            ("squad", "Squad"),
         };
 
         foreach (var (key, label) in strategies)

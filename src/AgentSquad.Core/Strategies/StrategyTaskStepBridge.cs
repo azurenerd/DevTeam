@@ -172,6 +172,7 @@ public sealed class StrategyTaskStepBridge : IStrategyEventSink
         ["baseline"] = "Baseline",
         ["mcp-enhanced"] = "MCP-Enhanced",
         ["agentic-delegation"] = "Agentic Delegation",
+        ["squad"] = "Squad",
     };
 
     /// <summary>
