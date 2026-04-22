@@ -254,10 +254,24 @@ public sealed class SquadFrameworkAdapter
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
+        // On Windows, CLI tools are .cmd shims that require cmd.exe
+        string fileName;
+        string arguments;
+        if (OperatingSystem.IsWindows())
+        {
+            fileName = "cmd.exe";
+            arguments = "/c copilot --agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions";
+        }
+        else
+        {
+            fileName = "copilot";
+            arguments = "--agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions";
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = "copilot",
-            Arguments = "--agent squad --yolo --no-ask-user --silent --no-color --no-auto-update --no-custom-instructions",
+            FileName = fileName,
+            Arguments = arguments,
             WorkingDirectory = worktreePath,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
@@ -477,10 +491,24 @@ public sealed class SquadFrameworkAdapter
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(timeout);
 
+        // On Windows, CLI tools like squad/npm/gh are .cmd shims that require cmd.exe
+        string fileName;
+        string arguments;
+        if (OperatingSystem.IsWindows())
+        {
+            fileName = "cmd.exe";
+            arguments = $"/c {command} {args}";
+        }
+        else
+        {
+            fileName = command;
+            arguments = args;
+        }
+
         var psi = new ProcessStartInfo
         {
-            FileName = command,
-            Arguments = args,
+            FileName = fileName,
+            Arguments = arguments,
             WorkingDirectory = workingDir,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

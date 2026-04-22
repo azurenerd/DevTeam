@@ -90,9 +90,9 @@ public class StrategyFrameworkConfig
 
 public class TimeoutsConfig
 {
-    public int BaselineSeconds { get; set; } = 180;
-    public int McpSeconds { get; set; } = 240;
-    public int AgenticSeconds { get; set; } = 600;
+    public int BaselineSeconds { get; set; } = 900;
+    public int McpSeconds { get; set; } = 900;
+    public int AgenticSeconds { get; set; } = 1800;
     public int BuildGateSeconds { get; set; } = 120;
     public int AppStartGateSeconds { get; set; } = 30;
     public int EvaluatorTestsSeconds { get; set; } = 180;
