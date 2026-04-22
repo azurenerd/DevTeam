@@ -355,8 +355,7 @@ flowchart LR
     class S3 blue
     class S4 pink
 ```
-    class S1D,S3D,S4D,S5D desc
-```
+
 
 If no LLM judge is configured, scoring is skipped and winner selection uses only the token/speed/ID tiebreakers.
 
