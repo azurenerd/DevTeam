@@ -16,6 +16,7 @@ public class AgentSquadWorker : BackgroundService
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly IGateCheckService _gateCheck;
     private readonly AgentStateStore _stateStore;
+    private readonly RunCoordinator _runCoordinator;
     private readonly ILogger<AgentSquadWorker> _logger;
     private readonly AgentSquadConfig _config;
     private readonly SMEAgentDefinitionService? _definitionService;
@@ -28,6 +29,7 @@ public class AgentSquadWorker : BackgroundService
         PullRequestWorkflow prWorkflow,
         IGateCheckService gateCheck,
         AgentStateStore stateStore,
+        RunCoordinator runCoordinator,
         ILogger<AgentSquadWorker> logger,
         IOptions<AgentSquadConfig> config,
         SMEAgentDefinitionService? definitionService = null)
@@ -38,6 +40,7 @@ public class AgentSquadWorker : BackgroundService
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
+        _runCoordinator = runCoordinator ?? throw new ArgumentNullException(nameof(runCoordinator));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
         _definitionService = definitionService;
@@ -63,61 +66,55 @@ public class AgentSquadWorker : BackgroundService
         Console.WriteLine($"  Max additional engineers: {_config.Limits.MaxAdditionalEngineers}");
         Console.WriteLine();
 
-        // Recover workflow state from SQLite checkpoint if available
-        var recovered = await _workflow.RecoverAsync(ct);
-        if (recovered)
+        // Try to recover an in-progress run from the database
+        var hasActiveRun = await _runCoordinator.RecoverAsync(ct);
+        if (hasActiveRun)
         {
-            _logger.LogInformation("Resumed from checkpoint — workflow phase: {Phase}", _workflow.CurrentPhase);
+            var run = _runCoordinator.ActiveRun!;
+            _logger.LogInformation("Recovered {Mode} run {RunId} — resuming agent spawn",
+                run.Mode, run.RunId);
+
+            // Spawn agents for the recovered run
+            await _runCoordinator.SpawnAgentsForRunAsync(ct);
+            await SpawnCustomAndSmeAgents(ct);
         }
-
-        // NOTE: We intentionally do NOT clean .agentsquad task lock files on startup.
-        // If the runner crashed or the machine restarted, those locks reflect real in-progress
-        // work that the recovered workflow state machine will resume. Task locks are only
-        // cleaned during an explicit "full reset" via the Dashboard cleanup UI.
-
-        // === Gate: ProjectKickoff — human approves project start ===
-        await _gateCheck.WaitForGateAsync(
-            GateIds.ProjectKickoff,
-            "Project ready to start, awaiting human approval to begin agent workflow",
-            ct: ct);
-
-        // Spawn all core agents
-        var roles = new[]
+        else
         {
-            AgentRole.ProgramManager,
-            AgentRole.Researcher,
-            AgentRole.Architect,
-            AgentRole.SoftwareEngineer,
-            AgentRole.TestEngineer
-        };
+            // No active run — wait for ProjectKickoff gate (human approval)
+            // This preserves backward compatibility: the gate triggers a new project run
+            _logger.LogInformation("No active run found — waiting for ProjectKickoff gate or dashboard start command");
 
-        foreach (var role in roles)
-        {
-            var agentConfig = _config.Agents.GetConfigForRole(role);
-            if (!agentConfig.Enabled || !agentConfig.AutoSpawn)
-            {
-                _logger.LogInformation("{Role} agent skipped (Enabled={Enabled}, AutoSpawn={AutoSpawn})",
-                    role, agentConfig.Enabled, agentConfig.AutoSpawn);
-                continue;
-            }
+            await _gateCheck.WaitForGateAsync(
+                GateIds.ProjectKickoff,
+                "Project ready to start, awaiting human approval to begin agent workflow",
+                ct: ct);
 
-            var identity = await _spawnManager.SpawnAgentAsync(role, ct);
-            if (identity == null)
-            {
-                _logger.LogCritical("Failed to spawn {Role} agent", role);
-                if (role == AgentRole.ProgramManager) return;
-                continue;
-            }
-            _logger.LogInformation("{Role} agent spawned: {Name}", role, identity.DisplayName);
+            // Gate approved — start a new project run via RunCoordinator
+            var run = await _runCoordinator.StartProjectAsync(ct);
+            _logger.LogInformation("ProjectKickoff gate approved — started run {RunId}", run.RunId);
+
+            // Spawn agents for the new run
+            await _runCoordinator.SpawnAgentsForRunAsync(ct);
+            await SpawnCustomAndSmeAgents(ct);
         }
 
         // BUG FIX: Do NOT start agent loops here — SpawnAgentAsync already calls
         // agent.StartAsync() in a background task (lines 87-98 of AgentSpawnManager).
-        // Previously, this worker also iterated all agents calling StartAsync(), causing
-        // every agent loop to run TWICE in parallel. This caused duplicate GitHub issues,
-        // duplicate research kickoffs, and "Reference already exists" branch errors.
-        _logger.LogInformation("All core agents spawned. Agent loops already started by SpawnAgentAsync.");
+        _logger.LogInformation("All agents spawned. Agent loops already started by SpawnAgentAsync.");
 
+        // Keep alive until cancellation — agents run as background tasks started by SpawnAgentAsync
+        try
+        {
+            await Task.Delay(Timeout.Infinite, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogInformation("AgentSquad shutting down...");
+        }
+    }
+
+    private async Task SpawnCustomAndSmeAgents(CancellationToken ct)
+    {
         // Spawn custom agents from configuration
         foreach (var customAgent in _config.Agents.CustomAgents)
         {
@@ -169,16 +166,6 @@ public class AgentSquadWorker : BackgroundService
             {
                 _logger.LogWarning(ex, "Failed to load persisted SME definitions for respawn");
             }
-        }
-
-        // Keep alive until cancellation — agents run as background tasks started by SpawnAgentAsync
-        try
-        {
-            await Task.Delay(Timeout.Infinite, ct);
-        }
-        catch (OperationCanceledException)
-        {
-            _logger.LogInformation("AgentSquad shutting down...");
         }
     }
 }

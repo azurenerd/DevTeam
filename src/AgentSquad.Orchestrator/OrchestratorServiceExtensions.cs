@@ -13,6 +13,7 @@ public static class OrchestratorServiceExtensions
         services.AddSingleton<DeadlockDetector>();
         services.AddSingleton<AgentSpawnManager>();
         services.AddSingleton<WorkflowStateMachine>();
+        services.AddSingleton<RunCoordinator>();
         return services;
     }
 }

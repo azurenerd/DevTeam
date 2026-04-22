@@ -1,0 +1,334 @@
+using AgentSquad.Core.Agents;
+using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Persistence;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
+namespace AgentSquad.Orchestrator;
+
+/// <summary>
+/// Manages the lifecycle of work runs (project or feature).
+/// Enforces single active run, handles start/stop/recover, and provides
+/// the active <see cref="IWorkflowProfile"/> to agents.
+/// </summary>
+public class RunCoordinator
+{
+    private readonly AgentSpawnManager _spawnManager;
+    private readonly AgentRegistry _registry;
+    private readonly WorkflowStateMachine _workflow;
+    private readonly AgentStateStore _stateStore;
+    private readonly IGateCheckService _gateCheck;
+    private readonly ILogger<RunCoordinator> _logger;
+    private readonly AgentSquadConfig _config;
+
+    private readonly object _lock = new();
+    private ActiveRun? _activeRun;
+    private IWorkflowProfile? _activeProfile;
+    private CancellationTokenSource? _runCts;
+
+    public RunCoordinator(
+        AgentSpawnManager spawnManager,
+        AgentRegistry registry,
+        WorkflowStateMachine workflow,
+        AgentStateStore stateStore,
+        IGateCheckService gateCheck,
+        ILogger<RunCoordinator> logger,
+        IOptions<AgentSquadConfig> config)
+    {
+        _spawnManager = spawnManager ?? throw new ArgumentNullException(nameof(spawnManager));
+        _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        _workflow = workflow ?? throw new ArgumentNullException(nameof(workflow));
+        _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
+        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
+    }
+
+    /// <summary>The currently active run, or null if idle.</summary>
+    public ActiveRun? ActiveRun
+    {
+        get { lock (_lock) return _activeRun; }
+    }
+
+    /// <summary>The workflow profile for the active run, or null if idle.</summary>
+    public IWorkflowProfile? ActiveProfile
+    {
+        get { lock (_lock) return _activeProfile; }
+    }
+
+    /// <summary>Whether a run is currently active (Running or Paused).</summary>
+    public bool HasActiveRun
+    {
+        get { lock (_lock) return _activeRun is { Status: RunStatus.Running or RunStatus.Paused }; }
+    }
+
+    /// <summary>
+    /// Try to recover an in-progress run from the database on startup.
+    /// Returns true if a run was recovered and agents should be spawned.
+    /// </summary>
+    public async Task<bool> RecoverAsync(CancellationToken ct = default)
+    {
+        var savedRun = await _stateStore.GetActiveRunAsync(ct);
+        if (savedRun is null)
+        {
+            _logger.LogInformation("No active run found in database — waiting for start command");
+            return false;
+        }
+
+        // Set run ID on workflow state machine before recovery so it validates against the checkpoint
+        _workflow.RunId = savedRun.RunId;
+
+        // Recover workflow state
+        var workflowRecovered = await _workflow.RecoverAsync(ct);
+
+        lock (_lock)
+        {
+            _activeRun = savedRun;
+            _activeProfile = CreateProfile(savedRun);
+        }
+
+        _logger.LogInformation(
+            "Recovered {Mode} run {RunId} in status {Status} (workflow recovered: {WfRecovered})",
+            savedRun.Mode, savedRun.RunId, savedRun.Status, workflowRecovered);
+
+        return savedRun.Status == RunStatus.Running;
+    }
+
+    /// <summary>
+    /// Start a new greenfield project run. Fails if a run is already active.
+    /// </summary>
+    public async Task<ActiveRun> StartProjectAsync(CancellationToken ct = default)
+    {
+        lock (_lock)
+        {
+            if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted })
+                throw new InvalidOperationException($"Cannot start a project — run {_activeRun.RunId} is already {_activeRun.Status}");
+        }
+
+        var run = new ActiveRun
+        {
+            RunId = Guid.NewGuid().ToString("N"),
+            Mode = WorkMode.Project,
+            Status = RunStatus.Running,
+            Repo = _config.Project.GitHubRepo,
+            BaseBranch = _config.Project.DefaultBranch,
+            StartedAt = DateTime.UtcNow
+        };
+
+        var profile = new ProjectWorkflowProfile(_config.Limits.SinglePRMode);
+
+        // Clear any stale state from a previous run and set the new run ID
+        await _stateStore.ClearAllCheckpointsAsync(ct);
+        _workflow.RunId = run.RunId;
+
+        await _stateStore.SaveActiveRunAsync(run, ct);
+
+        lock (_lock)
+        {
+            _activeRun = run;
+            _activeProfile = profile;
+            _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        }
+
+        _logger.LogInformation("Started Project run {RunId} for {Repo}", run.RunId, run.Repo);
+        return run;
+    }
+
+    /// <summary>
+    /// Start a feature run. Loads the feature definition, creates the run, and sets up the profile.
+    /// </summary>
+    public async Task<ActiveRun> StartFeatureAsync(string featureId, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
+
+        lock (_lock)
+        {
+            if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted })
+                throw new InvalidOperationException($"Cannot start a feature — run {_activeRun.RunId} is already {_activeRun.Status}");
+        }
+
+        var feature = await _stateStore.GetFeatureAsync(featureId, ct)
+            ?? throw new InvalidOperationException($"Feature '{featureId}' not found");
+
+        if (feature.Status is not (FeatureStatus.Draft or FeatureStatus.Queued))
+            throw new InvalidOperationException($"Feature '{featureId}' is in status {feature.Status} — only Draft or Queued features can be started");
+
+        var runId = Guid.NewGuid().ToString("N");
+        var run = new ActiveRun
+        {
+            RunId = runId,
+            Mode = WorkMode.Feature,
+            FeatureId = featureId,
+            Status = RunStatus.Running,
+            Repo = feature.TargetRepo ?? _config.Project.GitHubRepo,
+            BaseBranch = feature.BaseBranch,
+            TargetBranch = $"feature/{feature.Title.ToLowerInvariant().Replace(' ', '-').Replace("--", "-").Trim('-')}",
+            StartedAt = DateTime.UtcNow
+        };
+
+        var profile = new FeatureWorkflowProfile(feature, runId);
+
+        // Clear any stale state from a previous run and set the new run ID
+        await _stateStore.ClearAllCheckpointsAsync(ct);
+        _workflow.RunId = run.RunId;
+
+        await _stateStore.SaveActiveRunAsync(run, ct);
+        await _stateStore.UpdateFeatureStatusAsync(featureId, FeatureStatus.Running, runId, ct);
+
+        lock (_lock)
+        {
+            _activeRun = run;
+            _activeProfile = profile;
+            _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        }
+
+        _logger.LogInformation("Started Feature run {RunId} for feature '{Title}' ({FeatureId})",
+            run.RunId, feature.Title, featureId);
+        return run;
+    }
+
+    /// <summary>
+    /// Gracefully stop the current run. Checkpoints state for later recovery.
+    /// </summary>
+    public async Task StopAsync(CancellationToken ct = default)
+    {
+        ActiveRun? run;
+        lock (_lock)
+        {
+            run = _activeRun;
+            if (run is null or { Status: not RunStatus.Running })
+            {
+                _logger.LogWarning("StopAsync called but no running run to stop");
+                return;
+            }
+        }
+
+        _logger.LogInformation("Stopping run {RunId}...", run.RunId);
+
+        // Checkpoint workflow state
+        await _workflow.CheckpointAsync();
+
+        // Update run status
+        await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Paused, ct);
+
+        lock (_lock)
+        {
+            _activeRun = run with { Status = RunStatus.Paused };
+        }
+
+        // Cancel the run's token (agents will wind down)
+        _runCts?.Cancel();
+
+        _logger.LogInformation("Run {RunId} paused", run.RunId);
+    }
+
+    /// <summary>
+    /// Mark the current run as completed.
+    /// </summary>
+    public async Task CompleteRunAsync(CancellationToken ct = default)
+    {
+        ActiveRun? run;
+        lock (_lock) { run = _activeRun; }
+
+        if (run is null) return;
+
+        await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Completed, ct);
+
+        if (run.FeatureId is not null)
+            await _stateStore.UpdateFeatureStatusAsync(run.FeatureId, FeatureStatus.Completed, ct: ct);
+
+        lock (_lock)
+        {
+            _activeRun = run with { Status = RunStatus.Completed, CompletedAt = DateTime.UtcNow };
+        }
+
+        _logger.LogInformation("Run {RunId} completed", run.RunId);
+    }
+
+    /// <summary>
+    /// Mark the current run as failed.
+    /// </summary>
+    public async Task FailRunAsync(string reason, CancellationToken ct = default)
+    {
+        ActiveRun? run;
+        lock (_lock) { run = _activeRun; }
+
+        if (run is null) return;
+
+        await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Failed, ct);
+
+        if (run.FeatureId is not null)
+            await _stateStore.UpdateFeatureStatusAsync(run.FeatureId, FeatureStatus.Failed, ct: ct);
+
+        lock (_lock)
+        {
+            _activeRun = run with { Status = RunStatus.Failed, CompletedAt = DateTime.UtcNow };
+        }
+
+        _logger.LogWarning("Run {RunId} failed: {Reason}", run.RunId, reason);
+    }
+
+    /// <summary>
+    /// Spawn the agents required for the active run's workflow profile.
+    /// </summary>
+    public async Task SpawnAgentsForRunAsync(CancellationToken ct = default)
+    {
+        IWorkflowProfile? profile;
+        lock (_lock) { profile = _activeProfile; }
+
+        if (profile is null)
+            throw new InvalidOperationException("No active profile — call StartProjectAsync or StartFeatureAsync first");
+
+        var roleMap = new Dictionary<string, AgentRole>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ProgramManager"] = AgentRole.ProgramManager,
+            ["Researcher"] = AgentRole.Researcher,
+            ["Architect"] = AgentRole.Architect,
+            ["SoftwareEngineer"] = AgentRole.SoftwareEngineer,
+            ["TestEngineer"] = AgentRole.TestEngineer
+        };
+
+        foreach (var roleName in profile.RequiredAgentRoles)
+        {
+            if (!roleMap.TryGetValue(roleName, out var role))
+            {
+                _logger.LogWarning("Unknown agent role '{Role}' in workflow profile, skipping", roleName);
+                continue;
+            }
+
+            var agentConfig = _config.Agents.GetConfigForRole(role);
+            if (!agentConfig.Enabled || !agentConfig.AutoSpawn)
+            {
+                _logger.LogInformation("{Role} agent skipped (Enabled={Enabled}, AutoSpawn={AutoSpawn})",
+                    role, agentConfig.Enabled, agentConfig.AutoSpawn);
+                continue;
+            }
+
+            var identity = await _spawnManager.SpawnAgentAsync(role, ct);
+            if (identity is null)
+            {
+                _logger.LogCritical("Failed to spawn {Role} agent", role);
+                if (role == AgentRole.ProgramManager)
+                    throw new InvalidOperationException("Cannot start run without ProgramManager agent");
+                continue;
+            }
+
+            _logger.LogInformation("{Role} agent spawned: {Name}", role, identity.DisplayName);
+        }
+    }
+
+    private IWorkflowProfile CreateProfile(ActiveRun run)
+    {
+        if (run.Mode == WorkMode.Feature && run.FeatureId is not null)
+        {
+            var feature = _stateStore.GetFeatureAsync(run.FeatureId).GetAwaiter().GetResult();
+            if (feature is not null)
+                return new FeatureWorkflowProfile(feature, run.RunId);
+
+            _logger.LogWarning("Feature {FeatureId} not found for run {RunId}, falling back to project profile",
+                run.FeatureId, run.RunId);
+        }
+
+        return new ProjectWorkflowProfile(_config.Limits.SinglePRMode);
+    }
+}

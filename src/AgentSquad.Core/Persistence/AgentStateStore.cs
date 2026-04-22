@@ -1,3 +1,4 @@
+using AgentSquad.Core.Configuration;
 using Microsoft.Data.Sqlite;
 
 namespace AgentSquad.Core.Persistence;
@@ -26,7 +27,8 @@ public record MetricEntry(
 public record WorkflowCheckpoint(
     string Phase,
     string SignalsJson,
-    DateTime Timestamp);
+    DateTime Timestamp,
+    string RunId = "_global");
 
 public record AgentTaskCheckpoint(
     string AgentRole,
@@ -163,14 +165,74 @@ public class AgentStateStore : IDisposable
 
             INSERT OR IGNORE INTO run_metadata (key, value)
             VALUES ('run_started_utc', datetime('now'));
+
+            CREATE TABLE IF NOT EXISTS active_runs (
+                run_id       TEXT PRIMARY KEY,
+                mode         TEXT NOT NULL,
+                feature_id   TEXT,
+                status       TEXT NOT NULL DEFAULT 'NotStarted',
+                repo         TEXT NOT NULL,
+                base_branch  TEXT NOT NULL DEFAULT 'main',
+                target_branch TEXT,
+                created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
+                started_at   DATETIME,
+                completed_at DATETIME
+            );
+
+            CREATE TABLE IF NOT EXISTS features (
+                id                TEXT PRIMARY KEY,
+                title             TEXT NOT NULL,
+                description       TEXT NOT NULL,
+                target_repo       TEXT,
+                base_branch       TEXT NOT NULL DEFAULT 'main',
+                tech_stack_override TEXT,
+                additional_context TEXT,
+                acceptance_criteria TEXT,
+                status            TEXT NOT NULL DEFAULT 'Draft',
+                created_at        DATETIME NOT NULL DEFAULT (datetime('now')),
+                started_at        DATETIME,
+                completed_at      DATETIME,
+                run_id            TEXT
+            );
             """;
         cmd.ExecuteNonQuery();
+
+        // Schema migration: add run_id columns to existing tables (safe if column already exists)
+        MigrateAddRunIdColumns();
 
         // Read run start time (set once on first DB creation, survives restarts)
         using var readCmd = _connection.CreateCommand();
         readCmd.CommandText = "SELECT value FROM run_metadata WHERE key = 'run_started_utc'";
         var result = readCmd.ExecuteScalar();
         RunStartedUtc = result is string s ? DateTime.Parse(s, null, System.Globalization.DateTimeStyles.AssumeUniversal).ToUniversalTime() : DateTime.UtcNow;
+    }
+
+    /// <summary>
+    /// Add run_id columns to tables that predate run-scoped state.
+    /// Safe to call on already-migrated DBs (ALTER TABLE fails silently).
+    /// </summary>
+    private void MigrateAddRunIdColumns()
+    {
+        string[] migrations =
+        [
+            "ALTER TABLE workflow_state ADD COLUMN run_id TEXT NOT NULL DEFAULT '_global'",
+            "ALTER TABLE gate_approvals ADD COLUMN run_id TEXT NOT NULL DEFAULT '_global'",
+            "ALTER TABLE processed_items ADD COLUMN run_id TEXT NOT NULL DEFAULT '_global'"
+        ];
+
+        foreach (var sql in migrations)
+        {
+            try
+            {
+                using var migCmd = _connection.CreateCommand();
+                migCmd.CommandText = sql;
+                migCmd.ExecuteNonQuery();
+            }
+            catch (SqliteException)
+            {
+                // Column already exists — expected on already-migrated DBs
+            }
+        }
     }
 
     /// <summary>
@@ -458,22 +520,24 @@ public class AgentStateStore : IDisposable
 
     // ── Workflow State ───────────────────────────────────────────────
 
-    /// <summary>Save the current workflow phase and signals to SQLite.</summary>
-    public async Task SaveWorkflowStateAsync(string phase, IEnumerable<string> signals, CancellationToken ct = default)
+    /// <summary>Save the current workflow phase and signals to SQLite, scoped by run ID.</summary>
+    public async Task SaveWorkflowStateAsync(string phase, IEnumerable<string> signals, string runId = "_global", CancellationToken ct = default)
     {
         var signalsJson = System.Text.Json.JsonSerializer.Serialize(signals);
 
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO workflow_state (id, phase, signals_json, updated_at)
-                VALUES (1, @phase, @signals, datetime('now'))
+            INSERT INTO workflow_state (id, phase, signals_json, run_id, updated_at)
+                VALUES (1, @phase, @signals, @runId, datetime('now'))
             ON CONFLICT(id) DO UPDATE SET
                 phase = excluded.phase,
                 signals_json = excluded.signals_json,
+                run_id = excluded.run_id,
                 updated_at = excluded.updated_at;
             """;
         cmd.Parameters.AddWithValue("@phase", phase);
         cmd.Parameters.AddWithValue("@signals", signalsJson);
+        cmd.Parameters.AddWithValue("@runId", runId);
 
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -482,7 +546,7 @@ public class AgentStateStore : IDisposable
     public async Task<WorkflowCheckpoint?> LoadWorkflowStateAsync(CancellationToken ct = default)
     {
         await using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT phase, signals_json, updated_at FROM workflow_state WHERE id = 1;";
+        cmd.CommandText = "SELECT phase, signals_json, updated_at, COALESCE(run_id, '_global') FROM workflow_state WHERE id = 1;";
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         if (!await reader.ReadAsync(ct))
@@ -491,7 +555,8 @@ public class AgentStateStore : IDisposable
         return new WorkflowCheckpoint(
             Phase: reader.GetString(0),
             SignalsJson: reader.GetString(1),
-            Timestamp: reader.GetDateTime(2));
+            Timestamp: reader.GetDateTime(2),
+            RunId: reader.GetString(3));
     }
 
     // ── Agent Task Checkpoints ───────────────────────────────────────
@@ -586,29 +651,41 @@ public class AgentStateStore : IDisposable
 
     // ── Processed Items (dedup) ──────────────────────────────────────
 
-    /// <summary>Record that an item has been processed by an agent role.</summary>
-    public async Task AddProcessedItemAsync(string agentRole, string itemType, string itemId, CancellationToken ct = default)
+    /// <summary>Record that an item has been processed by an agent role, scoped by run ID.</summary>
+    public async Task AddProcessedItemAsync(string agentRole, string itemType, string itemId, string runId = "_global", CancellationToken ct = default)
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            INSERT OR IGNORE INTO processed_items (agent_role, item_type, item_id)
-            VALUES (@role, @type, @item);
+            INSERT OR IGNORE INTO processed_items (agent_role, item_type, item_id, run_id)
+            VALUES (@role, @type, @item, @runId);
             """;
         cmd.Parameters.AddWithValue("@role", agentRole);
         cmd.Parameters.AddWithValue("@type", itemType);
         cmd.Parameters.AddWithValue("@item", itemId);
+        cmd.Parameters.AddWithValue("@runId", runId);
 
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    /// <summary>Load all processed item IDs for an agent role and item type.</summary>
-    public async Task<HashSet<string>> LoadProcessedItemsAsync(string agentRole, string itemType, CancellationToken ct = default)
+    /// <summary>Load all processed item IDs for an agent role and item type, optionally scoped by run ID.</summary>
+    public async Task<HashSet<string>> LoadProcessedItemsAsync(string agentRole, string itemType, string? runId = null, CancellationToken ct = default)
     {
         await using var cmd = _connection.CreateCommand();
-        cmd.CommandText = """
-            SELECT item_id FROM processed_items
-            WHERE agent_role = @role AND item_type = @type;
-            """;
+        if (runId is not null)
+        {
+            cmd.CommandText = """
+                SELECT item_id FROM processed_items
+                WHERE agent_role = @role AND item_type = @type AND run_id = @runId;
+                """;
+            cmd.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            cmd.CommandText = """
+                SELECT item_id FROM processed_items
+                WHERE agent_role = @role AND item_type = @type;
+                """;
+        }
         cmd.Parameters.AddWithValue("@role", agentRole);
         cmd.Parameters.AddWithValue("@type", itemType);
 
@@ -621,7 +698,7 @@ public class AgentStateStore : IDisposable
         return items;
     }
 
-    /// <summary>Clear all checkpoints (for fresh runs).</summary>
+    /// <summary>Clear all checkpoints (nuclear reset for fresh runs).</summary>
     public async Task ClearAllCheckpointsAsync(CancellationToken ct = default)
     {
         await using var cmd = _connection.CreateCommand();
@@ -633,6 +710,19 @@ public class AgentStateStore : IDisposable
             DELETE FROM gate_notifications;
             DELETE FROM run_metadata WHERE key = 'project_complete_notified';
             """;
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Clear state associated with a specific run only (leaves other runs' data intact).</summary>
+    public async Task ClearRunStateAsync(string runId, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            DELETE FROM workflow_state WHERE run_id = @runId;
+            DELETE FROM processed_items WHERE run_id = @runId;
+            DELETE FROM gate_approvals WHERE run_id = @runId;
+            """;
+        cmd.Parameters.AddWithValue("@runId", runId);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -682,26 +772,37 @@ public class AgentStateStore : IDisposable
 
     // ── Gate Approvals ──────────────────────────────────────────────
 
-    /// <summary>Save a gate approval to SQLite.</summary>
-    public void SaveGateApproval(string gateId, DateTime approvedAt)
+    /// <summary>Save a gate approval to SQLite, scoped by run ID.</summary>
+    public void SaveGateApproval(string gateId, DateTime approvedAt, string runId = "_global")
     {
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO gate_approvals (gate_id, approved_at)
-                VALUES (@id, @at)
-            ON CONFLICT(gate_id) DO UPDATE SET approved_at = excluded.approved_at;
+            INSERT INTO gate_approvals (gate_id, approved_at, run_id)
+                VALUES (@id, @at, @runId)
+            ON CONFLICT(gate_id) DO UPDATE SET
+                approved_at = excluded.approved_at,
+                run_id = excluded.run_id;
             """;
         cmd.Parameters.AddWithValue("@id", gateId);
         cmd.Parameters.AddWithValue("@at", approvedAt);
+        cmd.Parameters.AddWithValue("@runId", runId);
         cmd.ExecuteNonQuery();
     }
 
-    /// <summary>Load all persisted gate approvals.</summary>
-    public Dictionary<string, DateTime> LoadGateApprovals()
+    /// <summary>Load all persisted gate approvals, optionally filtered by run ID.</summary>
+    public Dictionary<string, DateTime> LoadGateApprovals(string? runId = null)
     {
         var result = new Dictionary<string, DateTime>();
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT gate_id, approved_at FROM gate_approvals;";
+        if (runId is not null)
+        {
+            cmd.CommandText = "SELECT gate_id, approved_at FROM gate_approvals WHERE run_id = @runId;";
+            cmd.Parameters.AddWithValue("@runId", runId);
+        }
+        else
+        {
+            cmd.CommandText = "SELECT gate_id, approved_at FROM gate_approvals;";
+        }
         using var reader = cmd.ExecuteReader();
         while (reader.Read())
         {
@@ -858,6 +959,245 @@ public class AgentStateStore : IDisposable
             result[reader.GetInt32(0)] = reader.GetString(1);
         return result;
     }
+
+    // ── Active Runs ────────────────────────────────────────────────────
+
+    /// <summary>Save or update an active run.</summary>
+    public async Task SaveActiveRunAsync(ActiveRun run, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO active_runs (run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at)
+                VALUES (@runId, @mode, @featureId, @status, @repo, @baseBranch, @targetBranch, @createdAt, @startedAt, @completedAt)
+            ON CONFLICT(run_id) DO UPDATE SET
+                status = excluded.status,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at;
+            """;
+        cmd.Parameters.AddWithValue("@runId", run.RunId);
+        cmd.Parameters.AddWithValue("@mode", run.Mode.ToString());
+        cmd.Parameters.AddWithValue("@featureId", (object?)run.FeatureId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@status", run.Status.ToString());
+        cmd.Parameters.AddWithValue("@repo", run.Repo);
+        cmd.Parameters.AddWithValue("@baseBranch", run.BaseBranch);
+        cmd.Parameters.AddWithValue("@targetBranch", (object?)run.TargetBranch ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@createdAt", run.CreatedAt);
+        cmd.Parameters.AddWithValue("@startedAt", (object?)run.StartedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@completedAt", (object?)run.CompletedAt ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Get the currently active (Running or Paused) run, if any.</summary>
+    public async Task<ActiveRun?> GetActiveRunAsync(CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            FROM active_runs
+            WHERE status IN ('Running', 'Paused', 'NotStarted')
+            ORDER BY created_at DESC
+            LIMIT 1;
+            """;
+        return await ReadSingleRunAsync(cmd, ct);
+    }
+
+    /// <summary>Get a specific run by ID.</summary>
+    public async Task<ActiveRun?> GetRunByIdAsync(string runId, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            FROM active_runs WHERE run_id = @runId;
+            """;
+        cmd.Parameters.AddWithValue("@runId", runId);
+        return await ReadSingleRunAsync(cmd, ct);
+    }
+
+    /// <summary>Get run history (most recent first).</summary>
+    public async Task<IReadOnlyList<ActiveRun>> GetRunHistoryAsync(int limit = 20, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            FROM active_runs
+            ORDER BY created_at DESC
+            LIMIT @limit;
+            """;
+        cmd.Parameters.AddWithValue("@limit", limit);
+
+        var runs = new List<ActiveRun>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            runs.Add(MapActiveRun(reader));
+        return runs;
+    }
+
+    /// <summary>Update only the status (and optional timestamps) of a run.</summary>
+    public async Task UpdateRunStatusAsync(string runId, RunStatus status, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = status switch
+        {
+            RunStatus.Running => """
+                UPDATE active_runs SET status = @status, started_at = COALESCE(started_at, datetime('now'))
+                WHERE run_id = @runId;
+                """,
+            RunStatus.Completed or RunStatus.Failed or RunStatus.Cancelled => """
+                UPDATE active_runs SET status = @status, completed_at = datetime('now')
+                WHERE run_id = @runId;
+                """,
+            _ => "UPDATE active_runs SET status = @status WHERE run_id = @runId;"
+        };
+        cmd.Parameters.AddWithValue("@runId", runId);
+        cmd.Parameters.AddWithValue("@status", status.ToString());
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private async Task<ActiveRun?> ReadSingleRunAsync(SqliteCommand cmd, CancellationToken ct)
+    {
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return MapActiveRun(reader);
+    }
+
+    private static ActiveRun MapActiveRun(SqliteDataReader reader) => new()
+    {
+        RunId = reader.GetString(0),
+        Mode = Enum.Parse<WorkMode>(reader.GetString(1)),
+        FeatureId = reader.IsDBNull(2) ? null : reader.GetString(2),
+        Status = Enum.Parse<RunStatus>(reader.GetString(3)),
+        Repo = reader.GetString(4),
+        BaseBranch = reader.GetString(5),
+        TargetBranch = reader.IsDBNull(6) ? null : reader.GetString(6),
+        CreatedAt = reader.GetDateTime(7),
+        StartedAt = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
+        CompletedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9)
+    };
+
+    // ── Features ─────────────────────────────────────────────────────
+
+    /// <summary>Save or update a feature definition.</summary>
+    public async Task SaveFeatureAsync(FeatureDefinition feature, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO features (id, title, description, target_repo, base_branch, tech_stack_override,
+                                  additional_context, acceptance_criteria, status, created_at, started_at, completed_at, run_id)
+                VALUES (@id, @title, @desc, @repo, @branch, @tech, @ctx, @criteria, @status, @created, @started, @completed, @runId)
+            ON CONFLICT(id) DO UPDATE SET
+                title = excluded.title,
+                description = excluded.description,
+                target_repo = excluded.target_repo,
+                base_branch = excluded.base_branch,
+                tech_stack_override = excluded.tech_stack_override,
+                additional_context = excluded.additional_context,
+                acceptance_criteria = excluded.acceptance_criteria,
+                status = excluded.status,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                run_id = excluded.run_id;
+            """;
+        cmd.Parameters.AddWithValue("@id", feature.Id);
+        cmd.Parameters.AddWithValue("@title", feature.Title);
+        cmd.Parameters.AddWithValue("@desc", feature.Description);
+        cmd.Parameters.AddWithValue("@repo", (object?)feature.TargetRepo ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@branch", feature.BaseBranch);
+        cmd.Parameters.AddWithValue("@tech", (object?)feature.TechStackOverride ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ctx", (object?)feature.AdditionalContext ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@criteria", (object?)feature.AcceptanceCriteria ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@status", feature.Status.ToString());
+        cmd.Parameters.AddWithValue("@created", feature.CreatedAt);
+        cmd.Parameters.AddWithValue("@started", (object?)feature.StartedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@completed", (object?)feature.CompletedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@runId", (object?)feature.RunId ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Get a feature by ID.</summary>
+    public async Task<FeatureDefinition?> GetFeatureAsync(string featureId, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, title, description, target_repo, base_branch, tech_stack_override,
+                   additional_context, acceptance_criteria, status, created_at, started_at, completed_at, run_id
+            FROM features WHERE id = @id;
+            """;
+        cmd.Parameters.AddWithValue("@id", featureId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+            return null;
+        return MapFeature(reader);
+    }
+
+    /// <summary>List all features, most recent first.</summary>
+    public async Task<IReadOnlyList<FeatureDefinition>> ListFeaturesAsync(int limit = 50, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT id, title, description, target_repo, base_branch, tech_stack_override,
+                   additional_context, acceptance_criteria, status, created_at, started_at, completed_at, run_id
+            FROM features
+            ORDER BY created_at DESC
+            LIMIT @limit;
+            """;
+        cmd.Parameters.AddWithValue("@limit", limit);
+
+        var features = new List<FeatureDefinition>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            features.Add(MapFeature(reader));
+        return features;
+    }
+
+    /// <summary>Update feature status and optional timestamps.</summary>
+    public async Task UpdateFeatureStatusAsync(string featureId, FeatureStatus status, string? runId = null, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = status switch
+        {
+            FeatureStatus.Running => """
+                UPDATE features SET status = @status, started_at = COALESCE(started_at, datetime('now')), run_id = @runId
+                WHERE id = @id;
+                """,
+            FeatureStatus.Completed or FeatureStatus.Failed or FeatureStatus.Cancelled => """
+                UPDATE features SET status = @status, completed_at = datetime('now')
+                WHERE id = @id;
+                """,
+            _ => "UPDATE features SET status = @status WHERE id = @id;"
+        };
+        cmd.Parameters.AddWithValue("@id", featureId);
+        cmd.Parameters.AddWithValue("@status", status.ToString());
+        cmd.Parameters.AddWithValue("@runId", (object?)runId ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    /// <summary>Delete a feature (only allowed for Draft status).</summary>
+    public async Task DeleteFeatureAsync(string featureId, CancellationToken ct = default)
+    {
+        await using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM features WHERE id = @id AND status = 'Draft';";
+        cmd.Parameters.AddWithValue("@id", featureId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static FeatureDefinition MapFeature(SqliteDataReader reader) => new()
+    {
+        Id = reader.GetString(0),
+        Title = reader.GetString(1),
+        Description = reader.GetString(2),
+        TargetRepo = reader.IsDBNull(3) ? null : reader.GetString(3),
+        BaseBranch = reader.GetString(4),
+        TechStackOverride = reader.IsDBNull(5) ? null : reader.GetString(5),
+        AdditionalContext = reader.IsDBNull(6) ? null : reader.GetString(6),
+        AcceptanceCriteria = reader.IsDBNull(7) ? null : reader.GetString(7),
+        Status = Enum.Parse<FeatureStatus>(reader.GetString(8)),
+        CreatedAt = reader.GetDateTime(9),
+        StartedAt = reader.IsDBNull(10) ? null : reader.GetDateTime(10),
+        CompletedAt = reader.IsDBNull(11) ? null : reader.GetDateTime(11),
+        RunId = reader.IsDBNull(12) ? null : reader.GetString(12)
+    };
 
     public void Dispose()
     {

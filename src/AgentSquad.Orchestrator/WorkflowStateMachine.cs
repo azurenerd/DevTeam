@@ -51,6 +51,13 @@ public class WorkflowStateMachine
     private readonly HashSet<string> _signals = new();
     private readonly List<PhaseTransitionEventArgs> _history = new();
 
+    /// <summary>
+    /// The run ID for scoping workflow state persistence.
+    /// Set by <see cref="RunCoordinator"/> when starting/recovering a run.
+    /// Defaults to "_global" for backward compatibility.
+    /// </summary>
+    public string RunId { get; set; } = "_global";
+
     // Well-known signal constants
     public static class Signals
     {
@@ -244,7 +251,7 @@ public class WorkflowStateMachine
 
         try
         {
-            await _stateStore.SaveWorkflowStateAsync(phase, signals);
+            await _stateStore.SaveWorkflowStateAsync(phase, signals, RunId);
         }
         catch (Exception ex)
         {
@@ -279,9 +286,12 @@ public class WorkflowStateMachine
                 foreach (var signal in signals)
                     _signals.Add(signal);
 
+                // Restore run ID from checkpoint for state consistency
+                RunId = checkpoint.RunId;
+
                 _logger.LogInformation(
-                    "Workflow recovered from checkpoint: {Phase} with {SignalCount} signals (checkpoint age: {Age})",
-                    phase, _signals.Count, DateTime.UtcNow - checkpoint.Timestamp);
+                    "Workflow recovered from checkpoint: {Phase} with {SignalCount} signals, run {RunId} (checkpoint age: {Age})",
+                    phase, _signals.Count, RunId, DateTime.UtcNow - checkpoint.Timestamp);
             }
 
             return true;

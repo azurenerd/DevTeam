@@ -471,6 +471,137 @@ strategiesApi.MapGet("/cost", (AgentSquad.Core.AI.AgentUsageTracker usage) =>
         byStrategy = usage.GetAllStrategyStats(),
     }));
 
+// ── Run management REST API (for project/feature lifecycle) ──
+var runsApi = app.MapGroup("/api/runs").WithTags("Runs");
+
+runsApi.MapGet("/active", (RunCoordinator coordinator) =>
+{
+    var run = coordinator.ActiveRun;
+    var profile = coordinator.ActiveProfile;
+    return Results.Ok(new
+    {
+        run,
+        profile = profile is not null ? new
+        {
+            mode = profile.Mode.ToString(),
+            displayName = profile.DisplayName,
+            requiredRoles = profile.RequiredAgentRoles,
+            artifactBasePath = profile.ArtifactBasePath,
+            specDocName = profile.SpecDocName,
+            decomposeToMultipleTasks = profile.DecomposeToMultipleTasks
+        } : null
+    });
+});
+
+runsApi.MapPost("/start-project", async (RunCoordinator coordinator, CancellationToken ct) =>
+{
+    try
+    {
+        var run = await coordinator.StartProjectAsync(ct);
+        _ = Task.Run(async () =>
+        {
+            try { await coordinator.SpawnAgentsForRunAsync(ct); }
+            catch (Exception ex)
+            {
+                coordinator.FailRunAsync($"Agent spawn failed: {ex.Message}").GetAwaiter().GetResult();
+            }
+        }, ct);
+        return Results.Ok(new { run, message = "Project run started" });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+runsApi.MapPost("/start-feature/{featureId}", async (string featureId, RunCoordinator coordinator, CancellationToken ct) =>
+{
+    try
+    {
+        var run = await coordinator.StartFeatureAsync(featureId, ct);
+        _ = Task.Run(async () =>
+        {
+            try { await coordinator.SpawnAgentsForRunAsync(ct); }
+            catch (Exception ex)
+            {
+                coordinator.FailRunAsync($"Agent spawn failed: {ex.Message}").GetAwaiter().GetResult();
+            }
+        }, ct);
+        return Results.Ok(new { run, message = $"Feature run started for {featureId}" });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
+});
+
+runsApi.MapPost("/stop", async (RunCoordinator coordinator, CancellationToken ct) =>
+{
+    await coordinator.StopAsync(ct);
+    return Results.Ok(new { message = "Run stopped" });
+});
+
+runsApi.MapGet("/history", async (AgentStateStore stateStore, int? limit, CancellationToken ct) =>
+{
+    var history = await stateStore.GetRunHistoryAsync(limit ?? 20, ct);
+    return Results.Ok(history);
+});
+
+// ── Features CRUD REST API ──
+var featuresApi = app.MapGroup("/api/features").WithTags("Features");
+
+featuresApi.MapGet("/", async (AgentStateStore stateStore, int? limit, CancellationToken ct) =>
+    Results.Ok(await stateStore.ListFeaturesAsync(limit ?? 50, ct)));
+
+featuresApi.MapGet("/{id}", async (string id, AgentStateStore stateStore, CancellationToken ct) =>
+{
+    var feature = await stateStore.GetFeatureAsync(id, ct);
+    return feature is not null ? Results.Ok(feature) : Results.NotFound();
+});
+
+featuresApi.MapPost("/", async (HttpContext ctx, AgentStateStore stateStore, CancellationToken ct) =>
+{
+    var feature = await ctx.Request.ReadFromJsonAsync<FeatureDefinition>(ct);
+    if (feature is null || string.IsNullOrWhiteSpace(feature.Title))
+        return Results.BadRequest(new { error = "Title is required" });
+
+    // Ensure ID and defaults
+    var toSave = feature with
+    {
+        Id = string.IsNullOrWhiteSpace(feature.Id) ? Guid.NewGuid().ToString("N") : feature.Id,
+        Status = FeatureStatus.Draft,
+        CreatedAt = DateTime.UtcNow
+    };
+    await stateStore.SaveFeatureAsync(toSave, ct);
+    return Results.Created($"/api/features/{toSave.Id}", toSave);
+});
+
+featuresApi.MapPut("/{id}", async (string id, HttpContext ctx, AgentStateStore stateStore, CancellationToken ct) =>
+{
+    var existing = await stateStore.GetFeatureAsync(id, ct);
+    if (existing is null) return Results.NotFound();
+    if (existing.Status != FeatureStatus.Draft)
+        return Results.Conflict(new { error = "Only Draft features can be edited" });
+
+    var update = await ctx.Request.ReadFromJsonAsync<FeatureDefinition>(ct);
+    if (update is null) return Results.BadRequest();
+
+    var toSave = update with { Id = id, Status = FeatureStatus.Draft, CreatedAt = existing.CreatedAt };
+    await stateStore.SaveFeatureAsync(toSave, ct);
+    return Results.Ok(toSave);
+});
+
+featuresApi.MapDelete("/{id}", async (string id, AgentStateStore stateStore, CancellationToken ct) =>
+{
+    var existing = await stateStore.GetFeatureAsync(id, ct);
+    if (existing is null) return Results.NotFound();
+    if (existing.Status is not (FeatureStatus.Draft or FeatureStatus.Cancelled))
+        return Results.Conflict(new { error = "Only Draft or Cancelled features can be deleted" });
+
+    await stateStore.DeleteFeatureAsync(id, ct);
+    return Results.Ok(new { message = $"Feature '{id}' deleted" });
+});
+
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");
 

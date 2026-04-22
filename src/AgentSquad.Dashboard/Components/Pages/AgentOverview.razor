@@ -3,6 +3,7 @@
 @using AgentSquad.Core.Agents
 @using AgentSquad.Core.Agents.Decisions
 @using AgentSquad.Core.Agents.Steps
+@using AgentSquad.Core.Configuration
 @using AgentSquad.Core.Diagnostics
 @using AgentSquad.Core.GitHub
 @using AgentSquad.Core.Notifications
@@ -71,6 +72,57 @@
         </div>
     </div>
 }
+
+@* ── Project Control Card ── *@
+<div class="project-control-card">
+    <div class="project-control-header">
+        <span class="project-control-icon">
+            @switch (_runState)
+            {
+                case "Running": <span>🚀</span> break;
+                case "Paused": <span>⏸️</span> break;
+                case "Completed": <span>✅</span> break;
+                case "Failed": <span>❌</span> break;
+                default: <span>⏹️</span> break;
+            }
+        </span>
+        <div class="project-control-info">
+            <span class="project-control-title">
+                @if (!string.IsNullOrEmpty(_runDisplayName))
+                {
+                    @_runDisplayName
+                }
+                else
+                {
+                    <span>No Active Run</span>
+                }
+            </span>
+            <span class="project-control-status status-@_runState.ToLowerInvariant()">@_runState</span>
+            @if (!string.IsNullOrEmpty(_runMode))
+            {
+                <span class="project-control-mode">@_runMode</span>
+            }
+        </div>
+        <div class="project-control-actions">
+            @if (_runState is "Idle" or "" or "Completed" or "Failed" or "Cancelled")
+            {
+                <button class="btn-primary" @onclick="StartProjectAsync" disabled="@_runActionPending">
+                    @(_runActionPending ? "Starting..." : "▶ Start Project")
+                </button>
+            }
+            else if (_runState is "Running")
+            {
+                <button class="btn-danger" @onclick="StopRunAsync" disabled="@_runActionPending">
+                    @(_runActionPending ? "Stopping..." : "⏹ Stop")
+                </button>
+            }
+        </div>
+    </div>
+    @if (!string.IsNullOrEmpty(_runError))
+    {
+        <div class="project-control-error">⚠ @_runError</div>
+    }
+</div>
 
 <div class="stats-row">
     <div class="stat-card">
@@ -406,6 +458,14 @@ else
     private HashSet<string> _hiddenAgentIds = [];
     private bool _showAgentFilter;
     private List<AgentSnapshot> _visibleAgents => _agents.Where(a => !_hiddenAgentIds.Contains(a.Id)).ToList();
+
+    // Project control state
+    private string _runState = "Idle";
+    private string _runMode = "";
+    private string _runDisplayName = "";
+    private string _runError = "";
+    private bool _runActionPending;
+    private HttpClient? _runsHttp;
     private string? _selectedAgentId;
     private bool _hasDeadlock;
     private List<string>? _deadlockCycle;
@@ -445,7 +505,16 @@ else
         RefreshData();
         _availableModels = DataService.GetAvailableModels();
         DataService.OnChange += OnDataChanged;
+
+        // Set up HTTP client for run control API
+        var factory = ServiceProvider.GetService<IHttpClientFactory>();
+        if (factory is not null)
+        {
+            _runsHttp = factory.CreateClient("RunnerApi");
+        }
+
         _ = LoadTeamCompositionAsync();
+        _ = LoadRunStateAsync();
     }
 
     private void RefreshData()
@@ -767,4 +836,145 @@ else
     {
         DataService.OnChange -= OnDataChanged;
     }
+
+    // ── Project Control Methods ──────────────────────────────────────
+
+    private async Task LoadRunStateAsync()
+    {
+        if (_runsHttp is null)
+        {
+            // Fallback: try direct service injection (works in Runner-embedded mode)
+            var coordinator = ServiceProvider.GetService<AgentSquad.Orchestrator.RunCoordinator>();
+            if (coordinator is not null)
+            {
+                var run = coordinator.ActiveRun;
+                var profile = coordinator.ActiveProfile;
+                _runState = run?.Status.ToString() ?? "Idle";
+                _runMode = run?.Mode.ToString() ?? "";
+                _runDisplayName = profile?.DisplayName ?? "";
+                await InvokeAsync(StateHasChanged);
+            }
+            return;
+        }
+
+        try
+        {
+            var resp = await _runsHttp.GetAsync("/api/runs/active");
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadFromJsonAsync<RunActiveResponse>();
+                if (json?.run is not null)
+                {
+                    _runState = json.run.status ?? "Idle";
+                    _runMode = json.run.mode ?? "";
+                    _runDisplayName = json.profile?.displayName ?? "";
+                }
+                else
+                {
+                    _runState = "Idle";
+                    _runMode = "";
+                    _runDisplayName = "";
+                }
+                await InvokeAsync(StateHasChanged);
+            }
+        }
+        catch { /* API not available yet */ }
+    }
+
+    private async Task StartProjectAsync()
+    {
+        _runActionPending = true;
+        _runError = "";
+        StateHasChanged();
+
+        try
+        {
+            if (_runsHttp is not null)
+            {
+                var resp = await _runsHttp.PostAsync("/api/runs/start-project", null);
+                if (resp.IsSuccessStatusCode)
+                {
+                    _runState = "Running";
+                    _runMode = "Project";
+                    _runDisplayName = "Greenfield Project";
+                }
+                else
+                {
+                    var body = await resp.Content.ReadAsStringAsync();
+                    _runError = $"Failed to start: {body}";
+                }
+            }
+            else
+            {
+                var coordinator = ServiceProvider.GetService<AgentSquad.Orchestrator.RunCoordinator>();
+                if (coordinator is not null)
+                {
+                    await coordinator.StartProjectAsync();
+                    _ = Task.Run(async () =>
+                    {
+                        try { await coordinator.SpawnAgentsForRunAsync(); }
+                        catch { /* logged internally */ }
+                    });
+                    _runState = "Running";
+                    _runMode = "Project";
+                    _runDisplayName = "Greenfield Project";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _runError = ex.Message;
+        }
+        finally
+        {
+            _runActionPending = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task StopRunAsync()
+    {
+        _runActionPending = true;
+        _runError = "";
+        StateHasChanged();
+
+        try
+        {
+            if (_runsHttp is not null)
+            {
+                var resp = await _runsHttp.PostAsync("/api/runs/stop", null);
+                if (resp.IsSuccessStatusCode)
+                {
+                    _runState = "Paused";
+                }
+                else
+                {
+                    _runError = "Failed to stop run";
+                }
+            }
+            else
+            {
+                var coordinator = ServiceProvider.GetService<AgentSquad.Orchestrator.RunCoordinator>();
+                if (coordinator is not null)
+                {
+                    await coordinator.StopAsync();
+                    _runState = "Paused";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _runError = ex.Message;
+        }
+        finally
+        {
+            _runActionPending = false;
+            StateHasChanged();
+        }
+    }
+
+    // DTOs for JSON deserialization
+    private record RunActiveResponse(RunInfo? run, ProfileInfo? profile);
+    private record RunInfo(string? status, string? mode, string? runId);
+    private record ProfileInfo(string? displayName, string? mode);
 }
