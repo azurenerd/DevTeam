@@ -830,6 +830,10 @@ public class ProgramManagerAgent : AgentBase
 
                 if (_additionalEngineersHired >= _config.Limits.MaxAdditionalEngineers)
                 {
+                    var denyStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                        $"Deny resource #{issue.Number}",
+                        $"At max engineers ({_config.Limits.MaxAdditionalEngineers})");
+
                     Logger.LogInformation(
                         "Resource request #{Number} denied: at max additional engineers ({Max})",
                         issue.Number, _config.Limits.MaxAdditionalEngineers);
@@ -847,9 +851,15 @@ public class ProgramManagerAgent : AgentBase
                         $"the max of {_config.Limits.MaxAdditionalEngineers} additional engineers. " +
                         "Executive approval required to exceed this limit.",
                         ct);
+
+                    _taskTracker.CompleteStep(denyStepId);
                 }
                 else
                 {
+                    var approveStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                        $"Approve resource #{issue.Number}",
+                        "Spawning additional engineer");
+
                     // Parse which role is requested from the issue body
                     var requestedRole = AgentRole.SoftwareEngineer;
 
@@ -893,6 +903,8 @@ public class ProgramManagerAgent : AgentBase
                         await _github.AddIssueCommentAsync(issue.Number,
                             $"⚠️ Failed to spawn {requestedRole} — capacity limit may have been reached.", ct);
                     }
+
+                    _taskTracker.CompleteStep(approveStepId);
                 }
             }
         }
@@ -922,13 +934,19 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogWarning("Blocker detected: #{Number} — {Title}",
                     blocker.Number, blocker.Title);
 
+                var blockerStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                    $"Triage blocker #{blocker.Number}",
+                    $"Blocker: {blocker.Title}", Identity.ModelTier);
+
                 // Try to triage the blocker using AI
                 var resolution = await TriageBlockerAsync(blocker, ct);
+                _taskTracker.RecordLlmCall(blockerStepId);
 
                 if (resolution is not null)
                 {
                     await _github.AddIssueCommentAsync(blocker.Number,
                         $"🔍 **PM Triage:**\n\n{resolution}", ct);
+                    _taskTracker.RecordSubStep(blockerStepId, $"Triaged blocker #{blocker.Number}");
                 }
                 else
                 {
@@ -939,7 +957,9 @@ public class ProgramManagerAgent : AgentBase
                         $"A blocker issue needs Executive attention:\n\n" +
                         $"**Title:** {blocker.Title}\n\n{blocker.Body}",
                         ct);
+                    _taskTracker.RecordSubStep(blockerStepId, $"Escalated blocker #{blocker.Number} to Executive");
                 }
+                _taskTracker.CompleteStep(blockerStepId);
             }
         }
         catch (Exception ex)
@@ -1059,6 +1079,9 @@ public class ProgramManagerAgent : AgentBase
                     pr.Number, pr.Title);
                 UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
 
+                var reviewStepId = _taskTracker.BeginStep(Identity.Id, "pm-review", $"Review PR #{pr.Number}",
+                    $"Reviewing: {pr.Title}", Identity.ModelTier);
+
                 bool approved;
                 string? reviewBody;
 
@@ -1167,7 +1190,10 @@ public class ProgramManagerAgent : AgentBase
                 }
 
                 if (reviewBody is null)
+                {
+                    _taskTracker.CompleteStep(reviewStepId);
                     continue;
+                }
 
                 if (approved)
                 {
@@ -1206,6 +1232,9 @@ public class ProgramManagerAgent : AgentBase
                     await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
 
                     LogActivity("task", $"✅ PM final approval on PR #{pr.Number}: {pr.Title} — ready to merge");
+                    _taskTracker.RecordLlmCall(reviewStepId);
+                    _taskTracker.RecordSubStep(reviewStepId, $"Approved PR #{pr.Number}");
+                    _taskTracker.CompleteStep(reviewStepId);
                     await RememberAsync(MemoryType.Decision,
                         $"PM final approval on PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reviewBody), ct);
@@ -1259,6 +1288,9 @@ public class ProgramManagerAgent : AgentBase
 
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
+                    _taskTracker.RecordLlmCall(reviewStepId);
+                    _taskTracker.RecordSubStep(reviewStepId, $"Requested changes on PR #{pr.Number}");
+                    _taskTracker.CompleteStep(reviewStepId);
                     await RememberAsync(MemoryType.Decision,
                         $"Requested changes on PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reviewBody), ct);
@@ -1435,6 +1467,10 @@ public class ProgramManagerAgent : AgentBase
                     "All {Count} sub-issues for enhancement #{Number} are closed. Starting final acceptance review.",
                     subIssues.Count, issue.Number);
 
+                var completionStepId = _taskTracker.BeginStep(Identity.Id, "pm-completion",
+                    $"Review enhancement #{issue.Number}",
+                    $"Final acceptance review: {issue.Title}", Identity.ModelTier);
+
                 var closedSummary = string.Join("\n", subIssues.Select(s =>
                     $"  - #{s.Number}: {s.Title} (closed)"));
 
@@ -1465,6 +1501,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var responseText = response.Content ?? "";
+                _taskTracker.RecordLlmCall(completionStepId);
 
                 if (responseText.Contains("APPROVED", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1485,6 +1522,8 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation("PM approved and closed enhancement issue #{Number}: {Title}",
                         issue.Number, issue.Title);
                     LogActivity("review", $"✅ Approved and closed user story #{issue.Number}: {issue.Title}");
+                    _taskTracker.RecordSubStep(completionStepId, $"Approved enhancement #{issue.Number}");
+                    _taskTracker.CompleteStep(completionStepId);
                 }
                 else
                 {
@@ -1525,6 +1564,8 @@ public class ProgramManagerAgent : AgentBase
                         issue.Number, followUp.Number);
                     LogActivity("review",
                         $"🔍 Enhancement #{issue.Number} delivered with gaps → follow-up #{followUp.Number}");
+                    _taskTracker.RecordSubStep(completionStepId, $"Enhancement #{issue.Number} — gaps found, follow-up #{followUp.Number}");
+                    _taskTracker.CompleteStep(completionStepId);
                 }
             }
         }
@@ -1536,6 +1577,8 @@ public class ProgramManagerAgent : AgentBase
 
     private async Task UpdateProjectTrackingAsync(CancellationToken ct)
     {
+        if (_trackedAgents.Count == 0) return;
+
         try
         {
             foreach (var (agentId, tracking) in _trackedAgents)
@@ -2245,6 +2288,9 @@ public class ProgramManagerAgent : AgentBase
             UpdateStatus(AgentStatus.Working, "Composing optimal team");
             LogActivity("task", "🏗️ Analyzing project to determine optimal team composition");
 
+            var analyzeStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Analyze project needs",
+                "Gathering project docs and calling AI to propose team composition", Identity.ModelTier);
+
             // Gather project docs
             var projectDesc = _config.Project.Description ?? "No project description";
             var research = await _projectFiles.GetResearchDocAsync(ct);
@@ -2263,10 +2309,12 @@ public class ProgramManagerAgent : AgentBase
 
             var response = await chatService.GetChatMessageContentsAsync(history, cancellationToken: ct);
             var aiResponse = response.LastOrDefault()?.Content;
+            _taskTracker.RecordLlmCall(analyzeStepId);
 
             if (string.IsNullOrWhiteSpace(aiResponse))
             {
                 Logger.LogWarning("AI returned empty response for team composition. Using default team.");
+                _taskTracker.FailStep(analyzeStepId, "AI returned empty response");
                 _teamCompositionComplete = true;
                 return;
             }
@@ -2276,9 +2324,11 @@ public class ProgramManagerAgent : AgentBase
             if (proposal is null)
             {
                 Logger.LogWarning("Failed to parse team composition proposal. Using default team.");
+                _taskTracker.FailStep(analyzeStepId, "Failed to parse AI proposal");
                 _teamCompositionComplete = true;
                 return;
             }
+            _taskTracker.CompleteStep(analyzeStepId);
 
             Logger.LogInformation(
                 "Team composition proposed: {BuiltInCount} built-in, {TemplateCount} templates, {NewSmeCount} new SME agents",
@@ -2324,10 +2374,13 @@ public class ProgramManagerAgent : AgentBase
                 ct: ct);
 
             // Generate and save TeamComposition.md
+            var docStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Write TeamComposition.md",
+                "Generating and committing team composition document");
             var teamDoc = _teamComposer.GenerateTeamCompositionDoc(proposal);
             await _projectFiles.SaveFileAsync("TeamComposition.md", teamDoc,
                 "PM: Add team composition document", ct);
             Logger.LogInformation("TeamComposition.md saved");
+            _taskTracker.CompleteStep(docStepId);
 
             // Apply PM-assigned role description overrides for built-in agents
             if (RoleContext is not null)
@@ -2343,6 +2396,12 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // Spawn any new SME agents from the approved proposal
+            var smeCount = proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count;
+            string? spawnStepId = smeCount > 0
+                ? _taskTracker.BeginStep(Identity.Id, "pm-team", $"Spawn {smeCount} SME agents",
+                    "Spawning SME agents from approved proposal")
+                : null;
+
             foreach (var smeDef in proposal.NewSmeAgents)
             {
                 try
@@ -2390,7 +2449,12 @@ public class ProgramManagerAgent : AgentBase
                 }
             }
 
+            if (spawnStepId is not null)
+                _taskTracker.CompleteStep(spawnStepId);
+
             // Signal team composition complete
+            var teamSignalStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Signal team ready",
+                "Broadcasting TeamCompositionComplete to all agents");
             await _messageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
@@ -2401,6 +2465,7 @@ public class ProgramManagerAgent : AgentBase
             }, ct);
 
             _teamCompositionComplete = true;
+            _taskTracker.CompleteStep(teamSignalStepId);
             LogActivity("task", "✅ Team composition complete");
         }
         catch (OperationCanceledException) { throw; }
@@ -2464,16 +2529,23 @@ public class ProgramManagerAgent : AgentBase
             UpdateStatus(AgentStatus.Working, "Creating User Story Issues from PMSpec");
             LogActivity("planning", "📋 Reading PMSpec.md to extract user stories");
 
+            var readSpecStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Read PMSpec",
+                "Reading PMSpec.md to extract user stories", Identity.ModelTier);
+
             var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
             if (string.IsNullOrWhiteSpace(pmSpec) || pmSpec.Contains("No PM specification has been created yet"))
             {
                 Logger.LogWarning("PMSpec.md has no content, cannot create User Story Issues");
+                _taskTracker.FailStep(readSpecStepId, "PMSpec.md has no content");
                 return;
             }
+            _taskTracker.CompleteStep(readSpecStepId);
 
             var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+            var extractStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Extract user stories",
+                "AI extracting user stories from PMSpec", Identity.ModelTier);
             LogActivity("planning", "🤖 Calling AI to extract user stories from PMSpec");
             var history = CreateChatHistory();
             history.AddSystemMessage(
@@ -2494,9 +2566,14 @@ public class ProgramManagerAgent : AgentBase
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
             var content = response.Content?.Trim() ?? "";
+            _taskTracker.RecordLlmCall(extractStepId);
 
             // Parse the AI output into individual stories
             var storyBlocks = content.Split("---", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            _taskTracker.CompleteStep(extractStepId);
+
+            var createStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", $"Create {storyBlocks.Length} GitHub issues",
+                "Creating enhancement issues on GitHub");
             LogActivity("planning", $"📝 AI extracted {storyBlocks.Length} story blocks, creating GitHub issues");
             var issueCount = 0;
 
@@ -2557,8 +2634,12 @@ public class ProgramManagerAgent : AgentBase
             }
 
             _userStoryIssuesCreated = true;
+            _taskTracker.CompleteStep(createStepId);
             Logger.LogInformation("Created {Count} User Story Issues from PMSpec", issueCount);
             LogActivity("task", $"📌 Created {issueCount} User Story Issues from PMSpec");
+
+            var signalStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Notify team",
+                "Broadcasting PlanningComplete to all agents");
             await RememberAsync(MemoryType.Action,
                 $"Created {issueCount} user story issues from PMSpec for task tracking", ct: ct);
 
@@ -2570,6 +2651,7 @@ public class ProgramManagerAgent : AgentBase
                 MessageType = "PlanningComplete",
                 IssueCount = issueCount
             }, ct);
+            _taskTracker.CompleteStep(signalStepId);
 
             UpdateStatus(AgentStatus.Idle, $"Created {issueCount} User Story Issues");
         }
@@ -2591,10 +2673,15 @@ public class ProgramManagerAgent : AgentBase
         {
             try
             {
+                var clarifyStepId = _taskTracker.BeginStep(Identity.Id, "pm-support",
+                    $"Answer question on #{request.IssueNumber}",
+                    $"Clarification from {request.FromAgentId}", Identity.ModelTier);
+
                 var issue = await _github.GetIssueAsync(request.IssueNumber, ct);
                 if (issue is null)
                 {
                     Logger.LogWarning("Cannot find issue #{Number} for clarification", request.IssueNumber);
+                    _taskTracker.FailStep(clarifyStepId, $"Issue #{request.IssueNumber} not found");
                     continue;
                 }
 
@@ -2637,6 +2724,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var answer = response.Content?.Trim() ?? "";
+                _taskTracker.RecordLlmCall(clarifyStepId);
 
                 if (string.IsNullOrWhiteSpace(answer) ||
                     answer.Equals("ESCALATE", StringComparison.OrdinalIgnoreCase))
@@ -2661,6 +2749,8 @@ public class ProgramManagerAgent : AgentBase
                         $"on this question. I've created issue #{escalationIssue.Number} for guidance. " +
                         $"I'll follow up once I have an answer.",
                         ct);
+                    _taskTracker.RecordSubStep(clarifyStepId, $"Escalated to Executive (#{escalationIssue.Number})");
+                    _taskTracker.CompleteStep(clarifyStepId);
                 }
                 else
                 {
@@ -2681,6 +2771,8 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation(
                         "Answered clarification from {Agent} on issue #{Number}",
                         request.FromAgentId, request.IssueNumber);
+                    _taskTracker.RecordSubStep(clarifyStepId, $"Answered {request.FromAgentId}");
+                    _taskTracker.CompleteStep(clarifyStepId);
                 }
             }
             catch (Exception ex)

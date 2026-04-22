@@ -268,6 +268,13 @@ public class AgentTaskTracker : IAgentTaskTracker
     {
         ["pm-kickoff"] = "Project Kickoff",
         ["pm-spec"] = "PM Specification",
+        ["pm-stories"] = "User Story Issues",
+        ["pm-team"] = "Team Composition",
+        ["pm-review"] = "PR Reviews",
+        ["pm-completion"] = "Enhancement Completion",
+        ["pm-blockers"] = "Blockers & Resources",
+        ["pm-support"] = "Clarification Support",
+        ["pm-tracking"] = "Project Tracking",
         ["pm-monitoring"] = "Team Monitoring",
         ["pe-planning"] = "Engineering Planning",
         ["pe-orchestration"] = "Engineer Orchestration",
