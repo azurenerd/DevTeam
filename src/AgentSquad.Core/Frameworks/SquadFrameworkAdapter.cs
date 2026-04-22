@@ -24,7 +24,9 @@ public sealed class SquadFrameworkAdapter
 {
     private readonly ILogger<SquadFrameworkAdapter> _logger;
     private readonly SquadReadinessChecker _readiness;
-    private readonly TimeSpan _stuckThreshold = TimeSpan.FromSeconds(120);
+    // Squad spawns sub-agents that each make copilot CLI calls (3-5min each).
+    // During sub-agent work, the parent process produces no stdout — 120s was too short.
+    private readonly TimeSpan _stuckThreshold = TimeSpan.FromSeconds(600);
 
     // Telemetry events captured during the most recent execution (for snapshot queries).
     private readonly List<FrameworkEvent> _lastRunEvents = new();
