@@ -323,7 +323,7 @@ else if (_config is not null)
                             </label>
                         </div>
                         <div class="config-field" title="External framework — delegates the task to Squad (Brady Gaster's multi-agent team). Squad coordinates multiple AI sub-agents (lead developer, frontend, backend, tester) working in parallel inside the worktree. Requires Squad CLI installed. Slowest but most thorough for complex tasks.">
-                            <label>Squad (multi-agent team) 🆕</label>
+                            <label>Squad (multi-agent team)</label>
                             <div style="display: flex; align-items: center; gap: 8px;">
                                 <label class="config-toggle">
                                     <input type="checkbox" checked="@IsStrategyEnabled(StrategySquad)"
@@ -352,7 +352,7 @@ else if (_config is not null)
                                         <span style="font-size: 0.75rem; color: #dc2626;" title="@_squadReadiness.Message">❌ @_squadReadiness.Status</span>
                                     }
                                 }
-                                <button class="btn-sm" style="font-size: 0.65rem; padding: 1px 6px; cursor: pointer; background: transparent; border: 1px solid #94a3b8; border-radius: 3px;" @onclick="CheckSquadReadinessAsync" disabled="@_squadReadinessChecking" title="Run readiness check for Squad CLI and all dependencies">
+                                <button class="btn-sm" style="font-size: 0.7rem; padding: 2px 8px; cursor: pointer; background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px;" @onclick="CheckSquadReadinessAsync" disabled="@_squadReadinessChecking" title="Run readiness check for Squad CLI and all dependencies">
                                     🔍 Check
                                 </button>
                             </div>
