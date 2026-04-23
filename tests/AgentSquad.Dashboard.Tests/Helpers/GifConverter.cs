@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace AgentSquad.Dashboard.Tests.Helpers;
 
@@ -16,19 +18,25 @@ public static class GifConverter
     /// </summary>
     /// <param name="webmPath">Path to the source .webm file.</param>
     /// <param name="gifPath">Path for the output .gif file.</param>
-    /// <param name="fps">Frames per second (lower = smaller file). Default 3.</param>
-    /// <param name="maxWidth">Max width in pixels. Default 960.</param>
+    /// <param name="fps">Frames per second (lower = smaller file). Default 4.</param>
+    /// <param name="maxWidth">Max width in pixels. Default 1280.</param>
+    /// <param name="trimStartSeconds">Desired seconds to skip from start. Auto-capped to safe range.</param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>True if conversion succeeded.</returns>
     public static async Task<bool> ConvertAsync(
         string webmPath,
         string gifPath,
-        int fps = 3,
-        int maxWidth = 960,
+        int fps = 4,
+        int maxWidth = 1280,
+        double trimStartSeconds = 0,
         CancellationToken ct = default)
     {
         if (!File.Exists(webmPath))
             return false;
+
+        // Probe video duration to calculate safe trim
+        var duration = await ProbeDurationAsync(webmPath, ct);
+        var safeTrim = CalculateSafeTrim(trimStartSeconds, duration);
 
         var palettePath = Path.Combine(
             Path.GetDirectoryName(gifPath)!,
@@ -37,17 +45,19 @@ public static class GifConverter
         try
         {
             var filters = $"fps={fps},scale={maxWidth}:-1:flags=lanczos";
+            // Use -ss BEFORE -i for fast seek (keyframe-based, reliable with filter chains)
+            var seekArg = safeTrim > 0.1 ? $"-ss {safeTrim:F2} " : "";
 
             // Pass 1: Generate palette
             var pass1 = await RunFfmpegAsync(
-                $"-i \"{webmPath}\" -vf \"{filters},palettegen=stats_mode=diff\" -y \"{palettePath}\"",
+                $"{seekArg}-i \"{webmPath}\" -vf \"{filters},palettegen=stats_mode=diff\" -y \"{palettePath}\"",
                 ct);
             if (!pass1)
                 return false;
 
             // Pass 2: Encode GIF with palette
             var pass2 = await RunFfmpegAsync(
-                $"-i \"{webmPath}\" -i \"{palettePath}\" -filter_complex \"{filters}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5\" -y \"{gifPath}\"",
+                $"{seekArg}-i \"{webmPath}\" -i \"{palettePath}\" -filter_complex \"{filters}[x];[x][1:v]paletteuse=dither=bayer:bayer_scale=5\" -y \"{gifPath}\"",
                 ct);
             return pass2;
         }
@@ -58,6 +68,49 @@ public static class GifConverter
     }
 
     public static bool IsAvailable => File.Exists(FfmpegPath);
+
+    /// <summary>Calculate a safe trim that won't over-trim short videos.</summary>
+    private static double CalculateSafeTrim(double requested, double? videoDuration)
+    {
+        if (requested <= 0.1) return 0;
+        if (videoDuration is null || videoDuration <= 0) return 0;
+
+        // Don't trim videos shorter than 4 seconds
+        if (videoDuration < 4.0) return 0;
+
+        // Cap trim to 30% of video duration or requested, whichever is smaller
+        var maxTrim = videoDuration.Value * 0.3;
+        return Math.Min(requested, Math.Min(maxTrim, 3.0)); // Also hard cap at 3s
+    }
+
+    /// <summary>Probe video duration using FFmpeg stderr output.</summary>
+    private static async Task<double?> ProbeDurationAsync(string path, CancellationToken ct)
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = FfmpegPath,
+            Arguments = $"-i \"{path}\" -f null -",
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true,
+        };
+
+        using var process = new Process { StartInfo = psi };
+        process.Start();
+        var stderr = await process.StandardError.ReadToEndAsync(ct);
+        try { await process.WaitForExitAsync(ct); } catch { }
+
+        // Parse "Duration: HH:MM:SS.xx" from stderr
+        var match = Regex.Match(stderr, @"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)");
+        if (!match.Success) return null;
+
+        var hours = int.Parse(match.Groups[1].Value, CultureInfo.InvariantCulture);
+        var minutes = int.Parse(match.Groups[2].Value, CultureInfo.InvariantCulture);
+        var seconds = int.Parse(match.Groups[3].Value, CultureInfo.InvariantCulture);
+        var fraction = double.Parse($"0.{match.Groups[4].Value}", CultureInfo.InvariantCulture);
+        return hours * 3600 + minutes * 60 + seconds + fraction;
+    }
 
     private static async Task<bool> RunFfmpegAsync(string args, CancellationToken ct)
     {

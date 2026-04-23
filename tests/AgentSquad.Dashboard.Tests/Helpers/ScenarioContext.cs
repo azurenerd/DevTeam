@@ -19,6 +19,7 @@ public sealed class ScenarioContext : IAsyncDisposable
     private readonly string _gifDir;
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly List<string> _screenshotPaths = new();
+    private double _readyAtSeconds = -1;
 
     public ScenarioContext(
         IPage page,
@@ -42,7 +43,8 @@ public sealed class ScenarioContext : IAsyncDisposable
     public async Task CaptureFrameAsync(string label)
     {
         var path = Path.Combine(_screenshotDir, $"{ScenarioId}_{label}.png");
-        await Page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = true });
+        // Use viewport-only screenshots to avoid perturbing scroll state during video recording
+        await Page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = false });
         _screenshotPaths.Add(path);
     }
 
@@ -60,6 +62,10 @@ public sealed class ScenarioContext : IAsyncDisposable
         }
         if (extraMs > 0)
             await Page.WaitForTimeoutAsync(extraMs);
+
+        // Record the first time content is ready (used for GIF trim offset)
+        if (_readyAtSeconds < 0)
+            _readyAtSeconds = _stopwatch.Elapsed.TotalSeconds;
     }
 
     /// <summary>
@@ -85,11 +91,13 @@ public sealed class ScenarioContext : IAsyncDisposable
                 $"{ScenarioId}.webm");
             File.Move(webmFiles[0], videoPath, overwrite: true);
 
-            // Convert to GIF
+            // Convert to GIF (trim leading white frames using readiness timestamp)
             if (GifConverter.IsAvailable)
             {
                 gifPath = Path.Combine(_gifDir, $"{ScenarioId}.gif");
-                var converted = await GifConverter.ConvertAsync(videoPath, gifPath);
+                // Trim from 300ms before the first ready timestamp (or 0 if never set)
+                var trimSeconds = _readyAtSeconds > 0.3 ? _readyAtSeconds - 0.3 : 0;
+                var converted = await GifConverter.ConvertAsync(videoPath, gifPath, trimStartSeconds: trimSeconds);
                 if (!converted) gifPath = null;
             }
         }
