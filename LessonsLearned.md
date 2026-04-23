@@ -70,6 +70,7 @@
 60. [External Agentic Framework Integration — Spike Before You Abstract](#61-external-agentic-framework-integration--spike-before-you-abstract)
 61. [Standalone Dashboard DI Must Mirror Runner Registrations](#62-standalone-dashboard-di-must-mirror-runner-registrations)
 62. [NEVER Put Secrets in Tracked Config Files](#63-never-put-secrets-in-tracked-config-files)
+63. [Strategy Results Must Survive Process Restarts — Persist to SQLite](#63-strategy-results-must-survive-process-restarts--persist-to-sqlite)
 
 ---
 
@@ -1400,3 +1401,29 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 3. If the runner can't find a secret at startup, fix the secret-loading code — do not put the secret in a tracked file.
 4. Only `appsettings.Development.json` and `appsettings.Production.json` are gitignored. The base `appsettings.json` is **tracked and committed**.
 5. Before writing any value to a config file, verify whether that file is tracked: `git ls-files <path>`. If it's tracked, the value must not be sensitive.
+
+---
+
+## 63. Strategy Results Must Survive Process Restarts — Persist to SQLite
+
+**Lesson:** In-memory strategy/framework results (CandidateStateStore's ring buffer) are lost on every process restart. For a multi-hour competitive evaluation pipeline, losing results means re-running expensive AI work.
+
+### What happened:
+1. The `CandidateStateStore` used an in-memory `LinkedList` for recent completed tasks and a `ConcurrentDictionary` for active tasks.
+2. Every runner restart wiped all historical framework comparison results — screenshots, scores, execution summaries, winner selections.
+3. The dashboard showed nothing after restart even though prior runs had completed successfully.
+
+### Root cause:
+No persistence layer existed for strategy/framework results. The `AgentStateStore` (SQLite) had tables for agent state, messages, and workflow — but nothing for the strategy pipeline output.
+
+### Fix applied:
+1. Added `strategy_tasks` and `strategy_candidates` tables to `AgentStateStore.cs` with UPSERT semantics.
+2. `CandidateStateStore` now accepts an optional `AgentStateStore` via constructor injection.
+3. On construction, `HydrateFromSqlite()` loads the last 100 completed tasks into the ring buffer.
+4. On each `PushRecent()` call, `PersistToSqlite()` saves the task and all candidates (including base64 screenshots and JSON execution summaries).
+5. Persistence is **best-effort** — failures are logged but don't crash the pipeline.
+
+### Key design decisions:
+- **Screenshot storage**: Base64-encoded in SQLite TEXT column. Not ideal for large images but simple and self-contained.
+- **Execution summaries**: Serialized as camelCase JSON in a TEXT column.
+- **Trim on archive**: Active tasks hold up to 200 activity entries; trimmed to 50 when moved to recent buffer.

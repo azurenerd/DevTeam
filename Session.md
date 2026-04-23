@@ -264,7 +264,7 @@ Optional independent process. Connects to Runner REST API at `/api/dashboard/*`.
 - **Agent Overview**: Real-time agent cards with visibility filter (hide/show agents)
 - **Repository**: Combined Pull Requests + Issues view with tab navigation
 - **Force refresh**: SVG refresh button on Timeline and Overview pages
-- **Strategy Gallery**: When the agentic frameworks pipeline is enabled, shows per-candidate screenshots for all approaches (baseline, mcp-enhanced, agentic-delegation, squad). External frameworks (🔌) display a purple right-border. Winner tile displays the live screenshot or "Capturing..." while the upload is in progress. Non-winner tiles show "No preview" text (not a spinner). Winner identification reads the `<!-- winner-strategy: {key} -->` HTML comment from the PR body.
+- **Strategy Gallery**: When the agentic frameworks pipeline is enabled, shows per-candidate screenshots for all approaches (baseline, mcp-enhanced, copilot-cli, squad). External frameworks (🔌) display a purple right-border. Winner tile displays the live screenshot or "Capturing..." while the upload is in progress. Non-winner tiles show "No preview" text (not a spinner). Winner identification reads the `<!-- winner-strategy: {key} -->` HTML comment from the PR body.
 
 ### Timeline data flow
 - Issues/PRs fetched via `DashboardDataService` (30s TTL cache, shared with GitHubService)
@@ -289,7 +289,7 @@ Key settings:
 - `AgentSquad.HumanInteraction.Enabled`: `true` (enables human gate checkpoints)
 - `AgentSquad.HumanInteraction.Preset`: Use Full Auto / Supervised / Full Control via Configuration page
 - Note: Gate configuration is hot-reloadable — changes take effect without runner restart
-- `AgentSquad.StrategyFramework.EnabledStrategies`: Defaults to empty — baseline always runs regardless; other strategies (mcp-enhanced, agentic-delegation) must be explicitly listed. **New:** `squad` can be added to enable the Squad external framework adapter.
+- `AgentSquad.StrategyFramework.EnabledStrategies`: Defaults to empty — baseline always runs regardless; other strategies (mcp-enhanced, copilot-cli) must be explicitly listed. `squad` can be added to enable the Squad external framework adapter.
 
 ### Model tier strategy
 | Tier | Used By | Default Model |
@@ -324,4 +324,4 @@ Key settings:
 Note: Don't do any long pauses that are more than 1 minute long in the Copilot chat, as that makes it so you ignore me for X minutes--always keep checking back no more than a minute so the chat
 thread isn't blocked to get instructions from me. 
 
-*Last updated: 2026-04-22 (Agentic Frameworks integration: Squad adapter, composable interfaces, UI rename, config readiness badges, execution gates, framework metrics. Test suite 790 pass / 2 pre-existing flaky)*
+*Last updated: 2026-04-22 (Strategy persistence to SQLite, dashboard tooltips, duration/timestamp fixes, screenshot lightbox, standalone CandidateStateStore DI fix. Rename agentic-delegation → copilot-cli complete. Test suite 211 pass / 2 pre-existing flaky)*

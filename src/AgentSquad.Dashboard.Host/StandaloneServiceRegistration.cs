@@ -7,6 +7,7 @@ using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Metrics;
 using AgentSquad.Core.Persistence;
 using AgentSquad.Core.Prompts;
+using AgentSquad.Core.Strategies;
 using AgentSquad.Dashboard.Services;
 using AgentSquad.Orchestrator;
 
@@ -41,6 +42,10 @@ public static class StandaloneServiceRegistration
 
         // SquadReadinessChecker — needed by Configuration page for Squad status checks
         services.AddSingleton<SquadReadinessChecker>();
+
+        // CandidateStateStore — needed by ProjectTimeline and Strategies pages
+        services.AddSingleton<CandidateStateStore>(sp =>
+            new CandidateStateStore(sp.GetService<AgentStateStore>()));
 
         return services;
     }
