@@ -42,10 +42,12 @@ public class WinnerApplyServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ApplyAsync_rejects_when_head_changed()
+    public async Task ApplyAsync_succeeds_when_head_advanced_linearly()
     {
+        // A linear advance (expectedBase is an ancestor of current HEAD) is safe —
+        // the ancestor-aware check (commit 3603546) allows the apply to proceed.
         var staleSha = Git(_repo, "rev-parse", "HEAD").Trim();
-        // Advance head
+        // Advance head linearly
         File.WriteAllText(Path.Combine(_repo, "bump.txt"), "bump\n");
         Git(_repo, "add", "-A");
         Git(_repo, "commit", "-q", "-m", "advance");
@@ -53,6 +55,32 @@ public class WinnerApplyServiceTests : IDisposable
         var patch = "diff --git a/x.txt b/x.txt\nnew file mode 100644\n--- /dev/null\n+++ b/x.txt\n@@ -0,0 +1 @@\n+x\n";
         var svc = new WinnerApplyService(NullLogger<WinnerApplyService>.Instance);
         var outcome = await svc.ApplyAsync(_repo, "main", staleSha, patch, CancellationToken.None);
+
+        Assert.True(outcome.Applied, $"Linear advance should succeed: {outcome.FailureReason}");
+        Assert.True(File.Exists(Path.Combine(_repo, "x.txt")));
+    }
+
+    [Fact]
+    public async Task ApplyAsync_rejects_when_head_diverged()
+    {
+        // Create a divergent branch: expectedBase is NOT an ancestor of current HEAD.
+        var baseSha = Git(_repo, "rev-parse", "HEAD").Trim();
+        // Create a side branch and commit
+        Git(_repo, "checkout", "-b", "side");
+        File.WriteAllText(Path.Combine(_repo, "side.txt"), "side\n");
+        Git(_repo, "add", "-A");
+        Git(_repo, "commit", "-q", "-m", "side-commit");
+        var sideSha = Git(_repo, "rev-parse", "HEAD").Trim();
+        // Go back to main and amend (rewrite history to diverge from side)
+        Git(_repo, "checkout", "main");
+        File.WriteAllText(Path.Combine(_repo, "rewrite.txt"), "rewrite\n");
+        Git(_repo, "add", "-A");
+        Git(_repo, "commit", "-q", "-m", "rewrite");
+
+        // sideSha is NOT an ancestor of current main HEAD — true divergence
+        var patch = "diff --git a/x.txt b/x.txt\nnew file mode 100644\n--- /dev/null\n+++ b/x.txt\n@@ -0,0 +1 @@\n+x\n";
+        var svc = new WinnerApplyService(NullLogger<WinnerApplyService>.Instance);
+        var outcome = await svc.ApplyAsync(_repo, "main", sideSha, patch, CancellationToken.None);
 
         Assert.False(outcome.Applied);
         Assert.True(outcome.HeadChanged);

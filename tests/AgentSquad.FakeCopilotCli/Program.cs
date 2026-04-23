@@ -30,13 +30,15 @@ if (args.Length > 0 && (args[0] == "--version" || args[0] == "-v"))
     return 0;
 }
 
-// Read stdin prompt (needed for scripted mode; also prevents pipe blocking).
+// Read stdin prompt in background. Only the "scripted" scenario actually
+// needs the content, so we wait just long enough to avoid pipe-blocking,
+// then let scenarios that need stdin wait inside their own switch branch.
 string? stdinPrompt = null;
 var stdinTask = Task.Run(async () =>
 {
     try { stdinPrompt = await Console.In.ReadToEndAsync(); } catch { }
 });
-stdinTask.Wait(TimeSpan.FromSeconds(5));
+stdinTask.Wait(TimeSpan.FromMilliseconds(200));
 
 static void Emit(string type, string? content = null)
 {
@@ -157,6 +159,8 @@ try
             // Format: [{ "promptContains": "keyword", "response": "text" }, ...]
             // Matches the first entry whose promptContains is found in stdin.
             // Falls back to a default response if no match.
+            // Scripted mode needs the full stdin content, so wait longer here.
+            stdinTask.Wait(TimeSpan.FromSeconds(5));
             var scriptFile = Environment.GetEnvironmentVariable("FAKE_COPILOT_SCRIPT_FILE");
             if (scriptFile is null || !File.Exists(scriptFile))
             {
