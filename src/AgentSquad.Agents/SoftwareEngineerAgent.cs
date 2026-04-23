@@ -2141,6 +2141,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         // PR is past implementation (ready-for-review/approved) — track it
                         // so rework/merge flows continue, but don't block new task pickup
                         _pastImplementationPrs.Add(existingPr.Number);
+
+                        // Mark the task as done so CheckAllTasksCompleteAsync can progress.
+                        // Without this, the issue stays open and the SE keeps re-entering
+                        // WorkOnOwnTasksAsync for the same task every loop cycle.
+                        if (task.IssueNumber.HasValue)
+                        {
+                            await _taskManager.MarkDoneAsync(task.IssueNumber.Value, existingPr.Number, ct);
+                            Logger.LogInformation(
+                                "Task {TaskId} (issue #{IssueNumber}) marked done — PR #{PrNumber} is past implementation",
+                                task.Id, task.IssueNumber.Value, existingPr.Number);
+                        }
                     }
                     else
                     {
