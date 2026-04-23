@@ -75,7 +75,15 @@ public class StrategyCandidateRecord
     public string? JudgeSkippedReason { get; init; }
     public string? ExecutionSummaryJson { get; init; }
     public string? ScreenshotBase64 { get; init; }
+    public List<StrategyActivityLogEntry> ActivityLog { get; set; } = new();
 }
+
+/// <summary>Flat DTO for persisting a strategy activity log entry to SQLite.</summary>
+public record StrategyActivityLogEntry(
+    DateTimeOffset Timestamp,
+    string Category,
+    string Message,
+    string? MetadataJson = null);
 
 /// <summary>
 /// SQLite-based persistence for agent state recovery, activity logging, and metrics.
@@ -259,6 +267,18 @@ public class AgentStateStore : IDisposable
                 screenshot_base64  TEXT,
                 PRIMARY KEY (run_id, task_id, strategy_id)
             );
+
+            CREATE TABLE IF NOT EXISTS strategy_activity_log (
+                run_id      TEXT NOT NULL,
+                task_id     TEXT NOT NULL,
+                strategy_id TEXT NOT NULL,
+                timestamp   TEXT NOT NULL,
+                category    TEXT NOT NULL,
+                message     TEXT NOT NULL,
+                metadata_json TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_activity_log_candidate
+                ON strategy_activity_log (run_id, task_id, strategy_id);
             """;
         cmd.ExecuteNonQuery();
 
@@ -1327,6 +1347,27 @@ public class AgentStateStore : IDisposable
                 cCmd.Parameters.AddWithValue("$summary_json", c.ExecutionSummaryJson ?? (object)DBNull.Value);
                 cCmd.Parameters.AddWithValue("$screenshot", c.ScreenshotBase64 ?? (object)DBNull.Value);
                 cCmd.ExecuteNonQuery();
+
+                // Batch-insert activity log entries for this candidate (capped at 50 most recent)
+                foreach (var entry in c.ActivityLog.TakeLast(50))
+                {
+                    using var aCmd = _connection.CreateCommand();
+                    aCmd.Transaction = tx;
+                    aCmd.CommandText = """
+                        INSERT INTO strategy_activity_log
+                            (run_id, task_id, strategy_id, timestamp, category, message, metadata_json)
+                        VALUES
+                            ($run_id, $task_id, $strategy_id, $ts, $cat, $msg, $meta)
+                        """;
+                    aCmd.Parameters.AddWithValue("$run_id", task.RunId);
+                    aCmd.Parameters.AddWithValue("$task_id", task.TaskId);
+                    aCmd.Parameters.AddWithValue("$strategy_id", c.StrategyId);
+                    aCmd.Parameters.AddWithValue("$ts", entry.Timestamp.ToString("o"));
+                    aCmd.Parameters.AddWithValue("$cat", entry.Category);
+                    aCmd.Parameters.AddWithValue("$msg", entry.Message);
+                    aCmd.Parameters.AddWithValue("$meta", entry.MetadataJson ?? (object)DBNull.Value);
+                    aCmd.ExecuteNonQuery();
+                }
             }
             tx.Commit();
         }
@@ -1412,6 +1453,32 @@ public class AgentStateStore : IDisposable
                     ExecutionSummaryJson = cReader.IsDBNull(13) ? null : cReader.GetString(13),
                     ScreenshotBase64 = cReader.IsDBNull(14) ? null : cReader.GetString(14),
                 });
+            }
+
+            // Load activity logs for each candidate (capped at 50 per candidate)
+            foreach (var c in task.Candidates)
+            {
+                using var aCmd = _connection.CreateCommand();
+                aCmd.CommandText = """
+                    SELECT timestamp, category, message, metadata_json
+                    FROM strategy_activity_log
+                    WHERE run_id = $run_id AND task_id = $task_id AND strategy_id = $strategy_id
+                    ORDER BY timestamp ASC
+                    LIMIT 50
+                    """;
+                aCmd.Parameters.AddWithValue("$run_id", task.RunId);
+                aCmd.Parameters.AddWithValue("$task_id", task.TaskId);
+                aCmd.Parameters.AddWithValue("$strategy_id", c.StrategyId);
+
+                using var aReader = aCmd.ExecuteReader();
+                while (aReader.Read())
+                {
+                    c.ActivityLog.Add(new StrategyActivityLogEntry(
+                        DateTimeOffset.Parse(aReader.GetString(0)),
+                        aReader.GetString(1),
+                        aReader.GetString(2),
+                        aReader.IsDBNull(3) ? null : aReader.GetString(3)));
+                }
             }
         }
 

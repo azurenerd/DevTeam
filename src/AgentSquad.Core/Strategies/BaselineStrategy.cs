@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AgentSquad.Core.Frameworks;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Core.Strategies;
@@ -25,20 +26,26 @@ public class BaselineStrategy : ICodeGenerationStrategy
     public async Task<StrategyExecutionResult> ExecuteAsync(StrategyInvocation invocation, CancellationToken ct)
     {
         var sw = Stopwatch.StartNew();
+        var sink = invocation.ActivitySink;
 
         if (_generator is not null)
         {
             try
             {
+                sink?.Report(new Frameworks.FrameworkActivityEvent("init", "Starting single-pass code generation"));
                 var outcome = await _generator.GenerateAsync(invocation.WorktreePath, invocation.Task, ct, "baseline-strategy");
                 if (!outcome.Succeeded)
                 {
+                    sink?.Report(new Frameworks.FrameworkActivityEvent("error",
+                        $"Generation failed: {outcome.FailureReason}"));
                     _logger.LogWarning(
                         "BaselineStrategy generator failed for task {TaskId}: {Reason}",
                         invocation.Task.TaskId, outcome.FailureReason);
                 }
                 else
                 {
+                    sink?.Report(new Frameworks.FrameworkActivityEvent("complete",
+                        $"Generation finished: {outcome.FilesWritten} file(s), {outcome.TokensUsed:N0} tokens"));
                     _logger.LogDebug(
                         "BaselineStrategy wrote {Files} file(s) for task {TaskId}",
                         outcome.FilesWritten, invocation.Task.TaskId);
@@ -74,6 +81,7 @@ public class BaselineStrategy : ICodeGenerationStrategy
         // an extra safety net, so this can never accidentally ship a no-op live PR.
         try
         {
+            sink?.Report(new Frameworks.FrameworkActivityEvent("init", "No code generator wired — producing stub marker"));
             var marker = Path.Combine(invocation.WorktreePath, ".strategy-baseline.md");
             var body =
                 $"# Baseline candidate (stub — no IBaselineCodeGenerator wired)\n\n" +

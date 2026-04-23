@@ -1,5 +1,7 @@
 namespace AgentSquad.Core.AI;
 
+using AgentSquad.Core.Frameworks;
+
 /// <summary>
 /// Which of the three concurrency pools a CLI call belongs to. The actual
 /// per-pool semaphores are wired in <see cref="CopilotCliProcessManager"/> by the
@@ -81,6 +83,13 @@ public sealed record CopilotCliRequestOptions
     /// any other pool to keep the blast radius narrow.
     /// </summary>
     public bool AllowAll { get; init; } = false;
+
+    /// <summary>
+    /// Optional progress callback for streaming real-time activity events to the
+    /// dashboard. Set by the strategy layer so the agentic output monitor can
+    /// report tool calls, file operations, and planning output as they happen.
+    /// </summary>
+    public IProgress<FrameworkActivityEvent>? ActivitySink { get; init; }
 }
 
 /// <summary>Why an agentic session ended unsuccessfully.</summary>

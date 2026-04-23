@@ -295,6 +295,10 @@ public sealed class CandidateStateStore
                     ExecutionSummaryJson = c.ExecutionSummary is not null
                         ? JsonSerializer.Serialize(c.ExecutionSummary, _jsonOpts) : null,
                     ScreenshotBase64 = c.ScreenshotBase64,
+                    ActivityLog = c.ActivityLog.Select(a => new StrategyActivityLogEntry(
+                        a.Timestamp, a.Category, a.Message,
+                        a.Metadata is { Count: > 0 } ? JsonSerializer.Serialize(a.Metadata, _jsonOpts) : null
+                    )).ToList(),
                 }).ToList(),
             };
             _persistence.SaveStrategyTask(record);
@@ -335,6 +339,10 @@ public sealed class CandidateStateStore
                             ExecutionSummary = c.ExecutionSummaryJson is not null
                                 ? JsonSerializer.Deserialize<CandidateExecutionSummary>(c.ExecutionSummaryJson, _jsonOpts) : null,
                             ScreenshotBase64 = c.ScreenshotBase64,
+                            ActivityLog = c.ActivityLog.Count > 0
+                                ? c.ActivityLog.Select(a => new ActivityEntry(
+                                    a.Timestamp, a.Category, a.Message, null)).ToImmutableList()
+                                : ImmutableList<ActivityEntry>.Empty,
                         });
 
                     var snapshot = new TaskSnapshot

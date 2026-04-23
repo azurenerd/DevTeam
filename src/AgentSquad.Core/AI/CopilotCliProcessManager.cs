@@ -467,7 +467,7 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
                     // JSONL watchdog: stuck detector + tool-call cap. Always emitted with
                     // JSON mode (BuildAgenticArguments forces --output-format json).
                     monitor = new AgenticOutputMonitor(_frameworkConfig.Agentic, _logger, jsonMode: true);
-                    monitorTask = monitor.RunAsync(process.StandardOutput, logBuffer, killSource, linked.Token);
+                    monitorTask = monitor.RunAsync(process.StandardOutput, logBuffer, killSource, linked.Token, options.ActivitySink);
                 }
                 else
                 {

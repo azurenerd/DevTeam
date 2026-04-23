@@ -20,8 +20,8 @@
             @(_enabled?.MasterEnabled == true ? "● Framework ON" : "○ Framework OFF")
         </span>
         <span class="header-badge" data-testid="strategies-active-count"
-              title="Number of tasks currently being processed by framework candidates">
-            Active: @_activeTasks.Count
+              title="Number of tasks and candidates currently being processed">
+            Active: @_activeTasks.Count task@(_activeTasks.Count != 1 ? "s" : "") · @_activeTasks.Sum(t => t.Candidates.Count) candidates
         </span>
         <span class="header-badge" data-testid="strategies-recent-count"
               title="Number of recently completed tasks (persisted across restarts)">
@@ -65,24 +65,65 @@
                 <div class="candidate-grid">
                     @foreach (var candidate in task.Candidates.Values.OrderBy(c => c.StrategyId))
                     {
-                        <div class="candidate-card state-@(candidate.State.ToString().ToLowerInvariant())" data-testid="strategies-candidate-card" data-strategy-id="@candidate.StrategyId">
+                        var activeKey = $"{task.TaskId}_{candidate.StrategyId}";
+                        var isActiveExpanded = _expandedActiveCandidates.Contains(activeKey);
+                        <div class="candidate-card state-@(candidate.State.ToString().ToLowerInvariant()) @(isActiveExpanded ? "active-expanded" : "")"
+                             data-testid="strategies-candidate-card" data-strategy-id="@candidate.StrategyId"
+                             @onclick="() => ToggleActiveExpand(activeKey)">
                             <div class="candidate-head">
                                 <span class="candidate-id" title="@StrategyTooltip(candidate.StrategyId)">
-                                    @candidate.StrategyId
+                                    @StrategyDisplayName(candidate.StrategyId)
                                 </span>
                                 <span class="candidate-state" title="@StateTooltip(candidate.State)">@candidate.State</span>
                             </div>
                             @if (candidate.ElapsedSec is double e)
                             {
-                                <div class="candidate-timing" title="Execution duration and token usage for this candidate">@FormatDuration(e) @(candidate.TokensUsed.HasValue ? $"· {candidate.TokensUsed} tok" : "· tokens n/a")</div>
-                            }
-                            @if (candidate.State == CandidateState.Running && candidate.ActivityLog.Count > 0)
-                            {
-                                <div class="candidate-activity-live" title="Latest activity from this framework's execution">
-                                    <span class="activity-pulse">●</span>
-                                    <span class="activity-last">@candidate.ActivityLog[^1].Message</span>
-                                    <span class="activity-count" title="Total activity log entries captured so far">(@candidate.ActivityLog.Count)</span>
+                                <div class="candidate-timing" title="Execution duration and token usage for this candidate">
+                                    ⏱ @FormatDuration(e)
+                                    @if (candidate.TokensUsed.HasValue)
+                                    {
+                                        <span>· @(candidate.TokensUsed.Value.ToString("N0")) tok</span>
+                                    }
+                                    else if (candidate.State >= CandidateState.Completed)
+                                    {
+                                        <span class="muted" title="Token count not exposed by this framework — tool-call count shown in Activity tab">· tokens n/a</span>
+                                    }
                                 </div>
+                            }
+                            @if (candidate.State == CandidateState.Completed && candidate.Succeeded == true)
+                            {
+                                <div class="candidate-awaiting" title="This candidate finished generating code — waiting for all candidates to complete before evaluation begins">
+                                    ⏳ Awaiting evaluation…
+                                </div>
+                            }
+                            @if (candidate.ActivityLog.Count > 0)
+                            {
+                                <div class="candidate-activity-live" title="Latest activity from this framework's execution — click to expand full log">
+                                    @if (candidate.State == CandidateState.Running)
+                                    {
+                                        <span class="activity-pulse">●</span>
+                                    }
+                                    else
+                                    {
+                                        <span class="activity-done">✓</span>
+                                    }
+                                    <span class="activity-last">@candidate.ActivityLog[^1].Message</span>
+                                    <span class="activity-count" title="Total activity log entries captured">(@candidate.ActivityLog.Count)</span>
+                                </div>
+                                @if (!isActiveExpanded && candidate.ActivityLog.Count > 1)
+                                {
+                                    @* Show last 3 entries as mini-log preview *@
+                                    <div class="candidate-minilog">
+                                        @foreach (var entry in candidate.ActivityLog.TakeLast(3))
+                                        {
+                                            <div class="minilog-entry">
+                                                <span class="minilog-time">@entry.Timestamp.ToLocalTime().ToString("h:mm:ss")</span>
+                                                <span class="minilog-cat cd-activity-cat-@entry.Category">@entry.Category</span>
+                                                <span class="minilog-msg">@entry.Message</span>
+                                            </div>
+                                        }
+                                    </div>
+                                }
                             }
                             @if (candidate.State == CandidateState.Scored || candidate.State == CandidateState.Winner)
                             {
@@ -99,6 +140,149 @@
                             @if (candidate.Succeeded == false)
                             {
                                 <div class="candidate-fail" title="Reason this candidate failed during execution">@candidate.FailureReason</div>
+                            }
+
+                            @* Expandable detail panel — same tabbed UI as Recent Completed *@
+                            @if (isActiveExpanded)
+                            {
+                                <div class="candidate-detail-expanded" @onclick:stopPropagation="true">
+                                    @{
+                                        var tabKey = $"active_{task.TaskId}_{candidate.StrategyId}";
+                                        var activeTab = _activeTabs.GetValueOrDefault(tabKey, "activity");
+                                    }
+                                    <div class="cd-tabs">
+                                        <button class="cd-tab @(activeTab == "overview" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "overview"))" @onclick:stopPropagation="true" title="Scores, metrics, and screenshot preview">Overview</button>
+                                        <button class="cd-tab @(activeTab == "activity" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "activity"))" @onclick:stopPropagation="true" title="Real-time activity log showing what the framework did step by step">
+                                            Activity @if (candidate.ActivityLog.Count > 0) { <span class="cd-tab-badge">@candidate.ActivityLog.Count</span> }
+                                        </button>
+                                        <button class="cd-tab @(activeTab == "files" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "files"))" @onclick:stopPropagation="true" title="Files created, modified, or deleted by this framework">
+                                            Files @if (candidate.ExecutionSummary?.FilesChanged.Count > 0) { <span class="cd-tab-badge">@candidate.ExecutionSummary.FilesChanged.Count</span> }
+                                        </button>
+                                        <button class="cd-tab @(activeTab == "metrics" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "metrics"))" @onclick:stopPropagation="true" title="Performance metrics">Metrics</button>
+                                        <button class="cd-tab @(activeTab == "logs" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "logs"))" @onclick:stopPropagation="true" title="Raw diagnostic logs">
+                                            Logs @if (candidate.ExecutionSummary?.DiagnosticLog.Count > 0) { <span class="cd-tab-badge">@candidate.ExecutionSummary.DiagnosticLog.Count</span> }
+                                        </button>
+                                    </div>
+                                    <div class="cd-tab-content">
+                                        @if (activeTab == "overview")
+                                        {
+                                            @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
+                                            {
+                                                <div class="cd-scores">
+                                                    <div class="cd-score-row" title="Does the generated code satisfy all acceptance criteria?">
+                                                        <span class="cd-score-label">Acceptance</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row" title="Code architecture, patterns, and structural quality">
+                                                        <span class="cd-score-label">Design</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row" title="Code clarity, naming, and maintainability">
+                                                        <span class="cd-score-label">Readability</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-total" title="Combined score (max 30)">Total: <strong>@TotalScore(candidate)</strong>/30</div>
+                                                </div>
+                                            }
+                                            else if (candidate.Succeeded == false)
+                                            {
+                                                <div class="cd-no-scores">Not scored — strategy execution failed</div>
+                                            }
+                                            else if (candidate.State < CandidateState.Evaluated)
+                                            {
+                                                <div class="cd-no-scores">Scores available after evaluation completes</div>
+                                            }
+
+                                            <div class="cd-metrics">
+                                                @if (candidate.ElapsedSec.HasValue) { <span class="cd-metric" title="Execution time">⏱ @FormatDuration(candidate.ElapsedSec.Value)</span> }
+                                                @if (candidate.TokensUsed.HasValue) { <span class="cd-metric" title="Tokens used">🔤 @(candidate.TokensUsed.Value.ToString("N0")) tokens</span> }
+                                                @if (candidate.ExecutionSummary is { } s)
+                                                {
+                                                    <span class="cd-metric">📁 @s.FilesChanged.Count files</span>
+                                                    <span class="cd-metric">+@s.TotalLinesAdded / -@s.TotalLinesRemoved lines</span>
+                                                }
+                                            </div>
+
+                                            @if (candidate.Succeeded == false && !string.IsNullOrEmpty(candidate.FailureReason))
+                                            {
+                                                <div class="cd-failure"><span class="cd-failure-label">Failure:</span> @candidate.FailureReason</div>
+                                            }
+
+                                            @if (!string.IsNullOrEmpty(candidate.ScreenshotBase64))
+                                            {
+                                                <div class="cd-screenshot">
+                                                    <div class="cd-screenshot-label">Preview Screenshot (click to enlarge)</div>
+                                                    <img src="data:image/png;base64,@candidate.ScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
+                                                         @onclick="() => OpenLightbox(candidate.ScreenshotBase64, candidate.StrategyId)" @onclick:stopPropagation="true" />
+                                                </div>
+                                            }
+                                        }
+                                        else if (activeTab == "activity")
+                                        {
+                                            @if (candidate.ActivityLog.Count > 0)
+                                            {
+                                                <div class="cd-activity-timeline">
+                                                    @foreach (var entry in candidate.ActivityLog.Reverse())
+                                                    {
+                                                        <div class="cd-activity-entry">
+                                                            <span class="cd-activity-time">@entry.Timestamp.ToLocalTime().ToString("h:mm:ss tt")</span>
+                                                            <span class="cd-activity-cat cd-activity-cat-@entry.Category">@entry.Category</span>
+                                                            <span class="cd-activity-msg">@entry.Message</span>
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <div class="cd-empty-tab">No activity recorded yet</div>
+                                            }
+                                        }
+                                        else if (activeTab == "files")
+                                        {
+                                            @if (candidate.ExecutionSummary?.FilesChanged is { Count: > 0 } files)
+                                            {
+                                                <div class="cd-file-tree">
+                                                    @foreach (var file in files.OrderBy(f => f.Path))
+                                                    {
+                                                        <div class="cd-file-row">
+                                                            <span class="cd-file-type cd-file-type-@(file.Type.ToLowerInvariant())">@FileTypeIcon(file.Type)</span>
+                                                            <span class="cd-file-path" title="@file.Path">@file.Path</span>
+                                                            @if (!file.IsBinary) { <span class="cd-file-stats">@if (file.LinesAdded > 0) { <span class="cd-file-add">+@file.LinesAdded</span> } @if (file.LinesRemoved > 0) { <span class="cd-file-del">-@file.LinesRemoved</span> }</span> }
+                                                            else { <span class="cd-file-stats muted">binary</span> }
+                                                        </div>
+                                                    }
+                                                </div>
+                                            }
+                                            else { <div class="cd-empty-tab">No file changes recorded.</div> }
+                                        }
+                                        else if (activeTab == "metrics")
+                                        {
+                                            <div class="cd-metrics-detail">
+                                                <div class="cd-metric-row"><span class="cd-metric-label">Elapsed Time</span><span class="cd-metric-value">@(candidate.ElapsedSec?.ToString("0.1") ?? "—")s</span></div>
+                                                <div class="cd-metric-row"><span class="cd-metric-label">Tokens Used</span><span class="cd-metric-value">@(candidate.TokensUsed?.ToString("N0") ?? "unknown")</span></div>
+                                                @if (candidate.ExecutionSummary is { } sm)
+                                                {
+                                                    <div class="cd-metric-row"><span class="cd-metric-label">Files Changed</span><span class="cd-metric-value">@sm.FilesChanged.Count</span></div>
+                                                    <div class="cd-metric-row"><span class="cd-metric-label">Lines Added</span><span class="cd-metric-value cd-file-add">+@sm.TotalLinesAdded</span></div>
+                                                    <div class="cd-metric-row"><span class="cd-metric-label">Lines Removed</span><span class="cd-metric-value cd-file-del">-@sm.TotalLinesRemoved</span></div>
+                                                }
+                                            </div>
+                                        }
+                                        else if (activeTab == "logs")
+                                        {
+                                            @if (candidate.ExecutionSummary?.DiagnosticLog is { Count: > 0 } log)
+                                            {
+                                                <div class="cd-log-viewer">
+                                                    @foreach (var logLine in log) { <div class="cd-log-line">@logLine</div> }
+                                                </div>
+                                            }
+                                            else { <div class="cd-empty-tab">No diagnostic logs captured.</div> }
+                                        }
+                                    </div>
+                                </div>
                             }
                         </div>
                     }
@@ -583,9 +767,26 @@
     /* Live activity indicator on running candidates */
     .candidate-activity-live { display: flex; align-items: center; gap: .35rem; font-size: .75em; margin-top: .3rem; padding: .25rem .4rem; background: rgba(64, 192, 87, .08); border-radius: 4px; overflow: hidden; }
     .activity-pulse { color: #40c057; animation: pulse-blink 1.2s infinite; font-size: .6em; }
+    .activity-done { color: #51cf66; font-size: .7em; }
     .activity-last { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .85; }
     .activity-count { opacity: .5; font-size: .9em; }
     @@keyframes pulse-blink { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
+
+    /* Mini activity log preview on active cards */
+    .candidate-minilog { margin-top: .3rem; font-size: .7em; border-top: 1px solid rgba(255,255,255,.05); padding-top: .25rem; }
+    .minilog-entry { display: flex; gap: .35rem; align-items: baseline; padding: .1rem 0; opacity: .65; }
+    .minilog-time { font-family: monospace; opacity: .5; white-space: nowrap; }
+    .minilog-cat { font-weight: 600; text-transform: uppercase; font-size: .85em; white-space: nowrap; }
+    .minilog-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* Awaiting evaluation badge */
+    .candidate-awaiting { font-size: .75em; color: #ffd43b; margin-top: .3rem; opacity: .8; }
+
+    /* Expandable active candidate cards */
+    .candidate-card { cursor: pointer; transition: border-color .15s, background .15s; }
+    .candidate-card:hover { background: rgba(255,255,255,.02); }
+    .candidate-card.active-expanded { background: rgba(255,255,255,.03); }
+    .candidate-detail-expanded { margin-top: .65rem; padding-top: .65rem; border-top: 1px solid var(--border, #2d3240); }
 
     /* Activity timeline in detail tab */
     .cd-activity-timeline { max-height: 300px; overflow-y: auto; }
@@ -597,6 +798,9 @@
     .cd-activity-cat-stdout { color: #69db7c; }
     .cd-activity-cat-config { color: #ffd43b; }
     .cd-activity-cat-complete { color: #ff922b; }
+    .cd-activity-cat-error { color: #ff6b6b; }
+    .cd-activity-cat-sandbox { color: #20c997; }
+    .cd-activity-cat-tool-call { color: #da77f2; }
     .cd-activity-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
     /* Empty tab */
@@ -622,6 +826,7 @@
     private HubConnection? _hub;
     private bool _refreshing;
     private readonly HashSet<string> _expandedTasks = new();
+    private readonly HashSet<string> _expandedActiveCandidates = new();
     private readonly Dictionary<string, string> _activeTabs = new();
     private string? _lightboxImage;
     private string? _lightboxTitle;
@@ -642,6 +847,12 @@
     {
         if (!_expandedTasks.Remove(taskId))
             _expandedTasks.Add(taskId);
+    }
+
+    private void ToggleActiveExpand(string key)
+    {
+        if (!_expandedActiveCandidates.Remove(key))
+            _expandedActiveCandidates.Add(key);
     }
 
     private void SetTab(string key, string tab)

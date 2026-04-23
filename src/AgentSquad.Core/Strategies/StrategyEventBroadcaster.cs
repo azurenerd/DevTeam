@@ -31,7 +31,7 @@ public sealed class StrategyEventBroadcaster : IStrategyEventSink, IDisposable
     private readonly IStrategyBroadcaster _broadcaster;
 
     /// <summary>Activity broadcast throttle: buffer per (runId, taskId, strategyId), flush every 500ms.</summary>
-    private readonly ConcurrentDictionary<(string, string, string), CandidateActivityEvent> _activityBuffer = new();
+    private readonly ConcurrentDictionary<(string, string, string), ConcurrentBag<CandidateActivityEvent>> _activityBuffer = new();
     private readonly Timer? _activityFlushTimer;
     private static readonly TimeSpan ActivityThrottleInterval = TimeSpan.FromMilliseconds(500);
 
@@ -69,8 +69,11 @@ public sealed class StrategyEventBroadcaster : IStrategyEventSink, IDisposable
                     break;
                 case StrategyEvents.CandidateActivity when payload is CandidateActivityEvent act:
                     _store.RecordActivity(act);
-                    // Buffer for throttled broadcast instead of immediate send.
-                    _activityBuffer[(act.RunId, act.TaskId, act.StrategyId)] = act;
+                    // Buffer for throttled broadcast — add to bag, not overwrite.
+                    var bag = _activityBuffer.GetOrAdd(
+                        (act.RunId, act.TaskId, act.StrategyId),
+                        _ => new ConcurrentBag<CandidateActivityEvent>());
+                    bag.Add(act);
                     return; // Skip the immediate broadcast below — flushed by timer.
                 case StrategyEvents.WinnerSelected when payload is WinnerSelectedEvent w:
                     _store.RecordWinner(w);
@@ -101,15 +104,19 @@ public sealed class StrategyEventBroadcaster : IStrategyEventSink, IDisposable
     {
         if (_activityBuffer.IsEmpty) return;
 
-        // Snapshot and clear: swap out all buffered entries atomically per key.
-        var entries = new List<CandidateActivityEvent>();
+        // Snapshot and clear: swap out all buffered bags atomically per key.
+        var batches = new List<CandidateActivityEvent>();
         foreach (var key in _activityBuffer.Keys.ToArray())
         {
-            if (_activityBuffer.TryRemove(key, out var evt))
-                entries.Add(evt);
+            if (_activityBuffer.TryRemove(key, out var bag))
+            {
+                // Drain all events from the bag
+                while (bag.TryTake(out var evt))
+                    batches.Add(evt);
+            }
         }
 
-        foreach (var evt in entries)
+        foreach (var evt in batches)
         {
             try
             {

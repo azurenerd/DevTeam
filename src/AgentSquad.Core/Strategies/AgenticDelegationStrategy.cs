@@ -69,17 +69,12 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
         {
             Pool = CopilotCliPool.Agentic,
             AllowAll = true,
-            // Close stdin after piping the prompt. Leaving stdin open historically
-            // caused the agentic session to hang before emitting any output (the
-            // CLI waits on EOF on the initial prompt before it starts processing).
-            // Symptom: stuck-no-output at exactly StuckSeconds, 0 tool calls, empty
-            // log buffer. Multi-turn stdin is not used today; flip back to false
-            // only when we add a real interactive protocol.
             CloseStdinAfterPrompt = true,
             WatchdogMode = CopilotCliWatchdogMode.Agentic,
             WorkingDirectory = invocation.WorktreePath,
             EnvironmentOverrides = scope.EnvironmentOverrides,
             Timeout = invocation.Timeout,
+            ActivitySink = sink,
         };
 
         // Snapshot host state BEFORE launching the CLI. The validator compares
@@ -110,6 +105,7 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
                     AgenticFailureReason.Unavailable => "cli-unavailable",
                     _ => result.ErrorMessage ?? "unknown-agentic-failure",
                 };
+                sink?.Report(new Frameworks.FrameworkActivityEvent("error", $"Failed: {reason}"));
                 _logger.LogWarning(
                     "AgenticDelegationStrategy failed for task {Task}: {Reason} (tool-calls: {ToolCalls}, wall: {Wall}s)",
                     invocation.Task.TaskId, reason, result.ToolCallCount, result.WallClock.TotalSeconds);
@@ -125,11 +121,13 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
 
             // Post-run sandbox validation. Any violation demotes the candidate to
             // failed — better to drop a suspect patch than ship an escaped one.
+            sink?.Report(new Frameworks.FrameworkActivityEvent("sandbox", "Running post-execution sandbox validation"));
             var violations = validator.Validate(
                 invocation.WorktreePath, snapshot, scope.SandboxGitconfigPath);
             if (violations.Count > 0)
             {
                 var codes = string.Join(",", violations.Select(v => v.Code));
+                sink?.Report(new Frameworks.FrameworkActivityEvent("error", $"Sandbox violation: {codes}"));
                 _logger.LogError(
                     "AgenticDelegationStrategy sandbox violations for task {Task}: {Codes}",
                     invocation.Task.TaskId, codes);
@@ -143,6 +141,7 @@ public class AgenticDelegationStrategy : ICodeGenerationStrategy
                 };
             }
 
+            sink?.Report(new Frameworks.FrameworkActivityEvent("sandbox", "Sandbox validation passed ✓"));
             _logger.LogInformation(
                 "AgenticDelegationStrategy succeeded for task {Task} (tool-calls: {ToolCalls}, wall: {Wall}s)",
                 invocation.Task.TaskId, result.ToolCallCount, result.WallClock.TotalSeconds);
