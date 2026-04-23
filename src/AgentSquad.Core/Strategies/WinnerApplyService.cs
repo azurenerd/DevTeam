@@ -70,7 +70,7 @@ public class WinnerApplyService
             {
                 // Roll back any partial 3-way state so the caller sees a clean tree.
                 await TryRunGitAsync(agentRepoPath, new[] { "reset", "--hard", "HEAD" }, ct);
-                await TryRunGitAsync(agentRepoPath, new[] { "clean", "-fd" }, ct);
+                await TryRunGitAsync(agentRepoPath, new[] { "clean", "-fd", "-e", ".candidates" }, ct);
                 return new ApplyOutcome(false, $"apply-failed: {apply.stderr}", currentHead);
             }
 
@@ -85,7 +85,7 @@ public class WinnerApplyService
                     "Winner apply left unmerged entries on {Branch}; aborting and rolling back. Entries:\n{Entries}",
                     branchName, unmerged);
                 await TryRunGitAsync(agentRepoPath, new[] { "reset", "--hard", "HEAD" }, ct);
-                await TryRunGitAsync(agentRepoPath, new[] { "clean", "-fd" }, ct);
+                await TryRunGitAsync(agentRepoPath, new[] { "clean", "-fd", "-e", ".candidates" }, ct);
                 return new ApplyOutcome(false, "unmerged-after-apply", currentHead);
             }
 

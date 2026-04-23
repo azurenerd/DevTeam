@@ -130,7 +130,8 @@ public class LocalWorkspace
             await RunGitAsync("reset", "--hard", "HEAD", ct: ct);
             await RunGitAsync("checkout", _defaultBranch, ct: ct);
             await RunGitAsync("reset", "--hard", $"origin/{_defaultBranch}", ct: ct);
-            await RunGitAsync("clean", "-fd", ct: ct);
+            // Exclude .candidates (strategy worktrees may leave locked files)
+            await RunGitCoreAsync(["clean", "-fd", "-e", ".candidates"], workDir: null, throwOnError: false, ct);
             _logger.LogDebug("[{Agent}] Synced with {Branch}", _agentId, _defaultBranch);
         }
         finally
