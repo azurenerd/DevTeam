@@ -8,8 +8,11 @@ namespace AgentSquad.Dashboard.Tests;
 /// Each test exercises a complete user workflow, records video, and converts to GIF.
 /// Results are tracked in SQLite and rendered as an HTML report.
 ///
+/// Capture is OFF by default. Enable with environment variable:
+///   AGENTSQUAD_CAPTURE_GIFS=true
+///
 /// Run with: dotnet test --filter "FullyQualifiedName~GifScenarioTests"
-/// Report at: test-results/gif-scenarios/index.html
+/// Output at: tests/Captures/ (GIFs/, Screenshots/, Videos/)
 /// </summary>
 [Collection("GifScenarios")]
 public class GifScenarioTests : IClassFixture<DashboardWebAppFixture>, IClassFixture<PlaywrightFixture>, IAsyncLifetime
@@ -20,55 +23,101 @@ public class GifScenarioTests : IClassFixture<DashboardWebAppFixture>, IClassFix
     private readonly string _screenshotDir;
     private readonly string _videoDir;
     private readonly string _gifDir;
+    private readonly bool _captureEnabled;
     private ScenarioResultTracker _tracker = null!;
+
+    /// <summary>
+    /// Captures root lives at tests/Captures/MM-DD-YYYY/ in the repo, not buried in bin/.
+    /// Each day's test run gets its own dated subfolder.
+    /// </summary>
+    private static string ResolveCapturesRoot()
+    {
+        // Walk up from bin/Debug/net8.0 to find the tests/ folder
+        var dir = new DirectoryInfo(Directory.GetCurrentDirectory());
+        while (dir != null && dir.Name != "tests")
+            dir = dir.Parent;
+
+        var capturesBase = dir != null
+            ? Path.Combine(dir.FullName, "Captures")
+            : Path.Combine(Directory.GetCurrentDirectory(), "test-results", "Captures");
+
+        var dateFolder = DateTime.Now.ToString("MM-dd-yyyy");
+        return Path.Combine(capturesBase, dateFolder);
+    }
 
     public GifScenarioTests(DashboardWebAppFixture app, PlaywrightFixture pw)
     {
         _app = app;
         _pw = pw;
-        _outputDir = Path.Combine(Directory.GetCurrentDirectory(), "test-results", "gif-scenarios");
-        _screenshotDir = Path.Combine(_outputDir, "screenshots");
-        _videoDir = Path.Combine(_outputDir, "videos");
-        _gifDir = Path.Combine(_outputDir, "gifs");
+
+        var envVal = Environment.GetEnvironmentVariable("AGENTSQUAD_CAPTURE_GIFS");
+        _captureEnabled = string.Equals(envVal, "true", StringComparison.OrdinalIgnoreCase)
+                       || string.Equals(envVal, "1", StringComparison.OrdinalIgnoreCase);
+
+        _outputDir = ResolveCapturesRoot();
+        _screenshotDir = Path.Combine(_outputDir, "Screenshots");
+        _videoDir = Path.Combine(_outputDir, "Videos");
+        _gifDir = Path.Combine(_outputDir, "GIFs");
     }
 
     public Task InitializeAsync()
     {
-        Directory.CreateDirectory(_screenshotDir);
-        Directory.CreateDirectory(_videoDir);
-        Directory.CreateDirectory(_gifDir);
-        _tracker = new ScenarioResultTracker(Path.Combine(_outputDir, "results.db"));
+        if (_captureEnabled)
+        {
+            Directory.CreateDirectory(_screenshotDir);
+            Directory.CreateDirectory(_videoDir);
+            Directory.CreateDirectory(_gifDir);
+            _tracker = new ScenarioResultTracker(Path.Combine(_outputDir, "results.db"));
+        }
         return Task.CompletedTask;
     }
 
     public Task DisposeAsync()
     {
-        // Generate HTML report from all results collected so far
-        var results = _tracker.GetAll();
-        if (results.Count > 0)
-            GifReportGenerator.Generate(results, _outputDir);
-        _tracker.Dispose();
+        if (_captureEnabled && _tracker != null)
+        {
+            // Generate HTML report from all results collected so far
+            var results = _tracker.GetAll();
+            if (results.Count > 0)
+                GifReportGenerator.Generate(results, _outputDir);
+            _tracker.Dispose();
+        }
         return Task.CompletedTask;
     }
 
     private async Task<ScenarioContext> StartScenarioAsync(string id, string name)
     {
-        var scenarioVideoDir = Path.Combine(_videoDir, id);
-        Directory.CreateDirectory(scenarioVideoDir);
-
-        var context = await _pw.Browser.NewContextAsync(new BrowserNewContextOptions
+        if (_captureEnabled)
         {
-            ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-            RecordVideoDir = scenarioVideoDir,
-            RecordVideoSize = new RecordVideoSize { Width = 1920, Height = 1080 },
-        });
+            var scenarioVideoDir = Path.Combine(_videoDir, id);
+            Directory.CreateDirectory(scenarioVideoDir);
 
-        var page = await context.NewPageAsync();
-        return new ScenarioContext(page, context, id, name, scenarioVideoDir, _screenshotDir, _gifDir);
+            var context = await _pw.Browser.NewContextAsync(new BrowserNewContextOptions
+            {
+                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                RecordVideoDir = scenarioVideoDir,
+                RecordVideoSize = new RecordVideoSize { Width = 1920, Height = 1080 },
+            });
+
+            var page = await context.NewPageAsync();
+            return new ScenarioContext(page, context, id, name, scenarioVideoDir, _screenshotDir, _gifDir);
+        }
+        else
+        {
+            // No capture — lightweight context without video recording
+            var context = await _pw.Browser.NewContextAsync(new BrowserNewContextOptions
+            {
+                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+            });
+
+            var page = await context.NewPageAsync();
+            return new ScenarioContext(page, context, id, name, "", _screenshotDir, _gifDir, captureEnabled: false);
+        }
     }
 
     private void RecordResult(ScenarioResult result)
     {
+        if (!_captureEnabled) return;
         _tracker.Record(result);
         // Also generate report incrementally so partial results are visible
         var results = _tracker.GetAll();

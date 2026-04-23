@@ -17,6 +17,7 @@ public sealed class ScenarioContext : IAsyncDisposable
     private readonly string _videoDir;
     private readonly string _screenshotDir;
     private readonly string _gifDir;
+    private readonly bool _captureEnabled;
     private readonly Stopwatch _stopwatch = Stopwatch.StartNew();
     private readonly List<string> _screenshotPaths = new();
     private double _readyAtSeconds = -1;
@@ -28,7 +29,8 @@ public sealed class ScenarioContext : IAsyncDisposable
         string scenarioName,
         string videoDir,
         string screenshotDir,
-        string gifDir)
+        string gifDir,
+        bool captureEnabled = true)
     {
         Page = page;
         _context = context;
@@ -37,11 +39,13 @@ public sealed class ScenarioContext : IAsyncDisposable
         _videoDir = videoDir;
         _screenshotDir = screenshotDir;
         _gifDir = gifDir;
+        _captureEnabled = captureEnabled;
     }
 
     /// <summary>Capture a milestone screenshot with a descriptive label.</summary>
     public async Task CaptureFrameAsync(string label)
     {
+        if (!_captureEnabled) return;
         var path = Path.Combine(_screenshotDir, $"{ScenarioId}_{label}.png");
         // Use viewport-only screenshots to avoid perturbing scroll state during video recording
         await Page.ScreenshotAsync(new PageScreenshotOptions { Path = path, FullPage = false });
@@ -76,35 +80,38 @@ public sealed class ScenarioContext : IAsyncDisposable
         _stopwatch.Stop();
         await _context.CloseAsync();
 
-        // Find the recorded WebM
         string? videoPath = null;
         string? gifPath = null;
 
-        var webmFiles = Directory.Exists(_videoDir)
-            ? Directory.GetFiles(_videoDir, "*.webm")
-            : Array.Empty<string>();
-
-        if (webmFiles.Length > 0)
+        if (_captureEnabled)
         {
-            videoPath = Path.Combine(
-                Path.GetDirectoryName(_videoDir)!,
-                $"{ScenarioId}.webm");
-            File.Move(webmFiles[0], videoPath, overwrite: true);
+            // Find the recorded WebM
+            var webmFiles = Directory.Exists(_videoDir)
+                ? Directory.GetFiles(_videoDir, "*.webm")
+                : Array.Empty<string>();
 
-            // Convert to GIF (pixel-based auto-trim of leading white frames)
-            if (GifConverter.IsAvailable)
+            if (webmFiles.Length > 0)
             {
-                gifPath = Path.Combine(_gifDir, $"{ScenarioId}.gif");
-                var converted = await GifConverter.ConvertAsync(videoPath, gifPath);
-                if (!converted) gifPath = null;
+                videoPath = Path.Combine(
+                    Path.GetDirectoryName(_videoDir)!,
+                    $"{ScenarioId}.webm");
+                File.Move(webmFiles[0], videoPath, overwrite: true);
 
-                // Also trim the WebM video so thumbnails show content
-                await GifConverter.TrimVideoAsync(videoPath);
+                // Convert to GIF (pixel-based auto-trim of leading white frames)
+                if (GifConverter.IsAvailable)
+                {
+                    gifPath = Path.Combine(_gifDir, $"{ScenarioId}.gif");
+                    var converted = await GifConverter.ConvertAsync(videoPath, gifPath);
+                    if (!converted) gifPath = null;
+
+                    // Also trim the WebM video so thumbnails show content
+                    await GifConverter.TrimVideoAsync(videoPath);
+                }
             }
-        }
 
-        // Clean up video subdirectory
-        try { if (Directory.Exists(_videoDir)) Directory.Delete(_videoDir, true); } catch { }
+            // Clean up video subdirectory
+            try { if (Directory.Exists(_videoDir)) Directory.Delete(_videoDir, true); } catch { }
+        }
 
         return new ScenarioResult
         {

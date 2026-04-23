@@ -81,6 +81,9 @@ experiment-data/
 .evaluator-scratch/
 **/.evaluator-scratch/
 
+## Test captures (GIFs, screenshots, videos from UI tests)
+tests/Captures/
+
 # Runtime artifacts
 dashboard.pid
 runner.pid
