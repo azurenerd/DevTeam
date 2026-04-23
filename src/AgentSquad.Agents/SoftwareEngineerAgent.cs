@@ -356,10 +356,25 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     {
                         if (await IsOwnPrPastImplementationAsync(ct))
                         {
-                            _pastImplementationPrs.Add(CurrentPrNumber.Value);
+                            var releasedPr = CurrentPrNumber.Value;
+                            _pastImplementationPrs.Add(releasedPr);
+
+                            // Mark the corresponding task done so CheckAllTasksCompleteAsync
+                            // can detect engineering completion. Without this, the task issue
+                            // stays open and the SE never signals engineering.all.complete.
+                            var taskForPr = _taskManager.Tasks.FirstOrDefault(t =>
+                                t.PullRequestNumber == releasedPr && t.IssueNumber.HasValue);
+                            if (taskForPr is not null)
+                            {
+                                await _taskManager.MarkDoneAsync(taskForPr.IssueNumber!.Value, releasedPr, ct);
+                                Logger.LogInformation(
+                                    "Task {TaskId} (issue #{IssueNumber}) marked done — PR #{PrNumber} is past implementation",
+                                    taskForPr.Id, taskForPr.IssueNumber.Value, releasedPr);
+                            }
+
                             Logger.LogInformation(
                                 "SE PR #{PrNumber} past implementation — releasing CurrentPrNumber to pick up next task",
-                                CurrentPrNumber.Value);
+                                releasedPr);
                             CurrentPrNumber = null;
                             _currentTaskName = null;
                             Identity.AssignedPullRequest = null;
