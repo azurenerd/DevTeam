@@ -128,7 +128,8 @@ public class BaselineStrategyTests : IDisposable
 
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
-            string strategyTag = "baseline-strategy")
+            string strategyTag = "baseline-strategy",
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
         {
             Calls++;
             return Task.FromResult(new BaselineGenerationOutcome
@@ -147,14 +148,16 @@ public class BaselineStrategyTests : IDisposable
         public ThrowingGenerator(Exception ex) => _ex = ex;
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
-            string strategyTag = "baseline-strategy") => throw _ex;
+            string strategyTag = "baseline-strategy",
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null) => throw _ex;
     }
 
     private sealed class CancellingGenerator : IBaselineCodeGenerator
     {
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
-            string strategyTag = "baseline-strategy")
+            string strategyTag = "baseline-strategy",
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
         {
             ct.ThrowIfCancellationRequested();
             return Task.FromResult(new BaselineGenerationOutcome { Succeeded = true });

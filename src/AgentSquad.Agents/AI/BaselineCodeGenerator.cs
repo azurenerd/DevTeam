@@ -1,5 +1,6 @@
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Frameworks;
 using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Strategies;
 using Microsoft.Extensions.Logging;
@@ -45,7 +46,8 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
 
     public async Task<BaselineGenerationOutcome> GenerateAsync(
         string worktreePath, TaskContext task, CancellationToken ct,
-        string strategyTag = "baseline-strategy")
+        string strategyTag = "baseline-strategy",
+        IProgress<FrameworkActivityEvent>? activitySink = null)
     {
         if (string.IsNullOrWhiteSpace(worktreePath))
             return Fail("worktree path missing");
@@ -57,6 +59,8 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
             ? (_config.Project?.TechStack ?? "")
             : task.TechStack;
         var tier = _config.Agents?.SoftwareEngineer?.ModelTier ?? "premium";
+
+        activitySink?.Report(new FrameworkActivityEvent("init", $"Resolving model kernel (tier: {tier})"));
 
         Kernel kernel;
         try
@@ -73,6 +77,7 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
 
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
+        activitySink?.Report(new FrameworkActivityEvent("init", "Building system + user prompts"));
         var systemPrompt = await SinglePassPromptBuilder.BuildSystemPromptAsync(techStack, _promptService, ct);
         var userPrompt = await SinglePassPromptBuilder.BuildUserPromptAsync(
             new SinglePassPromptInputs
@@ -89,6 +94,8 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
         var history = new ChatHistory();
         history.AddSystemMessage(systemPrompt);
         history.AddUserMessage(userPrompt);
+
+        activitySink?.Report(new FrameworkActivityEvent("stdout", $"Calling LLM ({tier}) for single-pass code generation…"));
 
         string responseText;
         try
@@ -109,6 +116,8 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
         if (string.IsNullOrWhiteSpace(responseText))
             return Fail("model returned empty response");
 
+        activitySink?.Report(new FrameworkActivityEvent("stdout", $"Response received ({responseText.Length:N0} chars), parsing FILE: blocks…"));
+
         var parsedFiles = CodeFileParser.ParseFiles(responseText);
         if (parsedFiles.Count == 0)
         {
@@ -119,6 +128,7 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
         }
 
         var written = 0;
+        activitySink?.Report(new FrameworkActivityEvent("stdout", $"Parsed {parsedFiles.Count} file(s), writing to worktree…"));
         foreach (var file in parsedFiles)
         {
             ct.ThrowIfCancellationRequested();

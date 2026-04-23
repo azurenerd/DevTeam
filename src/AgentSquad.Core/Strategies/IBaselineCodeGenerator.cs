@@ -1,3 +1,5 @@
+using AgentSquad.Core.Frameworks;
+
 namespace AgentSquad.Core.Strategies;
 
 /// <summary>
@@ -23,7 +25,8 @@ public interface IBaselineCodeGenerator
     /// </param>
     Task<BaselineGenerationOutcome> GenerateAsync(
         string worktreePath, TaskContext task, CancellationToken ct,
-        string strategyTag = "baseline-strategy");
+        string strategyTag = "baseline-strategy",
+        IProgress<Frameworks.FrameworkActivityEvent>? activitySink = null);
 }
 
 /// <summary>What the baseline generator returns after a single run.</summary>

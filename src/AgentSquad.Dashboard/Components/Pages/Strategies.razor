@@ -112,14 +112,18 @@
                                 </div>
                                 @if (!isActiveExpanded && candidate.ActivityLog.Count > 1)
                                 {
-                                    @* Show last 3 entries as mini-log preview *@
+                                    @* Show last 3 grouped entries as mini-log preview *@
                                     <div class="candidate-minilog">
-                                        @foreach (var entry in candidate.ActivityLog.TakeLast(3))
+                                        @foreach (var group in GroupConsecutive(candidate.ActivityLog).TakeLast(3))
                                         {
                                             <div class="minilog-entry">
-                                                <span class="minilog-time">@entry.Timestamp.ToLocalTime().ToString("h:mm:ss")</span>
-                                                <span class="minilog-cat cd-activity-cat-@entry.Category">@entry.Category</span>
-                                                <span class="minilog-msg">@entry.Message</span>
+                                                <span class="minilog-time">@group.Entry.Timestamp.ToLocalTime().ToString("h:mm:ss")</span>
+                                                <span class="minilog-cat cd-activity-cat-@group.Entry.Category">@group.Entry.Category</span>
+                                                <span class="minilog-msg">@group.Entry.Message</span>
+                                                @if (group.Count > 1)
+                                                {
+                                                    <span class="activity-group-badge">(×@group.Count)</span>
+                                                }
                                             </div>
                                         }
                                     </div>
@@ -136,6 +140,16 @@
                             else if (candidate.State == CandidateState.Evaluated && candidate.Survived == true)
                             {
                                 <div class="candidate-scores muted" title="This candidate passed gate checks but was not scored by the LLM judge">@(candidate.JudgeSkippedReason ?? "not scored")</div>
+                            }
+                            else if (candidate.State == CandidateState.Evaluated && candidate.Survived == false)
+                            {
+                                <div class="candidate-gate-fail" title="This candidate's generated code failed a build/evaluation gate">
+                                    ❌ Gate failed
+                                    @if (!string.IsNullOrEmpty(candidate.FailureReason))
+                                    {
+                                        <span class="gate-fail-detail">@TruncateText(candidate.FailureReason, 120)</span>
+                                    }
+                                </div>
                             }
                             @if (candidate.Succeeded == false)
                             {
@@ -225,12 +239,16 @@
                                             @if (candidate.ActivityLog.Count > 0)
                                             {
                                                 <div class="cd-activity-timeline">
-                                                    @foreach (var entry in candidate.ActivityLog.Reverse())
+                                                    @foreach (var group in GroupConsecutive(candidate.ActivityLog.Reverse()))
                                                     {
-                                                        <div class="cd-activity-entry" @onclick="() => _selectedActivity = entry" @onclick:stopPropagation="true" title="Click for full detail">
-                                                            <span class="cd-activity-time">@entry.Timestamp.ToLocalTime().ToString("h:mm:ss tt")</span>
-                                                            <span class="cd-activity-cat cd-activity-cat-@entry.Category">@entry.Category</span>
-                                                            <span class="cd-activity-msg">@entry.Message</span>
+                                                        <div class="cd-activity-entry" @onclick="() => _selectedActivity = group.Entry" @onclick:stopPropagation="true" title="Click for full detail">
+                                                            <span class="cd-activity-time">@group.Entry.Timestamp.ToLocalTime().ToString("h:mm:ss tt")</span>
+                                                            <span class="cd-activity-cat cd-activity-cat-@group.Entry.Category">@group.Entry.Category</span>
+                                                            <span class="cd-activity-msg">@group.Entry.Message</span>
+                                                            @if (group.Count > 1)
+                                                            {
+                                                                <span class="activity-group-badge" title="@group.Count consecutive identical entries">(×@group.Count)</span>
+                                                            }
                                                         </div>
                                                     }
                                                 </div>
@@ -287,6 +305,23 @@
                         </div>
                     }
                 </div>
+                @{
+                    var allEvaluated = task.Candidates.Values.All(c => c.State >= CandidateState.Evaluated);
+                    var noWinner = string.IsNullOrEmpty(task.WinnerStrategyId);
+                    var allGateFailed = task.Candidates.Values.All(c => c.Survived == false);
+                }
+                @if (allEvaluated && noWinner && allGateFailed)
+                {
+                    <div class="task-no-winner" title="All candidate patches failed build gate checks — no winner could be selected. The runner will fall back to legacy code path.">
+                        ⚠️ No winner — all @task.Candidates.Count candidates failed build gates. Falling back to legacy path.
+                    </div>
+                }
+                else if (allEvaluated && noWinner && task.Candidates.Values.Any(c => c.Survived == true))
+                {
+                    <div class="task-evaluating" title="Evaluation completed but winner not yet determined">
+                        🔄 Evaluation complete — selecting winner…
+                    </div>
+                }
             </div>
         }
     }
@@ -508,12 +543,16 @@
                                                     @if (candidate.ActivityLog.Count > 0)
                                                     {
                                                         <div class="cd-activity-timeline">
-                                                            @foreach (var entry in candidate.ActivityLog.Reverse())
+                                                            @foreach (var group in GroupConsecutive(candidate.ActivityLog.Reverse()))
                                                             {
-                                                                <div class="cd-activity-entry">
-                                                                    <span class="cd-activity-time">@entry.Timestamp.ToLocalTime().ToString("h:mm:ss tt")</span>
-                                                                    <span class="cd-activity-cat cd-activity-cat-@entry.Category">@entry.Category</span>
-                                                                    <span class="cd-activity-msg">@entry.Message</span>
+                                                                <div class="cd-activity-entry" @onclick="() => _selectedActivity = group.Entry" @onclick:stopPropagation="true" title="Click for full detail">
+                                                                    <span class="cd-activity-time">@group.Entry.Timestamp.ToLocalTime().ToString("h:mm:ss tt")</span>
+                                                                    <span class="cd-activity-cat cd-activity-cat-@group.Entry.Category">@group.Entry.Category</span>
+                                                                    <span class="cd-activity-msg">@group.Entry.Message</span>
+                                                                    @if (group.Count > 1)
+                                                                    {
+                                                                        <span class="activity-group-badge" title="@group.Count consecutive identical entries">(×@group.Count)</span>
+                                                                    }
                                                                 </div>
                                                             }
                                                         </div>
@@ -675,6 +714,10 @@
     .candidate-scores div { flex: 1; background: rgba(255,255,255,.04); padding: .2rem .4rem; border-radius: 3px; }
     .candidate-scores span { font-weight: 600; margin-left: .15rem; }
     .candidate-fail { color: #ff6b6b; font-size: .85em; margin-top: .35rem; }
+    .candidate-gate-fail { color: #ff8787; font-size: .82em; margin-top: .35rem; background: rgba(255,107,107,.08); padding: .3rem .5rem; border-radius: 4px; border-left: 2px solid #ff6b6b; }
+    .gate-fail-detail { display: block; font-size: .9em; opacity: .75; margin-top: .15rem; word-break: break-word; }
+    .task-no-winner { background: rgba(255,107,107,.1); border-left: 3px solid #ff6b6b; padding: .5rem .75rem; margin-top: .5rem; border-radius: 4px; font-size: .85em; color: #ff8787; }
+    .task-evaluating { background: rgba(77,171,247,.08); border-left: 3px solid #4dabf7; padding: .5rem .75rem; margin-top: .5rem; border-radius: 4px; font-size: .85em; color: #4dabf7; }
     .recent-table { width: 100%; border-collapse: collapse; }
     .recent-table th, .recent-table td { padding: .5rem; border-bottom: 1px solid var(--border, #2d3240); text-align: left; }
     .recent-table th { opacity: .7; font-weight: 500; font-size: .85em; text-transform: uppercase; letter-spacing: .05em; }
@@ -817,6 +860,7 @@
     .cd-activity-cat-sandbox { color: #20c997; }
     .cd-activity-cat-tool-call { color: #da77f2; }
     .cd-activity-msg { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .activity-group-badge { background: rgba(77,171,247,.2); color: #4dabf7; font-size: .75em; font-weight: 600; padding: .05rem .35rem; border-radius: 8px; white-space: nowrap; flex-shrink: 0; }
 
     /* Empty tab */
     .cd-empty-tab { opacity: .4; font-style: italic; font-size: .85em; padding: .5rem 0; }
@@ -1033,6 +1077,36 @@
         CandidateState.Winner => "Winner: This candidate was selected as the best solution",
         _ => state.ToString(),
     };
+
+    private static string TruncateText(string text, int maxLength)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        var cleaned = text.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ").Trim();
+        return cleaned.Length <= maxLength ? cleaned : cleaned[..maxLength] + "…";
+    }
+
+    /// <summary>Groups consecutive activity entries with identical messages into a single row with a count.</summary>
+    private sealed record GroupedActivity(ActivityEntry Entry, int Count);
+
+    private static List<GroupedActivity> GroupConsecutive(IEnumerable<ActivityEntry> entries)
+    {
+        var result = new List<GroupedActivity>();
+        GroupedActivity? current = null;
+        foreach (var e in entries)
+        {
+            if (current is not null && current.Entry.Message == e.Message && current.Entry.Category == e.Category)
+            {
+                current = current with { Count = current.Count + 1, Entry = e };
+            }
+            else
+            {
+                if (current is not null) result.Add(current);
+                current = new GroupedActivity(e, 1);
+            }
+        }
+        if (current is not null) result.Add(current);
+        return result;
+    }
 
     public async ValueTask DisposeAsync()
     {
