@@ -1902,12 +1902,17 @@ public class TestEngineerAgent : AgentBase
 
         if (isInline)
         {
-            // Inline mode: check open approved PRs that still lack tests
+            // Inline mode: check open PRs that have been reviewed (architect or PM approved)
             var openPRs = await _github.GetOpenPullRequestsAsync(ct);
             foreach (var pr in openPRs)
             {
-                // Only count architect-approved PRs (Phase 1 complete, our responsibility)
-                if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
+                // Count PRs that have been through at least one review gate
+                // (architect-approved OR pm-approved — in SinglePR mode, PM may approve before architect)
+                var isArchitectApproved = pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase);
+                var isPmApproved = pr.Labels.Contains(PullRequestWorkflow.Labels.PmApproved, StringComparer.OrdinalIgnoreCase);
+                var isReadyForReview = pr.Labels.Contains(PullRequestWorkflow.Labels.ReadyForReview, StringComparer.OrdinalIgnoreCase);
+
+                if (!isArchitectApproved && !isPmApproved && !isReadyForReview)
                     continue;
 
                 if (PullRequestWorkflow.ParseAgentNameFromTitle(pr.Title) is { } agent &&
@@ -1922,9 +1927,17 @@ public class TestEngineerAgent : AgentBase
                     continue;
                 }
 
-                // Count any PR with changed files that hasn't been processed yet
-                // (AI assessment determines testability, not file extensions)
-                untestedCodePRs++;
+                // If architect approved, it's an untested code PR the TE should handle
+                if (isArchitectApproved)
+                {
+                    untestedCodePRs++;
+                }
+                else
+                {
+                    // PM-approved or ready-for-review but not architect-approved:
+                    // count as "already covered" since review happened out of order
+                    alreadyTestedPRs++;
+                }
             }
         }
         else
