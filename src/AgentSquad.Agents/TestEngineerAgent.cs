@@ -1898,6 +1898,7 @@ public class TestEngineerAgent : AgentBase
 
         var isInline = _config.Workspace.IsInlineTestWorkflow;
         var untestedCodePRs = 0;
+        var alreadyTestedPRs = 0; // PRs that have tests-added/tested label (e.g. SE ran tests itself)
 
         if (isInline)
         {
@@ -1905,19 +1906,21 @@ public class TestEngineerAgent : AgentBase
             var openPRs = await _github.GetOpenPullRequestsAsync(ct);
             foreach (var pr in openPRs)
             {
-                if (_testedPRs.Contains(pr.Number)) continue;
-
                 // Only count architect-approved PRs (Phase 1 complete, our responsibility)
                 if (!pr.Labels.Contains(PullRequestWorkflow.Labels.ArchitectApproved, StringComparer.OrdinalIgnoreCase))
-                    continue;
-                if (pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
-                    continue;
-                if (pr.Labels.Contains(TestedLabel, StringComparer.OrdinalIgnoreCase))
                     continue;
 
                 if (PullRequestWorkflow.ParseAgentNameFromTitle(pr.Title) is { } agent &&
                     agent.Equals(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
                     continue;
+
+                if (_testedPRs.Contains(pr.Number)
+                    || pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase)
+                    || pr.Labels.Contains(TestedLabel, StringComparer.OrdinalIgnoreCase))
+                {
+                    alreadyTestedPRs++;
+                    continue;
+                }
 
                 // Count any PR with changed files that hasn't been processed yet
                 // (AI assessment determines testability, not file extensions)
@@ -1931,7 +1934,7 @@ public class TestEngineerAgent : AgentBase
             foreach (var pr in mergedPRs)
             {
                 if (pr.MergedAt.HasValue && pr.MergedAt.Value < _sessionStartUtc) continue;
-                if (_testedPRs.Contains(pr.Number)) continue;
+                if (_testedPRs.Contains(pr.Number)) { alreadyTestedPRs++; continue; }
 
                 if (PullRequestWorkflow.ParseAgentNameFromTitle(pr.Title) is { } agent &&
                     agent.Equals(Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
@@ -1941,20 +1944,23 @@ public class TestEngineerAgent : AgentBase
             }
         }
 
-        if (untestedCodePRs == 0 && _sessionTestedPRs.Count > 0)
+        // Coverage is met when there are no untested PRs AND at least some PRs exist
+        // that are covered (either tested by TE this session OR already have tests-added label)
+        var totalCovered = _sessionTestedPRs.Count + alreadyTestedPRs;
+        if (untestedCodePRs == 0 && totalCovered > 0)
         {
             UpdateStatus(AgentStatus.Idle,
-                $"All {_sessionTestedPRs.Count} PRs tested — coverage met, tests complete");
+                $"All {totalCovered} PRs tested — coverage met, tests complete");
             Logger.LogInformation(
-                "Test coverage complete: all {Count} code PRs have been tested",
-                _sessionTestedPRs.Count);
+                "Test coverage complete: {Covered} code PRs covered ({SessionTested} tested this session, {AlreadyTested} already had tests)",
+                totalCovered, _sessionTestedPRs.Count, alreadyTestedPRs);
         }
         else if (untestedCodePRs > 0)
         {
             Logger.LogInformation("Coverage check: {Untested} untested code PRs remaining, {Tested} tested this session",
                 untestedCodePRs, _sessionTestedPRs.Count);
         }
-        else if (_sessionTestedPRs.Count == 0)
+        else if (totalCovered == 0)
         {
             Logger.LogInformation("Coverage check: no untested PRs but also no PRs tested this session yet");
         }

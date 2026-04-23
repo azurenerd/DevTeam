@@ -1,31 +1,35 @@
 @page "/"
-@using Microsoft.AspNetCore.Components.Web
-@inject DashboardDataService DataService
-@rendermode RenderMode.InteractiveServer
+@inject IDashboardDataService DataService
+@implements IDisposable
 
-<div class="dashboard-container">
-    @if (!string.IsNullOrEmpty(_data.ErrorMessage))
-    {
-        <div class="error-banner">
-            <strong>⚠ Data Error:</strong> @_data.ErrorMessage
-        </div>
-    }
-    else
-    {
-        <ProjectHeader Project="_data.Project" />
-        <MonthlySummary Summary="_data.CurrentMonth" />
-        <MilestoneTimeline Milestones="_data.Milestones" />
-        <ShippedItems Items="_data.Shipped" />
-        <InProgressItems Items="_data.InProgress" />
-        <CarriedOverItems Items="_data.CarriedOver" />
-    }
-</div>
+@if (DataService.GetError() is string error)
+{
+    <div class="error-panel">
+        <div class="error-icon">⚠</div>
+        <div class="error-msg">@error</div>
+        <div class="error-hint">Fix the file and save — the dashboard will reload automatically.</div>
+    </div>
+}
+else if (DataService.GetData() is DashboardData data)
+{
+    <Header Project="@data.Project" />
+    <Timeline TimelineModel="@data.Timeline" CurrentDate="@data.Project.CurrentDate" />
+    <Heatmap HeatmapModel="@data.Heatmap" />
+}
 
 @code {
-    private DashboardData _data = new();
-
-    protected override async Task OnInitializedAsync()
+    protected override void OnInitialized()
     {
-        _data = await DataService.LoadDataAsync();
+        DataService.OnDataChanged += HandleDataChanged;
+    }
+
+    private async void HandleDataChanged()
+    {
+        await InvokeAsync(StateHasChanged);
+    }
+
+    public void Dispose()
+    {
+        DataService.OnDataChanged -= HandleDataChanged;
     }
 }

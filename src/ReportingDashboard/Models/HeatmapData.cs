@@ -4,15 +4,21 @@ namespace ReportingDashboard.Models;
 
 public class HeatmapData
 {
-    [JsonPropertyName("shipped")]
-    public Dictionary<string, List<string>> Shipped { get; set; } = new();
+    [JsonPropertyName("months")]
+    public List<string> Months { get; set; } = new();
 
-    [JsonPropertyName("inProgress")]
-    public Dictionary<string, List<string>> InProgress { get; set; } = new();
+    [JsonPropertyName("highlightMonth")]
+    public string HighlightMonth { get; set; } = string.Empty;
 
-    [JsonPropertyName("carryover")]
-    public Dictionary<string, List<string>> Carryover { get; set; } = new();
+    [JsonPropertyName("rows")]
+    public List<StatusRow> Rows { get; set; } = new();
+}
 
-    [JsonPropertyName("blockers")]
-    public Dictionary<string, List<string>> Blockers { get; set; } = new();
+public class StatusRow
+{
+    [JsonPropertyName("category")]
+    public string Category { get; set; } = string.Empty;
+
+    [JsonPropertyName("items")]
+    public Dictionary<string, List<string>> Items { get; set; } = new();
 }
