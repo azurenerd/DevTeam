@@ -78,6 +78,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// review correlation and merge tracking.
     /// </summary>
     private readonly HashSet<int> _pastImplementationPrs = new();
+    /// <summary>
+    /// Tracks how many times each task has been picked up for implementation (branch + PR creation).
+    /// Prevents infinite retry loops where the SE keeps re-entering the same task after rework
+    /// failures, orphan recovery resets, or force-approval cycles. Keyed by task ID (e.g., "T1").
+    /// </summary>
+    private readonly Dictionary<string, int> _taskAcquisitionCounts = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
 
     /// <summary>
@@ -1734,7 +1740,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (trackedIssueNums.Contains(task.IssueNumber!.Value))
                     continue;
 
-                // Check if there's an open PR that references this task's issue
+                // Skip tasks assigned to us (leader) — we know our own state and should not
+                // reset our own in-progress tasks. This prevents the pathological cycle where
+                // orphan recovery resets a task the leader is actively reworking/force-approving.
+                if (string.Equals(task.AssignedTo, Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Check if there's an open PR that references this task's issue.
+                // Use both the regex match (fast, for bulk) and the canonical parser (thorough).
                 if (openPrIssueRefs.Contains(task.IssueNumber!.Value))
                 {
                     // Restore to _agentAssignments so PE tracks this assignment
@@ -1759,6 +1772,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     && pr.Title.Contains(task.AssignedTo, StringComparison.OrdinalIgnoreCase));
 
                 if (hasMatchingPr)
+                    continue;
+
+                // Thorough fallback: use canonical PR-body parser which handles Closes/Fixes/Resolves
+                var hasLinkedPr = openPRs.Any(pr =>
+                    PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body) == task.IssueNumber!.Value);
+
+                if (hasLinkedPr)
                     continue;
 
                 // No open PR found — this assignment is orphaned, reset to pending
@@ -2101,6 +2121,53 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Logger.LogInformation(
                     "Task #{IssueNumber} already in-progress by {Other}, skipping",
                     task.IssueNumber, freshTask.AssignedTo);
+                return;
+            }
+
+            // ── Retry guard: check if we already have an open PR for this task ──
+            // Prevents the SE from creating duplicate PRs when the task is re-entered after
+            // rework failures, force-approval cycles, or orphan recovery resets.
+            try
+            {
+                var existingPr = await FindExistingPrForTaskAsync(task, ct);
+                if (existingPr is not null)
+                {
+                    Logger.LogInformation(
+                        "Task {TaskId} already has open PR #{PrNumber} — restoring tracking instead of creating new PR",
+                        task.Id, existingPr.Number);
+
+                    if (PullRequestWorkflow.Labels.IsPastImplementation(existingPr.Labels))
+                    {
+                        // PR is past implementation (ready-for-review/approved) — track it
+                        // so rework/merge flows continue, but don't block new task pickup
+                        _pastImplementationPrs.Add(existingPr.Number);
+                    }
+                    else
+                    {
+                        // PR is still in implementation — restore CurrentPrNumber so the
+                        // ContinueOwnPrImplementationAsync path handles it
+                        CurrentPrNumber = existingPr.Number;
+                        Identity.AssignedPullRequest = existingPr.Number.ToString();
+                        _currentTaskName = task.Name;
+                    }
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug(ex, "Failed to check for existing PR for task {TaskId}", task.Id);
+            }
+
+            // ── Reacquisition cap: prevent infinite task retry loops ──
+            var acquisitions = _taskAcquisitionCounts.GetValueOrDefault(task.Id, 0) + 1;
+            _taskAcquisitionCounts[task.Id] = acquisitions;
+            if (acquisitions > Config.Limits.MaxTaskReacquisitions)
+            {
+                Logger.LogWarning(
+                    "Task {TaskId} has been picked up {Attempts} times (max {Max}) — marking blocked to prevent infinite retry",
+                    task.Id, acquisitions, Config.Limits.MaxTaskReacquisitions);
+                LogActivity("task", $"⛔ Task {task.Id} blocked after {acquisitions} acquisition attempts (max {Config.Limits.MaxTaskReacquisitions})");
+                // Don't reset to Pending — leave as-is so orphan recovery doesn't re-queue it
                 return;
             }
 
@@ -3850,6 +3917,44 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Finds an existing open PR for the given task by checking if any open PR links to the
+    /// task's issue number (via "Closes #NNN" in the body) or matches the SE's title prefix.
+    /// Used to prevent creating duplicate PRs when a task is re-acquired after rework failures.
+    /// </summary>
+    private async Task<AgentPullRequest?> FindExistingPrForTaskAsync(EngineeringTask task, CancellationToken ct)
+    {
+        if (!task.IssueNumber.HasValue)
+            return null;
+
+        var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+
+        // Primary match: PR body contains "Closes #<issue>"
+        foreach (var pr in openPRs)
+        {
+            var linkedIssue = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
+            if (linkedIssue == task.IssueNumber.Value)
+            {
+                // Verify PR is owned by this SE (title prefix match)
+                if (pr.Title.StartsWith($"{Identity.DisplayName}:", StringComparison.OrdinalIgnoreCase))
+                    return pr;
+            }
+        }
+
+        // Fallback: PR title matches our naming convention for this task
+        var expectedPrefix = $"{Identity.DisplayName}:";
+        foreach (var pr in openPRs)
+        {
+            if (pr.Title.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase)
+                && pr.Title.Contains(task.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                return pr;
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

@@ -237,6 +237,14 @@ public class LimitsConfig
     public int MaxSourceBugRounds { get; set; } = 2;
 
     /// <summary>
+    /// Maximum times the SE agent can pick up the same task for a fresh implementation cycle
+    /// (branch + PR creation + strategy framework run). Prevents infinite retry loops where
+    /// the SE keeps re-entering a task after rework failures or orphan recovery resets.
+    /// After this limit, the task is marked blocked and the SE moves on.
+    /// </summary>
+    public int MaxTaskReacquisitions { get; set; } = 3;
+
+    /// <summary>
     /// If the Software Engineer leader estimates all remaining tasks can be completed within
     /// this many minutes, it won't request additional engineers.
     /// </summary>
