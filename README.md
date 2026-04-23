@@ -120,15 +120,43 @@ flowchart TB
 
 ### Prerequisites
 
-- [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) or later
-- A [GitHub Personal Access Token](https://github.com/settings/tokens) with `repo` scope
-- [GitHub Copilot CLI](https://github.com/features/copilot) v1.0.18+ (default AI provider — no API keys needed)
-- **Or** at least one AI provider API key as fallback:
-  - [Anthropic API key](https://console.anthropic.com/) (recommended for premium tier)
-  - [OpenAI API key](https://platform.openai.com/api-keys)
-  - [Ollama](https://ollama.ai/) installed locally (for local/free tier)
+| Requirement | Version | Purpose | Install |
+|-------------|---------|---------|---------|
+| [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) | 8.0+ | Build & run AgentSquad | `winget install Microsoft.DotNet.SDK.8` |
+| [Git](https://git-scm.com/) | 2.x+ | Source control | `winget install Git.Git` |
+| [GitHub CLI (`gh`)](https://cli.github.com/) | 2.x+ | GitHub auth & Copilot CLI host | `winget install GitHub.cli` |
+| [GitHub Copilot CLI](https://github.com/features/copilot) | 1.0.18+ | Default AI provider (no API keys needed) | `gh extension install github/gh-copilot` |
+| [Node.js](https://nodejs.org/) | **22.5+** | Required by Squad strategy framework | `winget install OpenJS.NodeJS` |
+| [npm](https://www.npmjs.com/) | 10+ | Package manager (ships with Node.js) | Included with Node.js |
 
-### 1. Clone and Build
+**Optional (for specific features):**
+
+| Requirement | Purpose | Install |
+|-------------|---------|---------|
+| [Ollama](https://ollama.ai/) | Local/free AI tier | `winget install Ollama.Ollama` |
+| [FFmpeg](https://ffmpeg.org/) | Animated GIF UI test captures | `choco install ffmpeg` or download to `C:\Tools\ffmpeg\` |
+| [Anthropic API key](https://console.anthropic.com/) | Direct API access (premium tier fallback) | Sign up at console.anthropic.com |
+| [OpenAI API key](https://platform.openai.com/api-keys) | Direct API access (budget tier fallback) | Sign up at platform.openai.com |
+
+### 1. Verify Prerequisites
+
+```powershell
+# Check all required tools are installed
+dotnet --version        # Should be 8.0.x or higher
+gh --version            # Should be 2.x+
+gh auth status          # Should show "Logged in to github.com"
+copilot --version       # Should be 1.0.18+
+node --version          # Should be v22.5.0+
+npm --version           # Should be 10+
+```
+
+If `gh auth status` shows you're not logged in:
+
+```powershell
+gh auth login           # Follow interactive prompts — choose GitHub.com, HTTPS, browser auth
+```
+
+### 2. Clone and Build
 
 ```bash
 git clone <repository-url>
@@ -136,9 +164,38 @@ cd AgentSquad
 dotnet build
 ```
 
-### 2. Configure
+### 3. Configure GitHub PAT (Required)
 
-Edit `src/AgentSquad.Runner/appsettings.json` with your project settings (non-secret values like project name, description, repo, model tiers, etc. are committed to git):
+AgentSquad needs a [GitHub Personal Access Token](https://github.com/settings/tokens) with **`repo`** scope to create PRs, Issues, and manage branches on your behalf.
+
+**Create a PAT:**
+1. Go to [github.com/settings/tokens](https://github.com/settings/tokens) → **Generate new token (classic)**
+2. Give it a descriptive name (e.g., "AgentSquad")
+3. Select the **`repo`** scope (full control of private repositories)
+4. Click **Generate token** and copy the value (starts with `github_pat_` or `ghp_`)
+
+**Store the PAT securely using .NET User Secrets** (never committed to git):
+
+```powershell
+cd src/AgentSquad.Runner
+
+# Required: GitHub PAT — this is the most important secret
+dotnet user-secrets set "AgentSquad:Project:GitHubToken" "github_pat_YOUR_TOKEN_HERE"
+```
+
+> **How User Secrets work:** Secrets are stored locally at `%APPDATA%\Microsoft\UserSecrets\` (Windows) or `~/.microsoft/usersecrets/` (macOS/Linux) — completely outside the git repo. You must run this on each machine. Alternatively, set environment variables with `__` as separator: `AGENTSQUAD__PROJECT__GITHUBTOKEN=github_pat_...`
+
+**Optional: API keys** (only needed if not using Copilot CLI as the default AI provider):
+
+```powershell
+dotnet user-secrets set "AgentSquad:Models:premium:ApiKey" "sk-ant-..."    # Anthropic
+dotnet user-secrets set "AgentSquad:Models:standard:ApiKey" "sk-ant-..."   # Anthropic
+dotnet user-secrets set "AgentSquad:Models:budget:ApiKey" "sk-..."         # OpenAI
+```
+
+### 4. Configure Project Settings
+
+Edit `src/AgentSquad.Runner/appsettings.json` with your project settings (non-secret values — committed to git):
 
 ```json
 {
@@ -157,55 +214,109 @@ Edit `src/AgentSquad.Runner/appsettings.json` with your project settings (non-se
 }
 ```
 
-**Store secrets using .NET User Secrets** (never committed to git):
-
-```bash
-cd src/AgentSquad.Runner
-
-# Required: GitHub PAT
-dotnet user-secrets set "AgentSquad:Project:GitHubToken" "github_pat_..."
-
-# Optional: API keys (only if not using Copilot CLI)
-dotnet user-secrets set "AgentSquad:Models:premium:ApiKey" "sk-ant-..."
-dotnet user-secrets set "AgentSquad:Models:standard:ApiKey" "sk-ant-..."
-dotnet user-secrets set "AgentSquad:Models:budget:ApiKey" "sk-..."
-```
-
-> **Note:** User secrets are stored locally at `%APPDATA%\Microsoft\UserSecrets\` (Windows) or `~/.microsoft/usersecrets/` (macOS/Linux). Run the `dotnet user-secrets set` commands on each machine. Alternatively, use environment variables with `__` as separator: `AGENTSQUAD__PROJECT__GITHUBTOKEN=github_pat_...`
-```
-
 When `CopilotCli.Enabled` is `true` (default), all model tiers route through the `copilot` binary — no API keys needed. For direct API access, configure providers per tier:
 
 ```json
 {
   "AgentSquad": {
     "Models": {
-      "premium":  { "Provider": "Anthropic", "Model": "claude-opus-4.7",   "ApiKey": "sk-ant-..." },
-      "standard": { "Provider": "Anthropic", "Model": "claude-sonnet-4.6", "ApiKey": "sk-ant-..." },
-      "budget":   { "Provider": "OpenAI",    "Model": "gpt-4o-mini",       "ApiKey": "sk-..." },
-      "local":    { "Provider": "Ollama",    "Model": "qwen2.5-coder:14b",     "Endpoint": "http://localhost:11434" }
+      "premium":  { "Provider": "Anthropic", "Model": "claude-opus-4.7",   "ApiKey": "USE_USER_SECRETS" },
+      "standard": { "Provider": "Anthropic", "Model": "claude-sonnet-4.6", "ApiKey": "USE_USER_SECRETS" },
+      "budget":   { "Provider": "OpenAI",    "Model": "gpt-4o-mini",       "ApiKey": "USE_USER_SECRETS" },
+      "local":    { "Provider": "Ollama",    "Model": "qwen2.5-coder:14b", "Endpoint": "http://localhost:11434" }
     }
   }
 }
 ```
 
-### 3. Run
+> **⚠️ Never put API keys in `appsettings.json`** — always use `dotnet user-secrets set` as shown above.
 
-```bash
+### 5. Run
+
+```powershell
+# Option A: Run directly
 cd src/AgentSquad.Runner
 dotnet run
+
+# Option B: Use the PowerShell scripts (recommended — runs as background process)
+./scripts/start-runner.ps1      # Starts Runner on port 5050, writes PID to runner.pid
+./scripts/start-dashboard.ps1   # Starts standalone Dashboard on port 5051
 ```
 
-### 4. Monitor
+### 6. Monitor
 
 The dashboard runs embedded at `http://localhost:5050`, or standalone:
 
-```bash
+```powershell
 cd src/AgentSquad.Dashboard.Host
 dotnet run    # → http://localhost:5051
 ```
 
 Standalone mode lets you restart the dashboard without disrupting running agents.
+
+### Port Reference
+
+| Port | Service | Notes |
+|------|---------|-------|
+| `5050` | Runner (API + embedded dashboard) | Main process |
+| `5051` | Standalone Dashboard | Optional, for independent restarts |
+| `5100–5899` | Playwright test apps | Hash-derived per workspace, auto-managed |
+| `11434` | Ollama | Only if using local AI tier |
+
+## Squad Framework Setup
+
+The [Squad](https://github.com/bradygaster/squad) framework is an external agentic coding tool that AgentSquad can use as one of its strategy candidates (alongside Baseline, MCP-Enhanced, and Copilot CLI). Squad is **auto-installed on first use** if the Strategy Framework is enabled — no manual setup required.
+
+### Prerequisites for Squad
+
+Squad requires all of the following to be installed and configured:
+
+```powershell
+# Verify Squad prerequisites
+node --version          # Must be v22.5.0+ (Squad uses modern Node.js features)
+npm --version           # Must be 10+
+gh auth status          # Must be authenticated to GitHub
+copilot --version       # Must have Copilot CLI installed
+```
+
+### How Squad Gets Installed
+
+When `AgentSquad.StrategyFramework.Enabled` is `true` and a task runs the Squad strategy:
+
+1. **`SquadReadinessChecker`** verifies all prerequisites (Node.js, npm, gh, copilot)
+2. If the `squad` CLI is not found, it installs globally: `npm install -g @bradygaster/squad-cli`
+3. Squad runs as `copilot --agent squad` with the task prompt piped in
+4. Stuck detection kills Squad if no output for 600 seconds (configurable)
+5. Results are captured and evaluated alongside other strategy candidates
+
+### Manual Squad Installation (optional)
+
+```powershell
+npm install -g @bradygaster/squad-cli
+squad --version         # Verify installation
+```
+
+### Squad Configuration
+
+```json
+{
+  "AgentSquad": {
+    "StrategyFramework": {
+      "Enabled": true,
+      "SquadSeconds": 1800,
+      "Evaluator": {
+        "MaxJudgePatchChars": 8000
+      }
+    }
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `StrategyFramework.Enabled` | `false` | Enable A/B/C/D strategy comparison (includes Squad) |
+| `SquadSeconds` | `1800` | Max seconds for Squad to complete a task |
+| Stuck detection | `600s` | Kills Squad if no stdout for this duration |
 
 ## How It Works
 
@@ -506,7 +617,12 @@ AgentSquad/
 ├── tests/
 │   ├── AgentSquad.Core.Tests/          # ~395 unit tests
 │   ├── AgentSquad.Agents.Tests/        # ~93 agent behavior tests
-│   └── AgentSquad.Integration.Tests/   # ~66 integration tests
+│   ├── AgentSquad.Integration.Tests/   # ~66 integration tests
+│   ├── AgentSquad.StrategyFramework.Tests/ # ~214 strategy framework tests
+│   ├── AgentSquad.Dashboard.Tests/     # ~20 Playwright UI scenario tests (10 GIF + 10 smoke)
+│   ├── AgentSquad.Dashboard.Unit.Tests/ # ~24 dashboard unit tests
+│   ├── AgentSquad.FakeCopilotCli/      # Fake CLI for integration testing
+│   └── Captures/                       # GIF/video/screenshot output (gitignored)
 │
 ├── scripts/
 │   ├── start-runner.ps1                # Start the Runner process
@@ -553,7 +669,7 @@ dotnet build AgentSquad.sln
 ### Test
 
 ```bash
-# Run all 790+ tests
+# Run all 812+ tests
 dotnet test AgentSquad.sln
 
 # Run a specific test project
@@ -562,6 +678,23 @@ dotnet test tests/AgentSquad.Core.Tests
 # Run a specific test by name
 dotnet test tests/AgentSquad.Core.Tests --filter "FullyQualifiedName~McpServerRegistryTests"
 ```
+
+**Animated GIF UI Tests** — 10 Playwright scenario tests exercise end-to-end dashboard workflows and produce animated GIFs, videos, and screenshots. Capture is **off by default** to keep test runs fast:
+
+```powershell
+# Enable GIF capture and run UI scenario tests
+$env:AGENTSQUAD_CAPTURE_GIFS = "true"
+dotnet test tests/AgentSquad.Dashboard.Tests --filter "FullyQualifiedName~GifScenarioTests"
+
+# Output goes to tests/Captures/MM-DD-YYYY/ with:
+#   GIFs/          — Animated GIFs with pixel-based auto-trim of loading frames
+#   Videos/        — Trimmed WebM recordings
+#   Screenshots/   — Milestone screenshots per scenario
+#   index.html     — Dark-themed HTML report with pass/fail badges
+#   results.db     — SQLite pass/fail tracker
+```
+
+> **Requires FFmpeg** for GIF conversion. Install via `choco install ffmpeg` or place in `C:\Tools\ffmpeg\bin\`. Without FFmpeg, tests still pass but no GIFs/videos are produced.
 
 **Offline Integration Testing (WS3)** — The `tests/` directory includes an `InMemoryGitHubService`, a `WorkflowTestHarness`, and a scripted CLI for running full agent workflow integration tests offline without hitting GitHub or real AI providers. Use this harness to validate end-to-end workflow logic locally.
 
@@ -626,9 +759,45 @@ The Runner exposes lightweight health endpoints for monitoring and debugging:
 | Persistence | SQLite via Microsoft.Data.Sqlite |
 | Agent Memory | SQLite-backed persistent recall (decisions, learnings, instructions) |
 | Message Bus | System.Threading.Channels (bounded, in-process pub/sub) |
-| Local Testing | dotnet CLI, Playwright (UI/E2E) |
+| Local Testing | dotnet CLI, Playwright (UI/E2E, auto-installed on first test run) |
+| UI Test Capture | FFmpeg (optional — GIF/video generation) |
 | Dependency Injection | Microsoft.Extensions.DependencyInjection |
 | Hosting | Microsoft.Extensions.Hosting (Generic Host) |
+
+## Troubleshooting
+
+### GitHub PAT Issues
+
+| Problem | Solution |
+|---------|----------|
+| `401 Unauthorized` from GitHub API | Verify PAT: `dotnet user-secrets list` in `src/AgentSquad.Runner`. Re-set with `dotnet user-secrets set "AgentSquad:Project:GitHubToken" "github_pat_..."` |
+| PAT expired | Generate a new PAT at [github.com/settings/tokens](https://github.com/settings/tokens) and re-set via user-secrets |
+| Wrong repo scope | Ensure the PAT has the `repo` scope (full control of private repositories) |
+
+### Copilot CLI Issues
+
+| Problem | Solution |
+|---------|----------|
+| `copilot` not found | Install: `gh extension install github/gh-copilot` |
+| Auth failure | Run `gh auth login` then `gh auth status` to verify |
+| Fallback to API keys | If `copilot` fails at startup, `ModelRegistry` auto-falls back to configured API providers |
+
+### Build / DLL Lock Issues
+
+| Problem | Solution |
+|---------|----------|
+| `MSB3027: Could not copy DLL` | Stop the Runner and Dashboard before building: `./scripts/stop-runner.ps1` then `dotnet build` |
+| Playwright browser not found | Run `pwsh bin/Debug/net8.0/playwright.ps1 install chromium` in the test project directory |
+
+### Database Reset
+
+```powershell
+# The SQLite database is per-repo, named agentsquad_{repo}.db
+# To reset all state, delete the DB or use the reset script:
+./scripts/fresh-reset.ps1
+```
+
+See [docs/setup-guide.md](docs/setup-guide.md) for a comprehensive configuration walkthrough and additional troubleshooting.
 
 ## License
 
