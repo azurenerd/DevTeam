@@ -77,6 +77,15 @@ internal sealed partial class EngineeringTaskIssueManager
             .OrderBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        // Track ALL issue numbers seen from GitHub (before scope filtering) so we can
+        // correctly remove pending-visibility tasks that GitHub now knows about (including
+        // closed ones that the scope filter would otherwise exclude).
+        var allGitHubIssueNumbers = new HashSet<int>(
+            allTasks.Where(t => t.IssueNumber.HasValue).Select(t => t.IssueNumber!.Value));
+        // Also track which of those are closed, so we can update pending task status
+        var closedIssueNumbers = new HashSet<int>(
+            closedIssues.Select(i => i.Number));
+
         // Apply enhancement scope filter to exclude stale tasks from prior runs
         if (_enhancementScope is not null && _enhancementScope.Count > 0)
         {
@@ -91,17 +100,19 @@ internal sealed partial class EngineeringTaskIssueManager
 
         // Merge back freshly-created tasks that aren't yet visible in the GitHub API
         // (eventual-consistency delay). Remove from pending set once they appear.
+        // Use the pre-filter issue set so closed tasks aren't re-added as pending.
         var loadedIssueNumbers = new HashSet<int>(allTasks.Where(t => t.IssueNumber.HasValue).Select(t => t.IssueNumber!.Value));
         var mergedFromPending = 0;
         foreach (var (issueNum, pendingTask) in _pendingVisibilityTasks)
         {
-            if (loadedIssueNumbers.Contains(issueNum))
-                continue; // Now visible — will be removed below
+            // If GitHub knows about this issue (even if scope-filtered), don't re-add
+            if (loadedIssueNumbers.Contains(issueNum) || allGitHubIssueNumbers.Contains(issueNum))
+                continue;
             allTasks.Add(pendingTask);
             mergedFromPending++;
         }
-        // Remove tasks that are now visible from the pending set
-        foreach (var issueNum in loadedIssueNumbers)
+        // Remove tasks that are now visible from the pending set (use full GitHub set)
+        foreach (var issueNum in allGitHubIssueNumbers)
             _pendingVisibilityTasks.Remove(issueNum);
         if (mergedFromPending > 0)
         {
