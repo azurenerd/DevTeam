@@ -144,192 +144,124 @@ public sealed class AgenticOutputMonitor
     }
 
     /// <summary>
-    /// Parse a stdout line into a human-readable activity event and report it.
-    /// JSONL tool-call lines are parsed for type/name; plain text lines are
-    /// reported as-is. Raw JSON blobs are never sent to the UI.
+    /// Parse a stdout line into a high-level activity event matching the Copilot CLI
+    /// terminal UX: assistant explanations (magenta ●) and tool intention summaries
+    /// (green ●). Low-level tool execution events are suppressed — they add noise
+    /// without value at the dashboard level.
     /// </summary>
     private static void ReportActivity(IProgress<FrameworkActivityEvent> sink, string line)
     {
-        // Try to parse JSONL for tool-call events
         if (line.Length < 64_000 && line.TrimStart().StartsWith('{'))
         {
             try
             {
                 using var doc = JsonDocument.Parse(line);
                 var root = doc.RootElement;
-                if (root.TryGetProperty("type", out var typeProp) && typeProp.ValueKind == JsonValueKind.String)
+                if (!root.TryGetProperty("type", out var typeProp) || typeProp.ValueKind != JsonValueKind.String)
+                    goto plainText;
+
+                var type = typeProp.GetString() ?? "";
+
+                // Skip ephemeral events (session setup, streaming deltas)
+                if (root.TryGetProperty("ephemeral", out var eph) && eph.ValueKind == JsonValueKind.True)
+                    return;
+
+                // Skip session management noise (mcp_server_status, tools_updated, etc.)
+                if (type.StartsWith("session.", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // Skip streaming deltas (reasoning_delta, message_delta, content_delta)
+                if (type.Contains("_delta", StringComparison.Ordinal) ||
+                    type.Contains(".delta", StringComparison.Ordinal))
+                    return;
+
+                // Skip user messages (we sent them)
+                if (type.StartsWith("user.", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // Skip raw tool execution events — we surface tool activity via the
+                // higher-level intentionSummary on assistant.message instead.
+                if (type.Contains("tool", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // Get the data envelope (copilot CLI nests everything here)
+                root.TryGetProperty("data", out var data);
+
+                // ── Assistant message: the primary source of visible activity ──
+                // Maps to the magenta ● (text) and green ● (tool intents) in the CLI.
+                if (type == "assistant.message" && data.ValueKind == JsonValueKind.Object)
                 {
-                    var type = typeProp.GetString() ?? "";
-
-                    // Tool-call events: extract tool name, args, and result for readable display
-                    if (type.Contains("tool", StringComparison.OrdinalIgnoreCase))
+                    // Green ● — tool intention summaries (what the agent plans to do)
+                    if (data.TryGetProperty("toolRequests", out var reqs) &&
+                        reqs.ValueKind == JsonValueKind.Array && reqs.GetArrayLength() > 0)
                     {
-                        var toolName = TryGetToolName(root);
-                        var toolArgs = TryGetToolArgs(root);
-                        var toolResult = TryGetToolResult(root);
-
-                        var msg = !string.IsNullOrEmpty(toolName) ? $"Tool: {toolName}" : $"Tool event: {type}";
-                        if (!string.IsNullOrEmpty(toolArgs))
-                            msg += $" ({toolArgs})";
-                        if (!string.IsNullOrEmpty(toolResult))
-                            msg += $" → {toolResult}";
-
-                        sink.Report(new FrameworkActivityEvent("tool-call", msg));
-                        return;
-                    }
-
-                    // Assistant message events: show a summary
-                    if (type.Contains("assistant", StringComparison.OrdinalIgnoreCase) ||
-                        type.Contains("message", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var content = TryGetContent(root);
-                        if (!string.IsNullOrEmpty(content))
+                        foreach (var req in reqs.EnumerateArray())
                         {
-                            var summary = content.Length > 120 ? content[..120] + "…" : content;
-                            sink.Report(new FrameworkActivityEvent("thinking", summary));
-                            return;
+                            var intention = req.TryGetProperty("intentionSummary", out var isp) &&
+                                            isp.ValueKind == JsonValueKind.String
+                                ? isp.GetString() : null;
+                            var reqName = req.TryGetProperty("name", out var rn) &&
+                                          rn.ValueKind == JsonValueKind.String
+                                ? rn.GetString() : null;
+
+                            if (!string.IsNullOrEmpty(intention))
+                            {
+                                if (intention!.Length > 160) intention = intention[..160] + "…";
+                                sink.Report(new FrameworkActivityEvent("intent", intention));
+                            }
+                            else if (!string.IsNullOrEmpty(reqName))
+                            {
+                                sink.Report(new FrameworkActivityEvent("intent", $"Using {reqName}"));
+                            }
                         }
                     }
 
-                    // Other JSON events — skip noise (don't send raw JSON to UI)
+                    // Magenta ● — assistant's explanation / status text
+                    var content = TryGetContent(data);
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        var summary = content!.Length > 200 ? content[..200] + "…" : content;
+                        sink.Report(new FrameworkActivityEvent("assistant", summary));
+                    }
                     return;
                 }
+
+                // ── Assistant reasoning (full, non-delta) ──
+                if (type == "assistant.reasoning" && data.ValueKind == JsonValueKind.Object)
+                {
+                    var content = data.TryGetProperty("content", out var rc) &&
+                                  rc.ValueKind == JsonValueKind.String ? rc.GetString() : null;
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        var summary = content!.Length > 200 ? content[..200] + "…" : content;
+                        sink.Report(new FrameworkActivityEvent("reasoning", summary));
+                    }
+                    return;
+                }
+
+                // Other assistant events (turn_start, turn_end) — skip
+                if (type.StartsWith("assistant.", StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // Any other structured JSON — skip noise
+                return;
             }
             catch (JsonException) { /* not valid JSON, fall through to plain text */ }
         }
 
-        // Plain text output — report as stdout (truncate very long lines)
+    plainText:
         var trimmed = line.Trim();
         if (trimmed.Length > 200) trimmed = trimmed[..200] + "…";
         sink.Report(new FrameworkActivityEvent("stdout", trimmed));
     }
 
-    /// <summary>Extract tool name from JSONL tool-call events.</summary>
-    private static string? TryGetToolName(JsonElement root)
+    /// <summary>Extract content/text from assistant message data.</summary>
+    private static string? TryGetContent(JsonElement data)
     {
-        // Try common shapes: {"name": "..."}, {"tool": {"name": "..."}}, {"function": {"name": "..."}}
-        if (root.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String)
-            return n.GetString();
-        if (root.TryGetProperty("tool", out var t) && t.ValueKind == JsonValueKind.Object &&
-            t.TryGetProperty("name", out var tn) && tn.ValueKind == JsonValueKind.String)
-            return tn.GetString();
-        if (root.TryGetProperty("function", out var f) && f.ValueKind == JsonValueKind.Object &&
-            f.TryGetProperty("name", out var fn) && fn.ValueKind == JsonValueKind.String)
-            return fn.GetString();
-        return null;
-    }
-
-    /// <summary>Extract a short human-readable summary of tool arguments.</summary>
-    private static string? TryGetToolArgs(JsonElement root)
-    {
-        // Check common argument locations
-        JsonElement args = default;
-        if (root.TryGetProperty("arguments", out var a))
-            args = a;
-        else if (root.TryGetProperty("input", out var inp))
-            args = inp;
-        else if (root.TryGetProperty("tool_input", out var ti))
-            args = ti;
-        else if (root.TryGetProperty("function", out var fn) && fn.ValueKind == JsonValueKind.Object &&
-                 fn.TryGetProperty("arguments", out var fa))
-            args = fa;
-        else if (root.TryGetProperty("tool", out var t) && t.ValueKind == JsonValueKind.Object &&
-                 t.TryGetProperty("input", out var tInp))
-            args = tInp;
-        else
-            return null;
-
-        // For string arguments (already serialized JSON string), extract key hints
-        if (args.ValueKind == JsonValueKind.String)
-        {
-            var raw = args.GetString() ?? "";
-            return SummarizeArgs(raw);
-        }
-
-        // For object arguments, extract key fields
-        if (args.ValueKind == JsonValueKind.Object)
-        {
-            var parts = new List<string>();
-            foreach (var prop in args.EnumerateObject())
-            {
-                if (parts.Count >= 3) break; // limit to 3 key args
-                var val = prop.Value.ValueKind switch
-                {
-                    JsonValueKind.String => prop.Value.GetString() ?? "",
-                    JsonValueKind.Number => prop.Value.GetRawText(),
-                    JsonValueKind.True => "true",
-                    JsonValueKind.False => "false",
-                    _ => "..."
-                };
-                if (val.Length > 60) val = val[..60] + "…";
-                parts.Add($"{prop.Name}={val}");
-            }
-            return parts.Count > 0 ? string.Join(", ", parts) : null;
-        }
-
-        return null;
-    }
-
-    /// <summary>Summarize a serialized JSON argument string into key hints.</summary>
-    private static string SummarizeArgs(string raw)
-    {
-        if (raw.Length < 3) return raw;
-        try
-        {
-            using var doc = JsonDocument.Parse(raw);
-            var parts = new List<string>();
-            foreach (var prop in doc.RootElement.EnumerateObject())
-            {
-                if (parts.Count >= 3) break;
-                var val = prop.Value.ValueKind switch
-                {
-                    JsonValueKind.String => prop.Value.GetString() ?? "",
-                    JsonValueKind.Number => prop.Value.GetRawText(),
-                    _ => "..."
-                };
-                if (val.Length > 60) val = val[..60] + "…";
-                parts.Add($"{prop.Name}={val}");
-            }
-            return parts.Count > 0 ? string.Join(", ", parts) : raw.Length > 80 ? raw[..80] + "…" : raw;
-        }
-        catch
-        {
-            return raw.Length > 80 ? raw[..80] + "…" : raw;
-        }
-    }
-
-    /// <summary>Extract tool result/output summary.</summary>
-    private static string? TryGetToolResult(JsonElement root)
-    {
-        JsonElement result = default;
-        if (root.TryGetProperty("result", out var r))
-            result = r;
-        else if (root.TryGetProperty("output", out var o))
-            result = o;
-        else if (root.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
-        {
-            var text = c.GetString() ?? "";
-            if (text.Length > 100) text = text[..100] + "…";
-            return text;
-        }
-        else
-            return null;
-
-        if (result.ValueKind == JsonValueKind.String)
-        {
-            var text = result.GetString() ?? "";
-            return text.Length > 100 ? text[..100] + "…" : text;
-        }
-
-        return null;
-    }
-
-    /// <summary>Extract content/text from assistant message events.</summary>
-    private static string? TryGetContent(JsonElement root)
-    {
-        if (root.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
+        if (data.ValueKind != JsonValueKind.Object) return null;
+        if (data.TryGetProperty("content", out var c) && c.ValueKind == JsonValueKind.String)
             return c.GetString();
-        if (root.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+        if (data.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
             return t.GetString();
         return null;
     }
