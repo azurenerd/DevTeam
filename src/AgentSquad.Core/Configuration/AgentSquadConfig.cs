@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.DevPlatform.Config;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Workspace;
 
@@ -21,6 +22,7 @@ public class AgentSquadConfig
     public DecisionGatingConfig DecisionGating { get; set; } = new();
     public ReviewConfig Review { get; set; } = new();
     public StrategyFrameworkConfig StrategyFramework { get; set; } = new();
+    public DevPlatformConfig DevPlatform { get; set; } = new();
 }
 
 public class ProjectConfig

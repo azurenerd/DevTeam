@@ -1,4 +1,6 @@
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform;
+using AgentSquad.Core.DevPlatform.Config;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Notifications;
@@ -42,6 +44,11 @@ builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.RequirementsCache>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.AgentChatService>();
 builder.Services.AddSemanticKernelModels();
 builder.Services.AddGitHubIntegration();
+
+// Dev platform abstraction layer (capability interfaces backed by GitHub adapter)
+builder.Services.Configure<DevPlatformConfig>(
+    builder.Configuration.GetSection("AgentSquad:DevPlatform"));
+builder.Services.AddDevPlatform();
 
 // Persistence — database scoped per repo to prevent cross-project contamination
 var repoSlug = builder.Configuration["AgentSquad:Project:GitHubRepo"]?.Replace('/', '_') ?? "default";
