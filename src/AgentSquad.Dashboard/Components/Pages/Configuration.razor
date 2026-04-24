@@ -5,6 +5,7 @@
 @using AgentSquad.Dashboard.Services
 @using Microsoft.Extensions.Options
 @using AgentSquad.Core.Prompts
+@using AgentSquad.Core.DevPlatform.Config
 @using AgentSquad.Core.DevPlatform.Models
 @using AgentSquad.Core.GitHub.Models
 @using AgentSquad.Core.Frameworks
@@ -70,67 +71,151 @@ else if (_config is not null)
                     </div>
                     <div class="config-field-row">
                         <div class="config-field">
-                            <label title="The GitHub repository in 'owner/repo' format (e.g., 'myorg/myproject'). All agent PRs, issues, and code go here.">GitHub Repo</label>
-                            <input type="text" @bind="_config.Project.GitHubRepo" class="config-input" placeholder="owner/repo"
-                                title="Format: owner/repo. This is the target repository where agents create PRs, issues, and push code." />
-                        </div>
-                        <div class="config-field">
-                            <label title="The primary branch (e.g., 'main' or 'master'). Agent PRs target this branch and file operations reference it.">Default Branch</label>
-                            <input type="text" @bind="_config.Project.DefaultBranch" class="config-input"
-                                title="The main/trunk branch name. Agent PRs will target this branch." />
+                            <label title="Choose the platform hosting your Git repository and work items. GitHub uses Issues + PRs. Azure DevOps uses Work Items + PRs.">Dev Platform</label>
+                            <select @bind="_config.DevPlatform.Platform" class="config-select"
+                                title="GitHub: Uses Octokit for PRs/Issues. Azure DevOps: Uses REST API for PRs/Work Items with PAT or bearer token auth.">
+                                <option value="@DevPlatformType.GitHub">GitHub</option>
+                                <option value="@DevPlatformType.AzureDevOps">Azure DevOps</option>
+                            </select>
                         </div>
                     </div>
-                    <div class="config-field">
-                        <label title="GitHub Personal Access Token (PAT) used for all GitHub API operations. Needs repo, issues, and workflow scopes.">GitHub Token (PAT)</label>
-                        <div class="config-pat-row">
-                            <div class="config-secret-field">
-                                <input type="@(_showToken ? "text" : "password")" @bind="_config.Project.GitHubToken" class="config-input"
-                                    title="A GitHub PAT with repo, issues, and workflow scopes. Used for creating PRs, issues, reading code, and cleanup operations." />
-                                <button class="config-secret-toggle" @onclick="() => _showToken = !_showToken"
-                                    title="@(_showToken ? "Hide token" : "Show token")">@(_showToken ? "🙈" : "👁️")</button>
+
+                    @if (_config.DevPlatform.Platform == DevPlatformType.GitHub)
+                    {
+                        @* ── GitHub-specific fields ── *@
+                        <div class="config-field-row">
+                            <div class="config-field">
+                                <label title="The GitHub repository in 'owner/repo' format (e.g., 'myorg/myproject'). All agent PRs, issues, and code go here.">GitHub Repo</label>
+                                <input type="text" @bind="_config.Project.GitHubRepo" class="config-input" placeholder="owner/repo"
+                                    title="Format: owner/repo. This is the target repository where agents create PRs, issues, and push code." />
                             </div>
-                            <button class="config-validate-btn @(_patValidation?.Success == true ? "config-validate-success" : "")"
-                                @onclick="ValidatePat" disabled="@_validatingPat"
-                                title="Test the PAT token against the repo specified above to verify access.">
-                                @if (_validatingPat)
+                            <div class="config-field">
+                                <label title="The primary branch (e.g., 'main' or 'master'). Agent PRs target this branch and file operations reference it.">Default Branch</label>
+                                <input type="text" @bind="_config.Project.DefaultBranch" class="config-input"
+                                    title="The main/trunk branch name. Agent PRs will target this branch." />
+                            </div>
+                        </div>
+                        <div class="config-field">
+                            <label title="GitHub Personal Access Token (PAT) used for all GitHub API operations. Needs repo, issues, and workflow scopes.">GitHub Token (PAT)</label>
+                            <div class="config-pat-row">
+                                <div class="config-secret-field">
+                                    <input type="@(_showToken ? "text" : "password")" @bind="_config.Project.GitHubToken" class="config-input"
+                                        title="A GitHub PAT with repo, issues, and workflow scopes. Used for creating PRs, issues, reading code, and cleanup operations." />
+                                    <button class="config-secret-toggle" @onclick="() => _showToken = !_showToken"
+                                        title="@(_showToken ? "Hide token" : "Show token")">@(_showToken ? "🙈" : "👁️")</button>
+                                </div>
+                                <button class="config-validate-btn @(_patValidation?.Success == true ? "config-validate-success" : "")"
+                                    @onclick="ValidatePat" disabled="@_validatingPat"
+                                    title="Test the PAT token against the repo specified above to verify access.">
+                                    @if (_validatingPat)
+                                    {
+                                        <span class="config-spinner config-spinner-sm"></span>
+                                    }
+                                    else if (_patValidation?.Success == true)
+                                    {
+                                        <span>✓ Verified</span>
+                                    }
+                                    else
+                                    {
+                                        <span>🔑 Verify Access</span>
+                                    }
+                                </button>
+                            </div>
+                            @if (_patIsFromSecrets)
+                            {
+                                <p class="config-hint">🔐 Token loaded from <strong>User Secrets</strong> (not stored in appsettings.json). Manage via: <code>dotnet user-secrets set "AgentSquad:Project:GitHubToken" "your-pat"</code></p>
+                            }
+                            @if (_patValidation is not null)
+                            {
+                                @if (_patValidation.Success)
                                 {
-                                    <span class="config-spinner config-spinner-sm"></span>
-                                }
-                                else if (_patValidation?.Success == true)
-                                {
-                                    <span>✓ Verified</span>
+                                    <div class="config-pat-result config-pat-success">
+                                        <span>✅ Connected as <strong>@_patValidation.AuthenticatedUser</strong> → <strong>@_patValidation.RepoName</strong></span>
+                                        <span class="config-pat-detail">@(_patValidation.IsPrivate ? "🔒 Private" : "🌐 Public") · Branch: @_patValidation.DefaultBranch</span>
+                                        @if (!string.IsNullOrEmpty(_patValidation.RepoDescription))
+                                        {
+                                            <span class="config-pat-desc">@_patValidation.RepoDescription</span>
+                                        }
+                                    </div>
                                 }
                                 else
                                 {
-                                    <span>🔑 Verify Access</span>
+                                    <div class="config-pat-result config-pat-error">
+                                        <span>❌ @_patValidation.Error</span>
+                                    </div>
                                 }
-                            </button>
+                            }
                         </div>
-                        @if (_patIsFromSecrets)
+                    }
+                    else
+                    {
+                        @* ── Azure DevOps-specific fields ── *@
+                        <div class="config-field-row">
+                            <div class="config-field">
+                                <label title="Azure DevOps organization name (e.g., 'myorg' for https://dev.azure.com/myorg).">ADO Organization</label>
+                                <input type="text" @bind="AdoConfig.Organization" class="config-input" placeholder="myorg"
+                                    title="Just the org name, not the full URL. Example: contoso" />
+                            </div>
+                            <div class="config-field">
+                                <label title="Azure DevOps project name that contains the Git repository and work items.">ADO Project</label>
+                                <input type="text" @bind="AdoConfig.Project" class="config-input" placeholder="MyProject"
+                                    title="The project in Azure DevOps that contains the repository and work items." />
+                            </div>
+                        </div>
+                        <div class="config-field-row">
+                            <div class="config-field">
+                                <label title="Git repository name within the ADO project.">ADO Repository</label>
+                                <input type="text" @bind="AdoConfig.Repository" class="config-input" placeholder="my-repo"
+                                    title="The name of the Git repository in Azure DevOps." />
+                            </div>
+                            <div class="config-field">
+                                <label title="The primary branch (e.g., 'main' or 'master'). Agent PRs target this branch.">Default Branch</label>
+                                <input type="text" @bind="AdoConfig.DefaultBranch" class="config-input"
+                                    title="The main/trunk branch name. Agent PRs will target this branch." />
+                            </div>
+                        </div>
+                        <div class="config-field">
+                            <label title="Authentication method for Azure DevOps API access.">Authentication</label>
+                            <select @bind="_config.DevPlatform.AuthMethod" class="config-select"
+                                title="PAT: Personal Access Token (simplest). Azure CLI Bearer: Uses 'az account get-access-token' for enterprises where PATs are restricted.">
+                                <option value="@DevPlatformAuthMethod.Pat">Personal Access Token (PAT)</option>
+                                <option value="@DevPlatformAuthMethod.AzureCliBearer">Azure CLI Bearer Token</option>
+                            </select>
+                        </div>
+                        @if (_config.DevPlatform.AuthMethod == DevPlatformAuthMethod.Pat)
                         {
-                            <p class="config-hint">🔐 Token loaded from <strong>User Secrets</strong> (not stored in appsettings.json). Manage via: <code>dotnet user-secrets set "AgentSquad:Project:GitHubToken" "your-pat"</code></p>
+                            <div class="config-field">
+                                <label title="Azure DevOps Personal Access Token. Needs Code (Read & Write), Work Items (Read & Write), and Pull Request Threads (Read & Write) scopes.">ADO Token (PAT)</label>
+                                <div class="config-secret-field">
+                                    <input type="@(_showAdoToken ? "text" : "password")" @bind="AdoConfig.Pat" class="config-input"
+                                        title="An ADO PAT with Code, Work Items, and Pull Request Threads scopes." />
+                                    <button class="config-secret-toggle" @onclick="() => _showAdoToken = !_showAdoToken"
+                                        title="@(_showAdoToken ? "Hide token" : "Show token")">@(_showAdoToken ? "🙈" : "👁️")</button>
+                                </div>
+                            </div>
                         }
-                        @if (_patValidation is not null)
+                        else
                         {
-                            @if (_patValidation.Success)
-                            {
-                                <div class="config-pat-result config-pat-success">
-                                    <span>✅ Connected as <strong>@_patValidation.AuthenticatedUser</strong> → <strong>@_patValidation.RepoName</strong></span>
-                                    <span class="config-pat-detail">@(_patValidation.IsPrivate ? "🔒 Private" : "🌐 Public") · Branch: @_patValidation.DefaultBranch</span>
-                                    @if (!string.IsNullOrEmpty(_patValidation.RepoDescription))
-                                    {
-                                        <span class="config-pat-desc">@_patValidation.RepoDescription</span>
-                                    }
-                                </div>
-                            }
-                            else
-                            {
-                                <div class="config-pat-result config-pat-error">
-                                    <span>❌ @_patValidation.Error</span>
-                                </div>
-                            }
+                            <div class="config-field">
+                                <label title="Azure AD tenant ID for bearer token authentication. Required for 'az login --tenant'.">Tenant ID</label>
+                                <input type="text" @bind="AdoConfig.TenantId" class="config-input" placeholder="72f988bf-86f1-41af-91ab-2d7cd011db47"
+                                    title="Your Azure AD tenant ID. Used to run: az login --tenant <id> --allow-no-subscriptions" />
+                                <p class="config-hint">Bearer tokens are obtained via: <code>az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798</code>. Ensure you are logged in with <code>az login --tenant @(AdoConfig.TenantId) --allow-no-subscriptions</code></p>
+                            </div>
                         }
-                    </div>
+                        <div class="config-field-row">
+                            <div class="config-field">
+                                <label title="Default work item type to create for agent tasks.">Default Work Item Type</label>
+                                <input type="text" @bind="AdoConfig.DefaultWorkItemType" class="config-input"
+                                    title="Work item type for agent tasks. Common: Task, Bug, User Story." />
+                            </div>
+                            <div class="config-field">
+                                <label title="Work item type for executive-level escalation requests.">Executive Work Item Type</label>
+                                <input type="text" @bind="AdoConfig.ExecutiveWorkItemType" class="config-input"
+                                    title="Work item type for executive requests. Common: User Story, Feature." />
+                            </div>
+                        </div>
+                    }
                     <div class="config-field">
                         <label title="The primary technology stack (e.g., '.NET 8', 'React + Node.js'). Agents use this to pick appropriate frameworks, patterns, and test tools.">Tech Stack</label>
                         <input type="text" @bind="_config.Project.TechStack" class="config-input"
@@ -739,7 +824,7 @@ else if (_config is not null)
                                 title="Per-agent timeout. Default: 60 min. Complex tasks (architecture, large PRs) may need more. Max: 240 min (4 hours)." />
                         </div>
                         <div class="config-field">
-                            <label title="How often agents poll GitHub for new issues, PR comments, and review feedback. Lower = more responsive but more API calls.">GitHub Poll Interval (seconds)</label>
+                            <label title="How often agents poll the platform for new work items, PR comments, and review feedback. Lower = more responsive but more API calls.">Platform Poll Interval (seconds)</label>
                             <input type="number" @bind="_config.Limits.GitHubPollIntervalSeconds" class="config-input config-input-number" min="5" max="300"
                                 title="Polling frequency for GitHub API. Default: 30s. Lower values use more API rate limit. Minimum: 5s." />
                         </div>
@@ -1504,10 +1589,10 @@ else if (_config is not null)
         <div class="config-section-header config-section-danger">
             <span class="config-section-icon">🧹</span>
             <div>
-                <h2 class="config-section-title">GitHub Repository Cleanup</h2>
+                <h2 class="config-section-title">Repository Cleanup</h2>
                 <p class="config-section-desc">
-                    Dangerous operation — permanently closes all issues and PRs, and deletes all code from
-                    <strong>@_config.Project.GitHubRepo</strong>. This cannot be undone.
+                    Dangerous operation — permanently closes all @(_config?.DevPlatform.Platform == DevPlatformType.AzureDevOps ? "work items" : "issues") and PRs, and deletes all code from
+                    <strong>@GetRepoDisplayName()</strong>. This cannot be undone.
                 </p>
             </div>
         </div>
@@ -1517,7 +1602,7 @@ else if (_config is not null)
                 <div class="cleanup-info">
                     <div class="cleanup-repo">
                         <span class="cleanup-repo-icon">📦</span>
-                        <span class="cleanup-repo-name">@_config.Project.GitHubRepo</span>
+                        <span class="cleanup-repo-name">@GetRepoDisplayName()</span>
                         <span class="cleanup-branch">(@_config.Project.DefaultBranch)</span>
                     </div>
                     <p class="cleanup-warning">
@@ -1625,7 +1710,7 @@ else if (_config is not null)
             <div class="modal-body">
                 <div class="modal-repo-badge">
                     <span class="cleanup-repo-icon">📦</span>
-                    <strong>@_config?.Project.GitHubRepo</strong>
+                    <strong>@_config?.Project.GitHubRepo @(_config?.DevPlatform.Platform == DevPlatformType.AzureDevOps ? "(ADO)" : "")</strong>
                 </div>
 
                 <div class="modal-impact">
@@ -1697,6 +1782,26 @@ else if (_config is not null)
     private bool _decisionGatingExpanded;
     private bool _agenticLoopExpanded;
     private bool _strategiesExpanded = true;
+
+    // ADO platform fields
+    private bool _showAdoToken;
+
+    /// <summary>Ensures the ADO sub-config exists for binding.</summary>
+    private AzureDevOpsConfig AdoConfig
+        => _config!.DevPlatform.AzureDevOps ??= new AzureDevOpsConfig();
+
+    /// <summary>Returns a display name for the repo appropriate to the platform.</summary>
+    private string GetRepoDisplayName()
+    {
+        if (_config is null) return "";
+        if (_config.DevPlatform.Platform == DevPlatformType.AzureDevOps)
+        {
+            var ado = _config.DevPlatform.AzureDevOps;
+            if (ado is not null && !string.IsNullOrEmpty(ado.Organization))
+                return $"{ado.Organization}/{ado.Project}/{ado.Repository}";
+        }
+        return _config.Project.GitHubRepo ?? "";
+    }
 
     // Strategy/Framework IDs — keep in sync with ICodeGenerationStrategy.Id and
     // IAgenticFrameworkAdapter.Id values.
