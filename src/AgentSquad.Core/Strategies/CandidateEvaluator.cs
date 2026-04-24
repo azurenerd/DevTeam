@@ -267,16 +267,22 @@ public class CandidateEvaluator
         cts.CancelAfter(timeout);
         try
         {
-            // Only run build if there's a solution or csproj in the worktree. Non-.NET projects skip Gate2.
-            var hasDotnet = Directory.EnumerateFiles(worktreePath, "*.sln", SearchOption.TopDirectoryOnly).Any()
-                || Directory.EnumerateFiles(worktreePath, "*.csproj", SearchOption.AllDirectories).Any();
-            if (!hasDotnet)
+            // Find the best build target (sln/csproj) — may be in a subdirectory
+            var buildTarget = ResolveBuildTarget(worktreePath);
+            if (buildTarget is null)
             {
                 _logger.LogInformation("Gate2 build skipped (no sln/csproj) for {Path}", worktreePath);
                 return (true, "skipped-no-dotnet");
             }
 
-            var res = await RunProcAsync("dotnet", new[] { "build", "--nologo", "-v", "q" }, worktreePath, cts.Token);
+            var args = new List<string> { "build" };
+            if (buildTarget.Length > 0)
+                args.Add(buildTarget);
+            args.Add("--nologo");
+            args.Add("-v");
+            args.Add("q");
+
+            var res = await RunProcAsync("dotnet", args.ToArray(), worktreePath, cts.Token);
             if (res.exit != 0) return (false, "dotnet build failed: " + Truncate(res.stderr + res.stdout, 800));
             return (true, "");
         }
@@ -284,6 +290,39 @@ public class CandidateEvaluator
         {
             return (false, $"build timeout after {timeout.TotalSeconds}s");
         }
+    }
+
+    /// <summary>
+    /// Find the best dotnet build target in the worktree.
+    /// Priority: .sln in root > .csproj in root > .sln anywhere > .csproj anywhere.
+    /// Returns "" when dotnet build can auto-discover in root, a relative path for subdirectory
+    /// targets, or null when no .NET project exists.
+    /// </summary>
+    private string? ResolveBuildTarget(string worktreePath)
+    {
+        var rootSlns = Directory.GetFiles(worktreePath, "*.sln", SearchOption.TopDirectoryOnly);
+        if (rootSlns.Length > 0) return "";
+
+        var rootCsprojs = Directory.GetFiles(worktreePath, "*.csproj", SearchOption.TopDirectoryOnly);
+        if (rootCsprojs.Length > 0) return "";
+
+        var anySlns = Directory.GetFiles(worktreePath, "*.sln", SearchOption.AllDirectories);
+        if (anySlns.Length > 0)
+        {
+            var rel = Path.GetRelativePath(worktreePath, anySlns[0]);
+            _logger.LogInformation("Gate2: auto-resolved build target to {Target} (no root sln/csproj)", rel);
+            return rel;
+        }
+
+        var anyCsprojs = Directory.GetFiles(worktreePath, "*.csproj", SearchOption.AllDirectories);
+        if (anyCsprojs.Length > 0)
+        {
+            var rel = Path.GetRelativePath(worktreePath, anyCsprojs[0]);
+            _logger.LogInformation("Gate2: auto-resolved build target to {Target} (no root sln/csproj)", rel);
+            return rel;
+        }
+
+        return null;
     }
 
     private static async Task<(int exit, string stdout, string stderr)> RunProcAsync(

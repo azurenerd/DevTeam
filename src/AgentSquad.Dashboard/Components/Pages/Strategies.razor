@@ -733,8 +733,8 @@
     .expand-toggle { width: 1.5rem; text-align: center; opacity: .5; font-size: .85em; }
     .detail-row td { padding: 0 !important; border-bottom: 1px solid var(--border, #2d3240); }
 
-    /* Candidate detail grid */
-    .candidate-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .75rem; padding: .75rem 1rem 1rem; }
+    /* Candidate detail grid — vertical rows like active candidates */
+    .candidate-detail-grid { display: flex; flex-direction: column; gap: .75rem; padding: .75rem 1rem 1rem; }
     .candidate-detail-card { background: var(--card-bg, #1a1e26); border: 1px solid var(--border, #2d3240); border-radius: 6px; padding: .85rem; transition: border-color .15s; }
     .candidate-detail-card.is-winner { border: 1px solid gold; background: rgba(255, 215, 0, .04); }
     .candidate-detail-card.is-failed { opacity: .7; }
