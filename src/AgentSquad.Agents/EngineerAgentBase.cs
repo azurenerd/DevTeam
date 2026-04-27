@@ -5,6 +5,7 @@ using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -257,7 +258,7 @@ public abstract class EngineerAgentBase : AgentBase
                 // would never be cleared and the engineer would be stuck forever.
                 if (CurrentPrNumber is not null)
                 {
-                    var currentPr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+                    var currentPr = await PrService.GetAsync(CurrentPrNumber.Value, ct);
                     if (currentPr is null || !string.Equals(currentPr.State, "open", StringComparison.OrdinalIgnoreCase))
                     {
                         Logger.LogInformation("{Role} {Name} PR #{PrNumber} is no longer open (merged/closed), resetting",
@@ -440,7 +441,7 @@ public abstract class EngineerAgentBase : AgentBase
         try
         {
             // First check if the branch is actually behind main — skip sync entirely if not
-            var isBehind = await GitHub.IsBranchBehindMainAsync(prNumber, ct);
+            var isBehind = await PrService.IsBehindBaseAsync(prNumber, ct);
             if (!isBehind)
             {
                 Logger.LogDebug("{Role} {Name} PR #{PrNumber} branch is already up to date with main — no sync needed",
@@ -452,7 +453,7 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogInformation("{Role} {Name} PR #{PrNumber} branch is behind main — syncing",
                 Identity.Role, Identity.DisplayName, prNumber);
 
-            var synced = await GitHub.UpdatePullRequestBranchAsync(prNumber, ct);
+            var synced = await PrService.UpdateBranchAsync(prNumber, ct);
             if (synced)
             {
                 Logger.LogInformation("{Role} {Name} synced PR #{PrNumber} branch with main",
@@ -464,7 +465,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Logger.LogWarning("{Role} {Name} PR #{PrNumber} has merge conflicts — attempting force-rebase onto main",
                     Identity.Role, Identity.DisplayName, prNumber);
 
-                var rebased = await GitHub.RebaseBranchOnMainAsync(prNumber, ct);
+                var rebased = await PrService.RebaseBranchAsync(prNumber, ct);
                 if (rebased)
                 {
                     Logger.LogInformation("{Role} {Name} force-rebased PR #{PrNumber} onto main — conflicts resolved",
@@ -545,7 +546,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             var claimStepId = _taskTracker.BeginStep(Identity.Id, taskId, "Claim issue",
                 $"Claiming issue #{assignment.IssueNumber}: {assignment.IssueTitle}", Identity.ModelTier);
-            var issue = await GitHub.GetIssueAsync(assignment.IssueNumber, ct);
+            var issue = (await WorkItemService.GetAsync(assignment.IssueNumber, ct))?.ToAgentIssue();
             if (issue is null)
             {
                 Logger.LogWarning("Cannot find issue #{Number}", assignment.IssueNumber);
@@ -559,11 +560,11 @@ public abstract class EngineerAgentBase : AgentBase
             {
                 try
                 {
-                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                    var mergedPRs = await PrService.ListMergedAsync(ct);
                     var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var mergedPr in mergedPRs.Take(10))
                     {
-                        var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
+                        var prFiles = await PrService.GetChangedFilesAsync(mergedPr.Number, ct);
                         foreach (var f in prFiles)
                             mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
                     }
@@ -585,11 +586,11 @@ public abstract class EngineerAgentBase : AgentBase
                         LogActivity("warning",
                             $"⚠️ Skipping issue #{assignment.IssueNumber} — {overlapping}/{normalizedOwned.Count} files already created by a merged PR");
 
-                        await GitHub.AddIssueCommentAsync(assignment.IssueNumber,
+                        await WorkItemService.AddCommentAsync(assignment.IssueNumber,
                             $"⚠️ **Duplicate detected by {Identity.DisplayName}**: {overlapping}/{normalizedOwned.Count} files from this task " +
                             $"already exist in merged PRs. Closing as duplicate to avoid overlapping work.",
                             ct);
-                        await GitHub.CloseIssueAsync(assignment.IssueNumber, ct);
+                        await WorkItemService.CloseAsync(assignment.IssueNumber, ct);
                         _taskTracker.CompleteStep(claimStepId);
                         CurrentIssueNumber = null;
                         return;
@@ -975,7 +976,7 @@ public abstract class EngineerAgentBase : AgentBase
             }
 
             // Fallback: parse commit messages from GitHub
-            var commitMessages = await GitHub.GetPullRequestCommitMessagesAsync(prNumber, ct);
+            var commitMessages = await PrService.GetCommitMessagesAsync(prNumber, ct);
             var maxCompletedStep = 0;
 
             foreach (var msg in commitMessages)
@@ -1158,7 +1159,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             if (!content.Contains("CLEAR", StringComparison.OrdinalIgnoreCase) && content.Length > 10)
             {
-                await GitHub.AddIssueCommentAsync(issueNumber,
+                await WorkItemService.AddCommentAsync(issueNumber,
                     $"**[{Identity.DisplayName}] Pre-Implementation Questions:**\n\n{content}\n\n" +
                     "_Proceeding with implementation based on current understanding._", ct);
                 LogActivity("task", $"❓ Posted clarifying questions on issue #{issueNumber}");
@@ -1312,7 +1313,7 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
-            var files = await GitHub.GetPullRequestChangedFilesAsync(prNumber, ct);
+            var files = await PrService.GetChangedFilesAsync(prNumber, ct);
             if (files.Count == 0) return "";
             return string.Join("\n", files.Select(f => $"- {f}"));
         }
@@ -1456,7 +1457,7 @@ public abstract class EngineerAgentBase : AgentBase
         var reworkStepId = _taskTracker.BeginStep(Identity.Id, reworkTaskId, "Address review feedback",
             $"Reworking PR #{rework.PrNumber} based on reviewer feedback", Identity.ModelTier);
 
-        var pr = await GitHub.GetPullRequestAsync(rework.PrNumber, ct);
+        var pr = (await PrService.GetAsync(rework.PrNumber, ct))?.ToAgentPR();
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
         {
             _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Skipped);
@@ -1528,14 +1529,14 @@ public abstract class EngineerAgentBase : AgentBase
             if (_forceApprovalSentPrs.Add(rework.PrNumber))
             {
                 // Check if a force-approval comment already exists (from prior run)
-                var existingComments = await GitHub.GetPullRequestCommentsAsync(rework.PrNumber, ct);
+                var existingComments = await ReviewService.GetCommentsAsync(rework.PrNumber, ct);
                 var alreadyPosted = existingComments.Any(c =>
                     c.Body.Contains("maximum rework cycle limit", StringComparison.OrdinalIgnoreCase) ||
                     c.Body.Contains("maximum test rework cycle limit", StringComparison.OrdinalIgnoreCase));
 
                 if (!alreadyPosted)
                 {
-                    await GitHub.AddPullRequestCommentAsync(
+                    await ReviewService.AddCommentAsync(
                         rework.PrNumber,
                         $"⚠️ **{Identity.DisplayName}** has reached the maximum {cycleType} cycle limit " +
                         $"({maxCycles}). Requesting final approval to unblock progress.",
@@ -1564,7 +1565,7 @@ public abstract class EngineerAgentBase : AgentBase
         var inlineThreadsContext = "";
         try
         {
-            var threads = await GitHub.GetPullRequestReviewThreadsAsync(rework.PrNumber, ct);
+            var threads = await ReviewService.GetThreadsAsync(rework.PrNumber, ct);
             var unresolvedThreads = threads.Where(t => !t.IsResolved && !string.IsNullOrWhiteSpace(t.Body)).ToList();
             if (unresolvedThreads.Count > 0)
             {
@@ -1685,7 +1686,7 @@ public abstract class EngineerAgentBase : AgentBase
                             commentBody += changesSummary;
                         else
                             commentBody += $"**Files updated:** {string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))}";
-                        await GitHub.AddPullRequestCommentAsync(pr.Number, commentBody, ct);
+                        await ReviewService.AddCommentAsync(pr.Number, commentBody, ct);
 
                         // Reply to open inline review threads explaining what was addressed
                         await ReplyToInlineReviewThreadsAsync(pr.Number, changesSummary, codeFiles, attempts, maxCycles, ct);
@@ -1721,7 +1722,7 @@ public abstract class EngineerAgentBase : AgentBase
                         Logger.LogWarning("{Role} {Name} rework for PR #{PrNumber} blocked by build errors",
                             Identity.Role, Identity.DisplayName, pr.Number);
                         _ = Metrics?.RecordReworkBuildBlockedAsync(Identity.Id, ct);
-                        await GitHub.AddPullRequestCommentAsync(pr.Number,
+                        await ReviewService.AddCommentAsync(pr.Number,
                             $"**[{Identity.DisplayName}] Rework blocked** — Address review feedback produced code with build errors " +
                             $"that could not be auto-resolved. This rework attempt counted toward the limit ({attempts}/{maxCycles}).", ct);
 
@@ -1737,7 +1738,7 @@ public abstract class EngineerAgentBase : AgentBase
                         "{Role} {Name} rework on PR #{PrNumber} produced no FILE: blocks — no code changes committed. " +
                         "Skipping ready-for-review to avoid pointless re-review of unchanged code",
                         Identity.Role, Identity.DisplayName, pr.Number);
-                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    await ReviewService.AddCommentAsync(pr.Number,
                         $"**[{Identity.DisplayName}] Rework attempted** — AI response did not produce committable file changes. " +
                         $"This rework attempt counted toward the limit ({attempts}/{maxCycles}).", ct);
 
@@ -1771,7 +1772,7 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
-            var threads = await GitHub.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            var threads = await ReviewService.GetThreadsAsync(prNumber, ct);
             var unresolvedThreads = threads.Where(t => !t.IsResolved).ToList();
 
             if (unresolvedThreads.Count == 0) return;
@@ -1857,7 +1858,7 @@ public abstract class EngineerAgentBase : AgentBase
                 "{Role} {Name} asking clarification on issue #{Number} (round {Round}/{Max})",
                 Identity.Role, Identity.DisplayName, issue.Number, round + 1, maxRounds);
 
-            await GitHub.AddIssueCommentAsync(issue.Number,
+            await WorkItemService.AddCommentAsync(issue.Number,
                 $"**{Identity.DisplayName}** has questions before starting work:\n\n{questions}",
                 ct);
 
@@ -2351,7 +2352,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         try
         {
-            var tree = await GitHub.GetRepositoryTreeAsync("main", ct);
+            var tree = await RepoContent.GetRepositoryTreeAsync("main", ct);
             bool IsDesignHtml(string f)
             {
                 var ext = Path.GetExtension(f).ToLowerInvariant();
@@ -2403,7 +2404,7 @@ public abstract class EngineerAgentBase : AgentBase
                 {
                     try
                     {
-                        var bytes = await GitHub.GetFileBytesAsync(imgPath, ct: ct);
+                        var bytes = await RepoContent.GetFileBytesAsync(imgPath, ct: ct);
                         if (bytes is null || bytes.Length == 0) continue;
                         var ext = Path.GetExtension(imgPath).ToLowerInvariant();
                         var mime = ext switch
@@ -2427,7 +2428,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             foreach (var file in designFiles)
             {
-                var content = await GitHub.GetFileContentAsync(file, ct: ct);
+                var content = await RepoContent.GetFileContentAsync(file, ct: ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### `{file}`");
@@ -2492,7 +2493,7 @@ public abstract class EngineerAgentBase : AgentBase
         {
             if (_repoTreeCache is null || DateTime.UtcNow >= _repoTreeCacheExpiry)
             {
-                _repoTreeCache = await GitHub.GetRepositoryTreeAsync("main", ct);
+                _repoTreeCache = await RepoContent.GetRepositoryTreeAsync("main", ct);
                 _repoTreeCacheExpiry = DateTime.UtcNow.AddMinutes(5);
             }
 
@@ -2554,9 +2555,9 @@ public abstract class EngineerAgentBase : AgentBase
                 {
                     // Try PR branch first, fall back to main
                     var content = !string.IsNullOrEmpty(prBranch)
-                        ? await GitHub.GetFileContentAsync(file, prBranch, ct)
+                        ? await RepoContent.GetFileContentAsync(file, prBranch, ct)
                         : null;
-                    content ??= await GitHub.GetFileContentAsync(file, "main", ct);
+                    content ??= await RepoContent.GetFileContentAsync(file, "main", ct);
 
                     if (!string.IsNullOrWhiteSpace(content))
                     {
@@ -2694,7 +2695,7 @@ public abstract class EngineerAgentBase : AgentBase
                     ? $"\n\n<details>\n<summary>Build Errors (last attempt)</summary>\n\n```\n{Truncate(lastBuildErrors, 3000)}\n```\n</details>"
                     : "";
 
-                await GitHub.AddPullRequestCommentAsync(pr.Number,
+                await ReviewService.AddCommentAsync(pr.Number,
                     $"❌ **Build Blocked:** Step {stepNumber}/{totalSteps} (`{Truncate(stepDescription, 80)}`) was **not committed** " +
                     $"because build errors could not be resolved after {wsConfig.MaxBuildRetries} fix attempts + full code regeneration.\n\n" +
                     $"This step needs manual review or will be addressed in a follow-up.{errorDetails}", ct);
@@ -2731,7 +2732,7 @@ public abstract class EngineerAgentBase : AgentBase
                 {
                     // Extremely unlikely but handle gracefully — revert and block
                     await Workspace!.RevertUncommittedChangesAsync(ct);
-                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    await ReviewService.AddCommentAsync(pr.Number,
                         $"❌ **Build Blocked:** Step {stepNumber}/{totalSteps} — test fixes broke the build and could not be resolved.", ct);
                     return false;
                 }
@@ -2790,7 +2791,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             // Commit the screenshot to the PR branch (non-overlapping filename keeps older captures intact).
             var screenshotPath = $".screenshots/pr-{pr.Number}-ready-for-review.png";
-            var imageUrl = await GitHub.CommitBinaryFileAsync(
+            var imageUrl = await RepoContent.CommitBinaryFileAsync(
                 screenshotPath, screenshotBytes,
                 $"📸 UI screenshot for ready-for-review on PR #{pr.Number}",
                 branchName, ct);
@@ -2870,7 +2871,7 @@ public abstract class EngineerAgentBase : AgentBase
     {
         try
         {
-            var pr = await GitHub.GetPullRequestAsync(prNumber, ct);
+            var pr = (await PrService.GetAsync(prNumber, ct))?.ToAgentPR();
             if (pr is not null)
             {
                 await MarkReadyForReviewWithScreenshotAsync(pr, ct);
@@ -3375,7 +3376,7 @@ public abstract class EngineerAgentBase : AgentBase
                 ? string.Join(", ", lastTestResult.FailureDetails.Take(10).Select(d => $"`{Truncate(d, 60)}`"))
                 : $"{lastTestResult.Failed} test(s)";
 
-            await GitHub.AddPullRequestCommentAsync(pr.Number,
+            await ReviewService.AddCommentAsync(pr.Number,
                 $"⚠️ **Tests Removed:** Step {stepNumber}/{totalSteps} — the following tests could not be made to pass " +
                 $"after {wsConfig.MaxTestRetries} fix attempts and were removed with documentation:\n\n" +
                 $"{removedTestNames}\n\n" +

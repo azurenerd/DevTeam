@@ -6,6 +6,8 @@ using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -22,6 +24,10 @@ public class ArchitectAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
+    private readonly IPullRequestService _prService;
+    private readonly IWorkItemService _workItemService;
+    private readonly IRepositoryContentService _repoContent;
+    private readonly IReviewService _reviewService;
     private readonly IssueWorkflow _issueWorkflow;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
@@ -58,12 +64,20 @@ public class ArchitectAgent : AgentBase
         IPromptTemplateService promptService,
         IAgentTaskTracker taskTracker,
         ILogger<ArchitectAgent> logger,
+        IPullRequestService prService,
+        IWorkItemService workItemService,
+        IRepositoryContentService repoContent,
+        IReviewService reviewService,
         RoleContextProvider? roleContextProvider = null,
         DecisionGateService? decisionGate = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
+        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
+        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
+        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
+        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
         _issueWorkflow = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
@@ -273,13 +287,13 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var pr = await _github.GetPullRequestAsync(prNumber, ct);
+            var pr = await _prService.GetAsync(prNumber, ct);
             if (pr is null) return;
             var labels = pr.Labels?.ToList() ?? [];
             labels.Remove("human-approved");
             if (!labels.Contains("awaiting-human-review"))
                 labels.Add("awaiting-human-review");
-            await _github.UpdatePullRequestAsync(prNumber, labels: labels.ToArray(), ct: ct);
+            await _prService.UpdateAsync(prNumber, labels: labels, ct: ct);
         }
         catch (Exception ex)
         {
@@ -321,7 +335,7 @@ public class ArchitectAgent : AgentBase
         int? relatedIssue = null;
         try
         {
-            var issues = await _github.GetOpenIssuesAsync(ct);
+            var issues = await _workItemService.ListOpenAsync(ct);
             var archIssue = issues.FirstOrDefault(i =>
                 i.Title.Contains("Architecture", StringComparison.OrdinalIgnoreCase) ||
                 i.Title.Contains("architecture", StringComparison.OrdinalIgnoreCase));
@@ -376,7 +390,7 @@ public class ArchitectAgent : AgentBase
 
             if (relatedIssue.HasValue)
             {
-                try { await _github.CloseIssueAsync(relatedIssue.Value, ct); }
+                try { await _workItemService.CloseAsync(relatedIssue.Value, ct); }
                 catch { /* best effort */ }
             }
 
@@ -804,7 +818,7 @@ public class ArchitectAgent : AgentBase
                         $"Revise architecture based on reviewer feedback (attempt {revision + 2})", ct);
                 }
                 await ResetGateLabelsAsync(pr.Number, ct);
-                await _github.AddPullRequestCommentAsync(pr.Number,
+                await _reviewService.AddCommentAsync(pr.Number,
                     $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated Architecture.md.", ct);
             }
             try { if (gateStepId is not null) _taskTracker.CompleteStep(gateStepId); } catch { }
@@ -833,7 +847,7 @@ public class ArchitectAgent : AgentBase
         {
             try
             {
-                await _github.CloseIssueAsync(relatedIssue.Value, ct);
+                await _workItemService.CloseAsync(relatedIssue.Value, ct);
                 Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
             }
             catch (Exception ex)
@@ -884,9 +898,10 @@ public class ArchitectAgent : AgentBase
                 if (_reviewedPrNumbers.Contains(prNumber))
                     continue;
 
-                var pr = await _github.GetPullRequestAsync(prNumber, ct);
-                if (pr is null)
+                var platformPr = await _prService.GetAsync(prNumber, ct);
+                if (platformPr is null)
                     continue;
+                var pr = platformPr.ToAgentPR();
 
                 // Skip TestEngineer PRs — architecture review not needed for test suites
                 var authorRole = PullRequestWorkflow.DetectAuthorRole(pr.Title);
@@ -997,9 +1012,9 @@ public class ArchitectAgent : AgentBase
                     var gateLabels = pr.Labels
                         .Append(PullRequestWorkflow.Labels.HumanReviewRequired)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                    await _github.UpdatePullRequestAsync(pr.Number, labels: gateLabels, ct: ct);
-                    await _github.AddPullRequestCommentAsync(pr.Number,
+                        .ToList();
+                    await _prService.UpdateAsync(pr.Number, labels: gateLabels, ct: ct);
+                    await _reviewService.AddCommentAsync(pr.Number,
                         $"**[Architect] APPROVED** (pending human review)\n\n" +
                         $"🏗️ Architecture Review: {reasoning}{riskSuffix}\n\n" +
                         $"⏳ **Human review required** — risk level `{reviewResult.RiskLevel}` meets or exceeds " +
@@ -1022,7 +1037,7 @@ public class ArchitectAgent : AgentBase
                     // Phase 1 complete: Architect approved → add architect-approved label, do NOT merge.
                     // The TE will pick up the PR next (Phase 2), then PM reviews last (Phase 3).
                     var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
-                    await _github.AddPullRequestCommentAsync(pr.Number, approvalComment, ct);
+                    await _reviewService.AddCommentAsync(pr.Number, approvalComment, ct);
 
                     // Submit inline review comments as COMMENT event (single-PAT setup: APPROVE is
                     // forbidden on own PRs, so we always use COMMENT to keep comments on Files tab)
@@ -1041,8 +1056,8 @@ public class ArchitectAgent : AgentBase
                         .Where(l => !string.Equals(l, PullRequestWorkflow.Labels.ReadyForReview, StringComparison.OrdinalIgnoreCase))
                         .Append(PullRequestWorkflow.Labels.ArchitectApproved)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .ToArray();
-                    await _github.UpdatePullRequestAsync(pr.Number, labels: updatedLabels, ct: ct);
+                        .ToList();
+                    await _prService.UpdateAsync(pr.Number, labels: updatedLabels, ct: ct);
 
                     LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title} — TE testing next");
                     await RememberAsync(MemoryType.Decision,
@@ -1092,7 +1107,7 @@ public class ArchitectAgent : AgentBase
                 else
                 {
                     // Fallback: post as informational comment if AI didn't produce a clear verdict
-                    await _github.AddPullRequestCommentAsync(pr.Number,
+                    await _reviewService.AddCommentAsync(pr.Number,
                         $"🏗️ **Architecture Review (Advisory):**\n\n{reasoning}", ct);
                     Logger.LogWarning("Architect review for PR #{Number} produced unclear verdict: {Verdict}",
                         pr.Number, verdict);
@@ -1117,10 +1132,10 @@ public class ArchitectAgent : AgentBase
         try
         {
             var maxComments = _config.Review.MaxInlineCommentsPerReview;
-            var comments = reviewResult.Comments
+            var platformComments = reviewResult.Comments
                 .Take(maxComments)
                 // Tag each comment with [Architect] so agents know who authored it
-                .Select(c => new InlineReviewComment
+                .Select(c => new PlatformInlineComment
                 {
                     FilePath = c.FilePath,
                     Line = c.Line,
@@ -1128,18 +1143,18 @@ public class ArchitectAgent : AgentBase
                 })
                 .ToList();
 
-            if (comments.Count == 0) return;
+            if (platformComments.Count == 0) return;
 
             var reviewBody = $"🏗️ **[Architect] Inline Review** — {reviewResult.Verdict}\n\n" +
                 $"{reviewResult.Summary}\n\n" +
-                $"_{comments.Count} inline comment(s) below_";
+                $"_{platformComments.Count} inline comment(s) below_";
 
-            await _github.CreatePullRequestReviewWithCommentsAsync(
-                prNumber, reviewBody, eventType, comments, ct: ct);
+            await _reviewService.CreateReviewWithInlineCommentsAsync(
+                prNumber, reviewBody, eventType, platformComments, ct: ct);
 
             Logger.LogInformation(
                 "Submitted {Count} inline review comments on PR #{Number}",
-                comments.Count, prNumber);
+                platformComments.Count, prNumber);
         }
         catch (Exception ex)
         {
@@ -1157,7 +1172,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var threads = await _github.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            var threads = await _reviewService.GetThreadsAsync(prNumber, ct);
             // Only resolve threads authored by this agent (identified by [Architect] tag in comment body)
             var ownThreads = threads
                 .Where(t => !t.IsResolved && t.Body.Contains("[Architect]", StringComparison.OrdinalIgnoreCase))
@@ -1175,8 +1190,8 @@ public class ArchitectAgent : AgentBase
             foreach (var thread in ownThreads)
             {
                 var replyBody = $"✅ **[Architect] Resolved** — Rework addressed this feedback. Approved.";
-                await _github.ReplyAndResolveReviewThreadAsync(
-                    prNumber, thread.Id, thread.NodeId, replyBody, ct);
+                await _reviewService.ResolveThreadAsync(
+                    prNumber, thread.ThreadId, replyBody, ct);
             }
 
             LogActivity("review", $"🔒 Resolved {ownThreads.Count} Architect inline review thread(s) on PR #{prNumber}");
@@ -1197,7 +1212,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var files = await _github.GetPullRequestFilesWithPatchAsync(prNumber, ct);
+            var files = await _prService.GetFileDiffsAsync(prNumber, ct);
             if (files is null || files.Count == 0) return true;
 
             foreach (var f in files)
@@ -1267,7 +1282,7 @@ public class ArchitectAgent : AgentBase
             {
                 try
                 {
-                    var issue = await _github.GetIssueAsync(issueNumber.Value, ct);
+                    var issue = await _workItemService.GetAsync(issueNumber.Value, ct);
                     if (issue is not null)
                         issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
                 }
@@ -1282,7 +1297,7 @@ public class ArchitectAgent : AgentBase
             var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Get actual changed file list so LLM only references real paths in inline comments
-            var changedFiles = await _github.GetPullRequestChangedFilesAsync(pr.Number, ct);
+            var changedFiles = await _prService.GetChangedFilesAsync(pr.Number, ct);
             var fileListContext = changedFiles.Count > 0
                 ? "\n\n## Changed Files in This PR\n" +
                   "Your inline comment `file` paths MUST exactly match one of these:\n" +
@@ -1690,7 +1705,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
             var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
             var htmlDesignFiles = tree
@@ -1710,7 +1725,7 @@ public class ArchitectAgent : AgentBase
             var sb = new System.Text.StringBuilder();
             foreach (var file in htmlDesignFiles)
             {
-                var content = await _github.GetFileContentAsync(file, ct: ct);
+                var content = await _repoContent.GetFileContentAsync(file, ct: ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design File: `{file}`");

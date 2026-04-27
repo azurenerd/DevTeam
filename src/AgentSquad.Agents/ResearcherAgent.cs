@@ -3,6 +3,7 @@ using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -19,6 +20,10 @@ public class ResearcherAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
+    private readonly IPullRequestService _prService;
+    private readonly IWorkItemService _workItemService;
+    private readonly IRepositoryContentService _repoContent;
+    private readonly IReviewService _reviewService;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
@@ -49,12 +54,20 @@ public class ResearcherAgent : AgentBase
         ILogger<ResearcherAgent> logger,
         IPromptTemplateService promptService,
         IAgentTaskTracker taskTracker,
+        IPullRequestService prService,
+        IWorkItemService workItemService,
+        IRepositoryContentService repoContent,
+        IReviewService reviewService,
         RoleContextProvider? roleContextProvider = null,
         PlaywrightRunner? playwrightRunner = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
+        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
+        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
+        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
+        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
@@ -153,7 +166,7 @@ public class ResearcherAgent : AgentBase
                             // Fallback: search by title if PM didn't pass the number
                             try
                             {
-                                var issues = await _github.GetOpenIssuesAsync(ct);
+                                var issues = await _workItemService.ListOpenAsync(ct);
                                 var matchingIssue = issues.FirstOrDefault(i =>
                                     i.Title.Contains("Research", StringComparison.OrdinalIgnoreCase) &&
                                     i.Title.Contains(directive.Topic, StringComparison.OrdinalIgnoreCase));
@@ -267,17 +280,17 @@ public class ResearcherAgent : AgentBase
                                 }
 
                                 // Remove human-approved label if present (reset the gate)
-                                var currentPr = await _github.GetPullRequestAsync(pr.Number, ct);
+                                var currentPr = await _prService.GetAsync(pr.Number, ct);
                                 if (currentPr is not null)
                                 {
                                     var labels = currentPr.Labels?.ToList() ?? [];
                                     labels.Remove("human-approved");
                                     if (!labels.Contains("awaiting-human-review"))
                                         labels.Add("awaiting-human-review");
-                                    await _github.UpdatePullRequestAsync(pr.Number, labels: labels.ToArray(), ct: ct);
+                                    await _prService.UpdateAsync(pr.Number, labels: labels, ct: ct);
                                 }
 
-                                await _github.AddPullRequestCommentAsync(pr.Number,
+                                await _reviewService.AddCommentAsync(pr.Number,
                                     $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated Research.md.", ct);
                             }
                             try { if (gateStepId is not null) _taskTracker.CompleteStep(gateStepId); } catch { }
@@ -304,7 +317,7 @@ public class ResearcherAgent : AgentBase
                         {
                             try
                             {
-                                await _github.CloseIssueAsync(relatedIssue.Value, ct);
+                                await _workItemService.CloseAsync(relatedIssue.Value, ct);
                                 Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
                             }
                             catch (Exception ex)
@@ -933,7 +946,7 @@ public class ResearcherAgent : AgentBase
     {
         try
         {
-            var tree = await _github.GetRepositoryTreeAsync("main", ct);
+            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
             var designExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 ".html", ".htm"
@@ -983,7 +996,7 @@ public class ResearcherAgent : AgentBase
                 if (type.StartsWith("html"))
                 {
                     // Read HTML files to extract design details
-                    var content = await _github.GetFileContentAsync(path, ct: ct);
+                    var content = await _repoContent.GetFileContentAsync(path, ct: ct);
                     if (!string.IsNullOrWhiteSpace(content))
                     {
                         // Extract key CSS patterns and layout structure
@@ -1044,7 +1057,7 @@ public class ResearcherAgent : AgentBase
         if (_playwrightRunner is null) return;
 
         IReadOnlyList<string> tree;
-        try { tree = await _github.GetRepositoryTreeAsync("main", ct); }
+        try { tree = await _repoContent.GetRepositoryTreeAsync("main", ct); }
         catch (Exception ex) { Logger.LogDebug(ex, "Could not read repo tree for design screenshot check"); return; }
 
         var htmlDesignFiles = tree
@@ -1076,7 +1089,7 @@ public class ResearcherAgent : AgentBase
 
             try
             {
-                var htmlContent = await _github.GetFileContentAsync(htmlPath, ct: ct);
+                var htmlContent = await _repoContent.GetFileContentAsync(htmlPath, ct: ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
                 var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
@@ -1088,7 +1101,7 @@ public class ResearcherAgent : AgentBase
                 }
 
                 var screenshotPath = $"docs/design-screenshots/{stem}.png";
-                var imageUrl = await _github.CommitBinaryFileAsync(
+                var imageUrl = await _repoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {stem}.png (rendered from {htmlPath})",
                     "main", ct);
@@ -1136,7 +1149,7 @@ public class ResearcherAgent : AgentBase
         {
             try
             {
-                var htmlContent = await _github.GetFileContentAsync(path, ct: ct);
+                var htmlContent = await _repoContent.GetFileContentAsync(path, ct: ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
                 var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
@@ -1146,7 +1159,7 @@ public class ResearcherAgent : AgentBase
                 // Commit the screenshot to the repo
                 var fileName = Path.GetFileNameWithoutExtension(path);
                 var screenshotPath = $"docs/design-screenshots/{fileName}.png";
-                var imageUrl = await _github.CommitBinaryFileAsync(
+                var imageUrl = await _repoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {fileName}.png (rendered from {path})",
                     "main", ct);
