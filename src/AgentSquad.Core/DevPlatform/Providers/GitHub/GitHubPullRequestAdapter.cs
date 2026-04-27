@@ -109,4 +109,44 @@ public sealed class GitHubPullRequestAdapter : IPullRequestService
     {
         return await _github.RebaseBranchOnMainAsync(prId, ct);
     }
+
+    public async Task LinkWorkItemAsync(int prId, int workItemId, CancellationToken ct = default)
+    {
+        // GitHub: ensure PR body contains "Closes #X" for auto-close on merge.
+        // If already present, this is a no-op (idempotent).
+        var pr = await _github.GetPullRequestAsync(prId, ct);
+        if (pr is null) return;
+
+        var closePattern = $"Closes #{workItemId}";
+        var body = pr.Body ?? "";
+
+        if (body.Contains(closePattern, StringComparison.OrdinalIgnoreCase))
+            return; // Already linked
+
+        var updatedBody = string.IsNullOrWhiteSpace(body)
+            ? closePattern
+            : $"{body}\n\n{closePattern}";
+
+        await _github.UpdatePullRequestAsync(prId, body: updatedBody, ct: ct);
+    }
+
+    public async Task<IReadOnlyList<int>> GetLinkedWorkItemIdsAsync(int prId, CancellationToken ct = default)
+    {
+        // GitHub: parse "Closes #X", "Fixes #X", "Resolves #X" patterns from PR body
+        var pr = await _github.GetPullRequestAsync(prId, ct);
+        if (pr?.Body is null) return Array.Empty<int>();
+
+        var ids = new List<int>();
+        var matches = System.Text.RegularExpressions.Regex.Matches(
+            pr.Body,
+            @"(?:closes|fixes|resolves)\s+#(\d+)",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+
+        foreach (System.Text.RegularExpressions.Match match in matches)
+        {
+            if (int.TryParse(match.Groups[1].Value, out var id))
+                ids.Add(id);
+        }
+        return ids;
+    }
 }

@@ -194,6 +194,59 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
         return Task.FromResult(false);
     }
 
+    public async Task LinkWorkItemAsync(int prId, int workItemId, CancellationToken ct = default)
+    {
+        // ADO: Link work item to PR via the work item's ArtifactLink relation.
+        // The artifact URI format for PRs: vstfs:///Git/PullRequestId/{projectId}%2F{repoId}%2F{prId}
+        // Since we may not have GUIDs, use the simpler approach: query the PR's work items endpoint.
+        // ADO also supports adding via the work item patch API with a vstfs artifact link.
+        // We'll use the project/repo names in the URL path format that ADO accepts.
+        var prUrl = $"{BaseUrl}{Project}/_apis/git/repositories/{Repository}/pullrequests/{prId}";
+        var url = BuildUrl($"{Project}/_apis/wit/workitems/{workItemId}");
+        var patchDoc = new List<object>
+        {
+            new
+            {
+                op = "add",
+                path = "/relations/-",
+                value = new
+                {
+                    rel = "ArtifactLink",
+                    url = prUrl,
+                    attributes = new { name = "Pull Request" }
+                }
+            }
+        };
+
+        try
+        {
+            await PatchAsync<object>(url, patchDoc, ct, "application/json-patch+json");
+            _logger.LogInformation("Linked ADO work item #{WorkItemId} to PR #{PrId}", workItemId, prId);
+        }
+        catch (HttpRequestException ex) when (ex.Message.Contains("already exists", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("VS403654", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("relation already exists", StringComparison.OrdinalIgnoreCase))
+        {
+            // Link already exists — idempotent success
+            _logger.LogDebug("Work item #{WorkItemId} already linked to PR #{PrId}", workItemId, prId);
+        }
+    }
+
+    public async Task<IReadOnlyList<int>> GetLinkedWorkItemIdsAsync(int prId, CancellationToken ct = default)
+    {
+        var url = BuildUrl($"{Project}/_apis/git/repositories/{Repository}/pullrequests/{prId}/workitems");
+        var response = await GetAsync<AdoListResponse<AdoPrWorkItemRef>>(url, ct);
+        if (response?.Value is null) return Array.Empty<int>();
+
+        var ids = new List<int>();
+        foreach (var item in response.Value)
+        {
+            if (int.TryParse(item.Id, out var id))
+                ids.Add(id);
+        }
+        return ids;
+    }
+
     private async Task AddLabelsInternalAsync(int prNumber, IReadOnlyList<string> labels, CancellationToken ct)
     {
         var url = BuildUrl($"{Project}/_apis/git/repositories/{Repository}/pullrequests/{prNumber}/labels");

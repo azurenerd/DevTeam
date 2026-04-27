@@ -3,6 +3,7 @@ using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Decisions;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -52,6 +53,7 @@ public class TestEngineerAgent : AgentBase
 
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
+    private readonly IPullRequestService _prService;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
@@ -100,6 +102,7 @@ public class TestEngineerAgent : AgentBase
         AgentIdentity identity,
         IMessageBus messageBus,
         IGitHubService github,
+        IPullRequestService prService,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
@@ -121,6 +124,7 @@ public class TestEngineerAgent : AgentBase
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
+        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));

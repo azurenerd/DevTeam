@@ -34,4 +34,18 @@ public interface IPullRequestService
     Task<bool> IsBehindBaseAsync(int prId, CancellationToken ct = default);
     Task<bool> UpdateBranchAsync(int prId, CancellationToken ct = default);
     Task<bool> RebaseBranchAsync(int prId, CancellationToken ct = default);
+
+    // PR ↔ Work Item linking
+    /// <summary>
+    /// Link a work item to a pull request.
+    /// GitHub: ensures "Closes #X" in PR body. ADO: creates ArtifactLink relation.
+    /// Idempotent — safe to call multiple times for the same pair.
+    /// </summary>
+    Task LinkWorkItemAsync(int prId, int workItemId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Get work item IDs linked to a pull request.
+    /// GitHub: parses "Closes #X" from PR body. ADO: queries PR work item links.
+    /// </summary>
+    Task<IReadOnlyList<int>> GetLinkedWorkItemIdsAsync(int prId, CancellationToken ct = default);
 }

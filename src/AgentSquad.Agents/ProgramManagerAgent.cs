@@ -5,6 +5,8 @@ using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -23,6 +25,9 @@ public class ProgramManagerAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
     private readonly IGitHubService _github;
+    private readonly IPullRequestService _prService;
+    private readonly IWorkItemService? _workItemService;
+    private readonly MergeCloseoutService? _mergeCloseout;
     private readonly IssueWorkflow _issueWorkflow;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
@@ -62,6 +67,7 @@ public class ProgramManagerAgent : AgentBase
         AgentIdentity identity,
         IMessageBus messageBus,
         IGitHubService github,
+        IPullRequestService prService,
         IssueWorkflow issueWorkflow,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
@@ -79,11 +85,16 @@ public class ProgramManagerAgent : AgentBase
         RoleContextProvider? roleContextProvider = null,
         AgentTeamComposer? teamComposer = null,
         SMEAgentDefinitionService? definitionService = null,
-        DecisionGateService? decisionGate = null)
+        DecisionGateService? decisionGate = null,
+        MergeCloseoutService? mergeCloseout = null,
+        IWorkItemService? workItemService = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
         _github = github ?? throw new ArgumentNullException(nameof(github));
+        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
+        _workItemService = workItemService;
+        _mergeCloseout = mergeCloseout;
         _issueWorkflow = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
@@ -992,7 +1003,7 @@ public class ProgramManagerAgent : AgentBase
             // Phase 3 polling: also scan for PRs with tests-added that PM hasn't reviewed yet
             if (_config.Workspace.IsInlineTestWorkflow)
             {
-                var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+                var openPRs = await _prService.ListOpenAsync(ct);
                 foreach (var openPr in openPRs)
                 {
                     if (_reviewedPrHeadShas.TryGetValue(openPr.Number, out var reviewedSha)
@@ -1342,7 +1353,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+            var openPRs = await _prService.ListOpenAsync(ct);
 
             // If there are open PRs that are NOT yet PM-approved, reviews are still pending
             var unapprovedPrs = openPRs
@@ -1366,7 +1377,7 @@ public class ProgramManagerAgent : AgentBase
             {
                 // Only declare "all merged" if at least one PR was actually merged.
                 // After a mini-reset there are 0 open PRs but nothing has been merged yet.
-                var mergedPRs = await _github.GetMergedPullRequestsAsync(ct);
+                var mergedPRs = await _prService.ListMergedAsync(ct);
                 if (mergedPRs.Count > 0)
                 {
                     Logger.LogInformation("No open PRs remain — all merged ({Count} merged). Signaling reviews complete", mergedPRs.Count);
@@ -1451,10 +1462,16 @@ public class ProgramManagerAgent : AgentBase
                     // Close them once all PRs are merged (no open code PRs remain).
                     if (_config.Limits.SinglePRMode)
                     {
-                        var openPRs = await _github.GetOpenPullRequestsAsync(ct);
-                        var mergedPRs = await _github.GetMergedPullRequestsAsync(ct);
+                        var openPRs = await _prService.ListOpenAsync(ct);
+                        var mergedPRs = await _prService.ListMergedAsync(ct);
                         if (openPRs.Count == 0 && mergedPRs.Count > 0)
                         {
+                            // Close linked work items for all merged PRs (ADO parity)
+                            if (_mergeCloseout is not null)
+                            {
+                                foreach (var mergedPr in mergedPRs)
+                                    await _mergeCloseout.CloseLinkedWorkItemsAsync(mergedPr.Number, ct);
+                            }
                             await _github.AddIssueCommentAsync(issue.Number,
                                 $"✅ **PM Final Review — APPROVED (SinglePRMode)**\n\n" +
                                 "All engineering work has been merged. Closing as complete.", ct);

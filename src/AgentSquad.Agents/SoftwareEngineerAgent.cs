@@ -6,6 +6,7 @@ using AgentSquad.Core.Agents.Reasoning;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -40,6 +41,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private readonly SmeDefinitionGenerator? _smeGenerator;
     private readonly AgentSpawnManager? _spawnManager;
     private readonly DecisionGateService? _decisionGate;
+
+    // Platform abstraction for post-merge close-out (works for both GitHub and ADO)
+    private readonly MergeCloseoutService? _mergeCloseout;
 
     // Strategy Framework (Phase 1) — optional, opt-in via StrategyFrameworkConfig.Enabled.
     private readonly StrategyOrchestrator? _strategyOrchestrator;
@@ -152,7 +156,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         StrategyOrchestrator? strategyOrchestrator = null,
         WinnerApplyService? winnerApply = null,
         IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null,
-        StrategyTaskStepBridge? strategyStepBridge = null)
+        StrategyTaskStepBridge? strategyStepBridge = null,
+        MergeCloseoutService? mergeCloseout = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker)
@@ -169,6 +174,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         _winnerApply = winnerApply;
         _strategyConfig = strategyConfig;
         _strategyStepBridge = strategyStepBridge;
+        _mergeCloseout = mergeCloseout;
     }
 
     protected override string GetRoleDisplayName() => "Software Engineer";
@@ -3485,6 +3491,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                             LogActivity("task", $"✅ Approved and merged PR #{pr.Number}: {pr.Title} (human approved)");
                             if (!pr.Title.StartsWith("TestEngineer:", StringComparison.OrdinalIgnoreCase))
                                 await MarkEngineerTaskDoneAsync(pr, ct);
+                            // Close linked work items via platform abstraction (ADO parity)
+                            if (_mergeCloseout is not null)
+                                await _mergeCloseout.CloseLinkedWorkItemsAsync(pr.Number, ct);
                             await RememberAsync(MemoryType.Action,
                                 $"Reviewed and approved+merged PR #{pr.Number}: {pr.Title}", ct: ct);
                         }
@@ -3503,6 +3512,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         // Mark the engineering task Done via issue manager (skip test PRs)
                         if (!pr.Title.StartsWith("TestEngineer:", StringComparison.OrdinalIgnoreCase))
                             await MarkEngineerTaskDoneAsync(pr, ct);
+                        // Close linked work items via platform abstraction (ADO parity)
+                        if (_mergeCloseout is not null)
+                            await _mergeCloseout.CloseLinkedWorkItemsAsync(pr.Number, ct);
 
                         await RememberAsync(MemoryType.Action,
                             $"Reviewed and approved+merged PR #{pr.Number}: {pr.Title}", ct: ct);
@@ -3666,6 +3678,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                     if (!pr.Title.StartsWith("TestEngineer:", StringComparison.OrdinalIgnoreCase))
                         await MarkEngineerTaskDoneAsync(pr, ct);
+                    // Close linked work items via platform abstraction (ADO parity)
+                    if (_mergeCloseout is not null)
+                        await _mergeCloseout.CloseLinkedWorkItemsAsync(pr.Number, ct);
 
                     await RememberAsync(MemoryType.Action,
                         $"Merged tested PR #{pr.Number}: {pr.Title}", ct: ct);

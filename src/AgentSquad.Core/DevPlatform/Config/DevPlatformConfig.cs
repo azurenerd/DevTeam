@@ -88,4 +88,10 @@ public class AzureDevOpsConfig
     /// Keys: "Open", "InProgress", "Blocked", "Resolved". Values: ADO states.
     /// </summary>
     public Dictionary<string, string> StateMappings { get; set; } = new();
+
+    /// <summary>
+    /// Terminal state name for closing work items. Defaults to "Closed".
+    /// Override for process templates that use "Done" (Scrum) or "Resolved" (CMMI).
+    /// </summary>
+    public string ClosedStateName { get; set; } = "Closed";
 }

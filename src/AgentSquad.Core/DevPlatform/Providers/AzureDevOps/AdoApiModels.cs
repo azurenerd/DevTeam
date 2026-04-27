@@ -239,3 +239,12 @@ internal record AdoPrFileChange
     public string Path { get; init; } = "";
     public string ChangeType { get; init; } = "";
 }
+
+/// <summary>
+/// Work item reference returned from the PR work items endpoint.
+/// </summary>
+internal record AdoPrWorkItemRef
+{
+    public string Id { get; init; } = "";
+    public string? Url { get; init; }
+}

@@ -234,12 +234,14 @@ public sealed class AdoWorkItemService : AdoHttpClientBase, IWorkItemService
         if (mappings is not null && mappings.TryGetValue(agentSquadState, out var adoState))
             return adoState;
 
+        var closedState = _platformConfig.AzureDevOps?.ClosedStateName ?? "Closed";
+
         return agentSquadState.ToLowerInvariant() switch
         {
             "open" => "New",
             "inprogress" or "in_progress" => "Active",
             "blocked" => "Active",
-            "closed" or "resolved" => "Closed",
+            "closed" or "resolved" or "done" => closedState,
             _ => "New"
         };
     }
