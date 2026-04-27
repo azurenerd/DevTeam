@@ -192,6 +192,10 @@ else if (_config is not null)
                                     <button class="config-secret-toggle" @onclick="() => _showAdoToken = !_showAdoToken"
                                         title="@(_showAdoToken ? "Hide token" : "Show token")">@(_showAdoToken ? "🙈" : "👁️")</button>
                                 </div>
+                                @if (_adoPatIsFromSecrets)
+                                {
+                                    <p class="config-hint">🔐 Token loaded from <strong>User Secrets</strong> (not stored in appsettings.json). Manage via: <code>dotnet user-secrets set "AgentSquad:DevPlatform:AzureDevOps:Pat" "your-pat"</code></p>
+                                }
                             </div>
                         }
                         else
@@ -1904,6 +1908,7 @@ else if (_config is not null)
     // Secret visibility
     private bool _showToken;
     private bool _patIsFromSecrets;
+    private bool _adoPatIsFromSecrets;
 
     // Copilot reasoning effort helper (nullable string)
     private string _copilotReasoningEffort
@@ -1955,6 +1960,7 @@ else if (_config is not null)
 
             // Detect if PAT came from User Secrets (non-empty PAT but appsettings.json has empty value)
             _patIsFromSecrets = !string.IsNullOrEmpty(_config.Project.GitHubToken);
+            _adoPatIsFromSecrets = !string.IsNullOrEmpty(_config.DevPlatform?.AzureDevOps?.Pat);
         }
         catch (Exception ex)
         {

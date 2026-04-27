@@ -230,6 +230,14 @@ public sealed class ConfigurationService : IConfigurationService
                 }
             }
         }
+
+        // Strip ADO PAT from DevPlatform section
+        if (config["DevPlatform"] is JsonObject devPlatform &&
+            devPlatform["AzureDevOps"] is JsonObject azureDevOps &&
+            azureDevOps.ContainsKey("Pat"))
+        {
+            azureDevOps["Pat"] = "";
+        }
     }
 
     /// <summary>
