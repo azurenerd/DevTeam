@@ -4,6 +4,7 @@ using AgentSquad.Core.Agents.Decisions;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -26,6 +27,10 @@ public abstract class EngineerAgentBase : AgentBase
 {
     protected readonly IMessageBus MessageBus;
     protected readonly IGitHubService GitHub;
+    protected readonly IPullRequestService PrService;
+    protected readonly IWorkItemService WorkItemService;
+    protected readonly IRepositoryContentService RepoContent;
+    protected readonly IReviewService ReviewService;
     protected readonly PullRequestWorkflow PrWorkflow;
     protected readonly IssueWorkflow IssueWf;
     protected readonly ProjectFileManager ProjectFiles;
@@ -90,7 +95,11 @@ public abstract class EngineerAgentBase : AgentBase
         Core.Metrics.BuildTestMetrics? metrics = null,
         PlaywrightRunner? playwrightRunner = null,
         DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null)
+        IAgentTaskTracker? taskTracker = null,
+        IPullRequestService? prService = null,
+        IWorkItemService? workItemService = null,
+        IRepositoryContentService? repoContent = null,
+        IReviewService? reviewService = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -109,6 +118,10 @@ public abstract class EngineerAgentBase : AgentBase
         ScreenshotRunner = playwrightRunner;
         DecisionGate = decisionGate;
         _taskTracker = taskTracker!;
+        PrService = prService!;
+        WorkItemService = workItemService!;
+        RepoContent = repoContent!;
+        ReviewService = reviewService!;
     }
 
     #region Lifecycle

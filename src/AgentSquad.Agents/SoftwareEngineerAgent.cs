@@ -7,6 +7,8 @@ using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -121,7 +123,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// </summary>
     private async Task<bool> HasAnyPeReviewedAsync(int prNumber, CancellationToken ct)
     {
-        var comments = await GitHub.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await ReviewService.GetCommentsAsync(prNumber, ct);
         return comments.Any(c =>
             c.Body.Contains("[SoftwareEngineer]", StringComparison.OrdinalIgnoreCase) ||
             c.Body.Contains("[SoftwareEngineer ", StringComparison.OrdinalIgnoreCase));
@@ -157,10 +159,15 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         WinnerApplyService? winnerApply = null,
         IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null,
         StrategyTaskStepBridge? strategyStepBridge = null,
-        MergeCloseoutService? mergeCloseout = null)
+        MergeCloseoutService? mergeCloseout = null,
+        IPullRequestService? prService = null,
+        IWorkItemService? workItemService = null,
+        IRepositoryContentService? repoContent = null,
+        IReviewService? reviewService = null)
         : base(identity, messageBus, github, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker)
+               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
+               prService, workItemService, repoContent, reviewService)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
@@ -481,8 +488,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Now uses the _architectureReady flag set by the ArchitectureComplete bus message.
             if (_architectureReady)
             {
-                var enhancements = await GitHub.GetIssuesByLabelAsync(
-                    IssueWorkflow.Labels.Enhancement, ct);
+                var enhancements = await WorkItemService.ListByLabelAsync(
+                    IssueWorkflow.Labels.Enhancement, ct: ct);
                 if (_planningSignalReceived || enhancements.Count > 0)
                 {
                     Logger.LogInformation(
@@ -499,8 +506,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 && architectureDoc.Length > 200
                 && architectureDoc.Contains("## System Components", StringComparison.OrdinalIgnoreCase))
             {
-                var enhancementIssues = await GitHub.GetIssuesByLabelAsync(
-                    IssueWorkflow.Labels.Enhancement, ct);
+                var enhancementIssues = await WorkItemService.ListByLabelAsync(
+                    IssueWorkflow.Labels.Enhancement, ct: ct);
                 if (enhancementIssues.Count > 0)
                 {
                     Logger.LogInformation(
@@ -532,8 +539,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private async Task CreateEngineeringPlanAsync(CancellationToken ct)
     {
         // Set enhancement scope FIRST so all subsequent LoadTasksAsync calls filter stale tasks
-        var scopeEnhancements = await GitHub.GetIssuesByLabelAsync(
-            IssueWorkflow.Labels.Enhancement, ct);
+        var scopeEnhancements = await WorkItemService.ListByLabelAsync(
+            IssueWorkflow.Labels.Enhancement, ct: ct);
         if (scopeEnhancements.Count > 0)
         {
             _taskManager.SetEnhancementScope(scopeEnhancements.Select(i => i.Number));
@@ -601,8 +608,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     Logger.LogInformation("State recovery: all {Count} non-integration tasks are Done — setting _allTasksComplete", restoredNonIntegration.Count);
 
                     // Check if integration PR was already created and/or merged
-                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
-                    var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+                    var mergedPRs = await PrService.ListMergedAsync(ct);
+                    var openPRs = await PrService.ListOpenAsync(ct);
                     var allPRs = mergedPRs.Concat(openPRs).ToList();
                     var integrationPR = allPRs.FirstOrDefault(pr =>
                         pr.Title.Contains("Integration", StringComparison.OrdinalIgnoreCase) ||
@@ -889,7 +896,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // Include files from already-merged PRs so the plan doesn't recreate them
         try
         {
-            var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+            var mergedPRs = await PrService.ListMergedAsync(ct);
             if (mergedPRs.Count > 0)
             {
                 var mergedFileSummary = new System.Text.StringBuilder();
@@ -899,7 +906,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                 foreach (var mpr in mergedPRs.Take(10))
                 {
-                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mpr.Number, ct);
+                    var prFiles = await PrService.GetChangedFilesAsync(mpr.Number, ct);
                     if (prFiles.Count > 0)
                     {
                         mergedFileSummary.AppendLine($"### PR #{mpr.Number}: {mpr.Title}");
@@ -1219,13 +1226,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // does not mean the task is complete. The AI planner was already told about merged files.
         try
         {
-            var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+            var mergedPRs = await PrService.ListMergedAsync(ct);
             if (mergedPRs.Count > 0)
             {
                 var allMergedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var mpr in mergedPRs.Take(10))
                 {
-                    var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mpr.Number, ct);
+                    var prFiles = await PrService.GetChangedFilesAsync(mpr.Number, ct);
                     foreach (var f in prFiles)
                         allMergedFiles.Add(f.ToLowerInvariant().Replace('\\', '/'));
                 }
@@ -1290,7 +1297,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 // Update the issue body with dependency issue numbers
                 var updatedBody = EngineeringTaskIssueManager.BuildIssueBodyWithDeps(task, depIssueNumbers);
-                await GitHub.UpdateIssueAsync(task.IssueNumber.Value, body: updatedBody, ct: ct);
+                await WorkItemService.UpdateAsync(task.IssueNumber.Value, body: updatedBody, ct: ct);
             }
         }
 
@@ -1312,7 +1319,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         }
         else
         {
-            await ValidateEnhancementCoverageAsync(enhancementIssues, ct);
+            await ValidateEnhancementCoverageAsync(enhancementIssues.ToAgentIssues(), ct);
         }
 
         // Validate engineering plan structure: wave dependencies, issue links, design references
@@ -1430,13 +1437,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var mergedFileContext = "";
             try
             {
-                var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                var mergedPRs = await PrService.ListMergedAsync(ct);
                 if (mergedPRs.Count > 0)
                 {
                     var mergedFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var mpr in mergedPRs.Take(10))
                     {
-                        var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mpr.Number, ct);
+                        var prFiles = await PrService.GetChangedFilesAsync(mpr.Number, ct);
                         foreach (var f in prFiles) mergedFiles.Add(f);
                     }
                     if (mergedFiles.Count > 0)
@@ -1489,7 +1496,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         .Replace("COVERED", "").Replace("covered", "")
                         .Trim().TrimStart('-', ':', ' ', '\n');
 
-                    await GitHub.AddIssueCommentAsync(enhancement.Number,
+                    await WorkItemService.AddCommentAsync(enhancement.Number,
                         $"📋 **Software Engineer — Coverage Analysis**\n\n" +
                         $"This user story does not have a dedicated engineering task, but its requirements are " +
                         $"addressed by existing tasks in the engineering plan:\n\n{justification}",
@@ -1677,7 +1684,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 var firstTaskIssue = tasks.FirstOrDefault(t => t.IssueNumber.HasValue);
                 if (firstTaskIssue?.IssueNumber is not null)
                 {
-                    await GitHub.AddIssueCommentAsync(firstTaskIssue.IssueNumber.Value,
+                    await WorkItemService.AddCommentAsync(firstTaskIssue.IssueNumber.Value,
                         report.ToString(), ct);
                 }
             }
@@ -1697,8 +1704,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         try
         {
             // Set enhancement scope to filter out stale tasks from prior runs
-            var enhancements = await GitHub.GetIssuesByLabelAsync(
-                IssueWorkflow.Labels.Enhancement, ct);
+            var enhancements = await WorkItemService.ListByLabelAsync(
+                IssueWorkflow.Labels.Enhancement, ct: ct);
             if (enhancements.Count > 0)
                 _taskManager.SetEnhancementScope(enhancements.Select(i => i.Number));
 
@@ -1749,7 +1756,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var trackedIssueNums = new HashSet<int>(_agentAssignments.Values);
 
             // Get all open PRs once to check against
-            var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+            var openPRs = await PrService.ListOpenAsync(ct);
             var openPrIssueRefs = new HashSet<int>();
             foreach (var pr in openPRs)
             {
@@ -2217,11 +2224,11 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 // The AI code generator is told about existing files and will modify rather than recreate.
                 try
                 {
-                    var mergedPRs = await GitHub.GetMergedPullRequestsAsync(ct);
+                    var mergedPRs = await PrService.ListMergedAsync(ct);
                     var mergedFileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                     foreach (var mergedPr in mergedPRs.Take(10))
                     {
-                        var prFiles = await GitHub.GetPullRequestChangedFilesAsync(mergedPr.Number, ct);
+                        var prFiles = await PrService.GetChangedFilesAsync(mergedPr.Number, ct);
                         foreach (var f in prFiles)
                             mergedFileSet.Add(f.ToLowerInvariant().Replace('\\', '/'));
                     }
@@ -2333,7 +2340,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Build a synthetic issue for the step generation
             AgentIssue? sourceIssue = null;
             if (task.IssueNumber.HasValue)
-                sourceIssue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct);
+                sourceIssue = (await WorkItemService.GetAsync(task.IssueNumber.Value, ct))?.ToAgentIssue();
 
             var syntheticIssue = sourceIssue ?? new AgentIssue
             {
@@ -2437,7 +2444,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                     _taskTracker.FailStep(execStepId, "Blocked by build errors");
                                     Logger.LogWarning("SE step {Step}/{Total} blocked by build errors on PR #{PrNumber}",
                                         stepNumber, steps.Count, pr.Number);
-                                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                                    await ReviewService.AddCommentAsync(pr.Number,
                                         $"❌ **Build Blocked:** Step {stepNumber}/{steps.Count} could not produce a buildable commit.", ct);
                                     return;
                                 }
@@ -2510,7 +2517,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         {
                             _taskTracker.FailStep(implStepId, "Blocked by build errors");
                             Logger.LogWarning("SE single-pass implementation blocked by build errors on PR #{PrNumber}", pr.Number);
-                            await GitHub.AddPullRequestCommentAsync(pr.Number,
+                            await ReviewService.AddCommentAsync(pr.Number,
                                 $"❌ **Build Blocked:** Single-pass implementation could not produce a buildable commit.", ct);
                             return;
                         }
@@ -2552,7 +2559,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         if (!string.IsNullOrEmpty(placeholderWarning))
         {
             Logger.LogWarning("D1 guard: PR #{Pr} contains forbidden placeholder strings for an integration task; not marking ready.", pr.Number);
-            await GitHub.AddPullRequestCommentAsync(pr.Number,
+            await ReviewService.AddCommentAsync(pr.Number,
                 $"[SoftwareEngineer] ⚠️ Self-check blocked ready-for-review:\n\n{placeholderWarning}\n\n" +
                 "This task claims to wire/compose/integrate/finalize a UI component, but the PR still contains " +
                 "literal placeholder strings. Replace the placeholder strings with the real component invocation " +
@@ -2614,7 +2621,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         try
         {
-            var files = await GitHub.GetPullRequestChangedFilesAsync(pr.Number, ct);
+            var files = await PrService.GetChangedFilesAsync(pr.Number, ct);
             var uiFiles = files.Where(f =>
             {
                 // D1: exclude test files to avoid false blocks on guard/meta tests that
@@ -2636,7 +2643,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var violations = new List<string>();
             foreach (var file in uiFiles)
             {
-                var content = await GitHub.GetFileContentAsync(file, pr.HeadBranch, ct);
+                var content = await RepoContent.GetFileContentAsync(file, pr.HeadBranch, ct);
                 if (string.IsNullOrEmpty(content)) continue;
                 var lower = content.ToLowerInvariant();
 
@@ -2742,7 +2749,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             AgentIssue? sourceIssue = null;
             if (task.IssueNumber.HasValue)
             {
-                try { sourceIssue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct); } catch { /* best-effort */ }
+                try { sourceIssue = (await WorkItemService.GetAsync(task.IssueNumber.Value, ct))?.ToAgentIssue(); } catch { /* best-effort */ }
             }
             if (sourceIssue is not null)
                 issueContext = $"\n\n## GitHub Issue #{sourceIssue.Number}: {sourceIssue.Title}\n{sourceIssue.Body}";
@@ -2934,7 +2941,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (!currentBody.Contains("winner-strategy:", StringComparison.OrdinalIgnoreCase))
                 {
                     var markerComment = $"\n\n<!-- winner-strategy: {winner.StrategyId} -->";
-                    await GitHub.UpdatePullRequestAsync(pr.Number, body: currentBody + markerComment, ct: ct);
+                    await PrService.UpdateAsync(pr.Number, body: currentBody + markerComment, ct: ct);
                 }
             }
             catch (Exception markerEx)
@@ -3263,7 +3270,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         try
         {
-            var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+            var openPRs = await PrService.ListOpenAsync(ct);
             var discovered = 0;
 
             foreach (var pr in openPRs)
@@ -3345,7 +3352,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     continue;
                 }
 
-                var pr = await GitHub.GetPullRequestAsync(prNumber, ct);
+                var pr = (await PrService.GetAsync(prNumber, ct))?.ToAgentPR();
                 if (pr is null)
                     continue;
 
@@ -3391,13 +3398,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     }
                     else
                     {
-                        IReadOnlyList<InlineReviewComment> inlineComments;
+                        IReadOnlyList<PlatformInlineComment> inlineComments;
                         (approved, reviewBody, inlineComments) = await EvaluatePrQualityAsync(pr, ct);
 
                         // Submit inline file comments if we have any and the feature is enabled
                         if (inlineComments.Count > 0 && Config.Review.EnableInlineComments)
                         {
-                            await SubmitInlineReviewCommentsAsync(prNumber, reviewBody ?? "", approved, inlineComments, ct);
+                            await SubmitPlatformInlineCommentsAsync(prNumber, reviewBody ?? "", approved, inlineComments, ct);
                         }
                     }
                 }
@@ -3431,7 +3438,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     {
                         try
                         {
-                            await GitHub.AddPullRequestReviewAsync(prNumber,
+                            await ReviewService.AddReviewAsync(prNumber,
                                 $"✅ **[SoftwareEngineer] APPROVED**\n\n{reviewBody}", "APPROVE", ct);
                         }
                         catch (Exception ex)
@@ -3587,7 +3594,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         try
         {
-            var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+            var openPRs = (await PrService.ListOpenAsync(ct)).ToAgentPRs();
 
             foreach (var pr in openPRs)
             {
@@ -3614,7 +3621,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 UpdateStatus(AgentStatus.Working, $"Reviewing tests on PR #{pr.Number}");
 
                 // Lightweight test review: check that TE actually added test files
-                var changedFiles = await GitHub.GetPullRequestChangedFilesAsync(pr.Number, ct);
+                var changedFiles = await PrService.GetChangedFilesAsync(pr.Number, ct);
                 var testFiles = changedFiles
                     .Where(f => f.Contains("test", StringComparison.OrdinalIgnoreCase) ||
                                 f.Contains("Test", StringComparison.Ordinal))
@@ -3626,14 +3633,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     Logger.LogInformation(
                         "PR #{Number} has tests-added+pm-approved but no test files (TE build failed) — merging anyway",
                         pr.Number);
-                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    await ReviewService.AddCommentAsync(pr.Number,
                         "✅ **[SoftwareEngineer] Merge Review** — TE attempted testing but build failed. " +
                         "PM has approved the code. Proceeding with merge.", ct);
                 }
                 else
                 {
                     // Post test review approval
-                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    await ReviewService.AddCommentAsync(pr.Number,
                         $"✅ **[SoftwareEngineer] Tests Reviewed** — {testFiles.Count} test file(s) verified. Merging.", ct);
                 }
 
@@ -3823,18 +3830,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     Logger.LogInformation("SE PR #{PrNumber} has all approvals, merging", pr.Number);
                     try
                     {
-                        await GitHub.MergePullRequestAsync(pr.Number,
+                        await PrService.MergeAsync(pr.Number,
                             $"Merged after dual approval from {string.Join(" and ", approved)}", ct);
                     }
                     catch (Octokit.PullRequestNotMergeableException)
                     {
                         Logger.LogWarning("SE PR #{PrNumber} not mergeable, syncing branch with main", pr.Number);
-                        var synced = await GitHub.UpdatePullRequestBranchAsync(pr.Number, ct);
+                        var synced = await PrService.UpdateBranchAsync(pr.Number, ct);
                         if (!synced)
                         {
                             // Standard sync failed — try force-rebase onto main
                             Logger.LogWarning("SE PR #{PrNumber} branch sync failed — attempting force-rebase", pr.Number);
-                            synced = await GitHub.RebaseBranchOnMainAsync(pr.Number, ct);
+                            synced = await PrService.RebaseBranchAsync(pr.Number, ct);
                         }
 
                         if (synced)
@@ -3842,7 +3849,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                             await Task.Delay(5000, ct);
                             try
                             {
-                                await GitHub.MergePullRequestAsync(pr.Number,
+                                await PrService.MergeAsync(pr.Number,
                                     $"Merged after branch sync and dual approval from {string.Join(" and ", approved)}", ct);
                             }
                             catch (Exception retryEx)
@@ -3956,7 +3963,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         try
         {
-            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            var pr = await PrService.GetAsync(CurrentPrNumber.Value, ct);
             return pr is not null && PullRequestWorkflow.Labels.IsPastImplementation(pr.Labels);
         }
         catch
@@ -3975,7 +3982,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         if (!task.IssueNumber.HasValue)
             return null;
 
-        var openPRs = await GitHub.GetOpenPullRequestsAsync(ct);
+        var openPRs = (await PrService.ListOpenAsync(ct)).ToAgentPRs();
 
         // Primary match: PR body contains "Closes #<issue>"
         foreach (var pr in openPRs)
@@ -4014,7 +4021,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         try
         {
-            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            var pr = (await PrService.GetAsync(CurrentPrNumber.Value, ct))?.ToAgentPR();
             if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
             {
                 CurrentPrNumber = null;
@@ -4026,7 +4033,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var issueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body);
             AgentIssue? sourceIssue = null;
             if (issueNumber.HasValue)
-                sourceIssue = await GitHub.GetIssueAsync(issueNumber.Value, ct);
+                sourceIssue = (await WorkItemService.GetAsync(issueNumber.Value, ct))?.ToAgentIssue();
 
             // Get existing files to understand what's already been done
             var existingFiles = await GetPrFileListAsync(pr.Number, ct);
@@ -4093,7 +4100,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     if (!committed)
                     {
                         Logger.LogWarning("SE single-pass continuation blocked by build errors on PR #{PrNumber}", pr.Number);
-                        await GitHub.AddPullRequestCommentAsync(pr.Number,
+                        await ReviewService.AddCommentAsync(pr.Number,
                             $"❌ **Build Blocked:** Single-pass continuation could not produce a buildable commit.", ct);
                         return;
                     }
@@ -4203,7 +4210,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         {
                             Logger.LogWarning("SE rework step {Step}/{Total} blocked by build errors on PR #{PrNumber}",
                                 stepNumber, steps.Count, pr.Number);
-                            await GitHub.AddPullRequestCommentAsync(pr.Number,
+                            await ReviewService.AddCommentAsync(pr.Number,
                                 $"❌ **Build Blocked:** Rework step {stepNumber}/{steps.Count} could not produce a buildable commit.", ct);
                             return;
                         }
@@ -4263,7 +4270,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             if (CurrentPrNumber is null)
                 return;
 
-            var pr = await GitHub.GetPullRequestAsync(CurrentPrNumber.Value, ct);
+            var pr = (await PrService.GetAsync(CurrentPrNumber.Value, ct))?.ToAgentPR();
             if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
                 return;
 
@@ -4280,7 +4287,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 return;
 
             // Don't recover if the last comment is a build-blocked message — no code was committed
-            var comments = await GitHub.GetPullRequestCommentsAsync(CurrentPrNumber.Value, ct);
+            var comments = await ReviewService.GetCommentsAsync(CurrentPrNumber.Value, ct);
             var lastComment = comments.LastOrDefault();
             if (lastComment?.Body?.Contains("Build Blocked", StringComparison.OrdinalIgnoreCase) == true)
             {
@@ -4339,7 +4346,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         try
         {
-            var pr = await GitHub.GetPullRequestAsync(prNumber, ct);
+            var pr = await PrService.GetAsync(prNumber, ct);
             if (pr is not null && string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
                 return;
 
@@ -4553,7 +4560,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             Logger.LogWarning(
                 "Task (issue {IssueKey}) already retried {Retries} time(s) for conflicts — giving up",
                 retryKey, retries);
-            await GitHub.AddPullRequestCommentAsync(pr.Number,
+            await ReviewService.AddCommentAsync(pr.Number,
                 $"⛔ **Permanently blocked** — This task has been closed and recreated {retries} time(s) " +
                 $"but continues to hit merge conflicts. Requires manual intervention.", ct);
             return;
@@ -4568,8 +4575,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 $"The task will be re-implemented on a fresh branch from latest `main`." +
                 $" (retry {retries + 1}/{MaxConflictRetries})";
 
-            await GitHub.AddPullRequestCommentAsync(pr.Number, closeComment, ct);
-            await GitHub.ClosePullRequestAsync(pr.Number, ct);
+            await ReviewService.AddCommentAsync(pr.Number, closeComment, ct);
+            await PrService.CloseAsync(pr.Number, ct);
 
             Logger.LogInformation(
                 "Closed conflicted PR #{PrNumber} ({Title}), will recreate from clean main (retry {Retry}/{Max})",
@@ -4798,7 +4805,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (!committed)
                 {
                     Logger.LogWarning("SE integration PR #{PrNumber} blocked by build errors", pr.Number);
-                    await GitHub.AddPullRequestCommentAsync(pr.Number,
+                    await ReviewService.AddCommentAsync(pr.Number,
                         "❌ **Build Blocked:** Integration fixes could not produce a buildable commit.", ct);
                 }
             }
@@ -4823,7 +4830,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 .Append(PullRequestWorkflow.Labels.TestsAdded)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            await GitHub.UpdatePullRequestAsync(pr.Number, labels: integrationLabels, ct: ct);
+            await PrService.UpdateAsync(pr.Number, labels: integrationLabels, ct: ct);
             Logger.LogInformation("Added tests-added label to integration PR #{PrNumber} (tests ran locally)", pr.Number);
 
             await MessageBus.PublishAsync(new ReviewRequestMessage
@@ -4871,8 +4878,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         {
             try
             {
-                await GitHub.AddIssueCommentAsync(_integrationIssueNumber.Value, comment, ct);
-                await GitHub.CloseIssueAsync(_integrationIssueNumber.Value, ct);
+                await WorkItemService.AddCommentAsync(_integrationIssueNumber.Value, comment, ct);
+                await WorkItemService.CloseAsync(_integrationIssueNumber.Value, ct);
                 Logger.LogInformation("Closed integration issue #{IssueNumber}", _integrationIssueNumber);
             }
             catch (Exception ex)
@@ -5048,7 +5055,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
     #region AI-Assisted Methods
 
-    private async Task<(bool Approved, string? ReviewBody, IReadOnlyList<InlineReviewComment> InlineComments)> EvaluatePrQualityAsync(
+    private async Task<(bool Approved, string? ReviewBody, IReadOnlyList<PlatformInlineComment> InlineComments)> EvaluatePrQualityAsync(
         AgentPullRequest pr, CancellationToken ct)
     {
         try
@@ -5067,7 +5074,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 try
                 {
-                    var issue = await GitHub.GetIssueAsync(issueNumber.Value, ct);
+                    var issue = await WorkItemService.GetAsync(issueNumber.Value, ct);
                     if (issue is not null)
                         issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
                 }
@@ -5318,7 +5325,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             fallbackBody = FilterTruncationComplaints(fallbackBody);
 
             // WS2 parser-hardening: extract inline comments from text-format reviews.
-            // When the LLM prefixes items with "file:line:", synthesize InlineReviewComments
+            // When the LLM prefixes items with "file:line:", synthesize PlatformInlineComments
             // so review feedback lands on the Files-changed tab instead of conversation-only.
             var extractedInline = ExtractInlineCommentsFromText(fallbackBody);
             if (extractedInline.Count > 0)
@@ -5490,9 +5497,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// Matches numbered-list items prefixed with "file.ext:line:" so review feedback lands on
     /// the Files-changed tab even when the LLM doesn't emit structured JSON.
     /// </summary>
-    private static List<InlineReviewComment> ExtractInlineCommentsFromText(string? text)
+    private static List<PlatformInlineComment> ExtractInlineCommentsFromText(string? text)
     {
-        var results = new List<InlineReviewComment>();
+        var results = new List<PlatformInlineComment>();
         if (string.IsNullOrWhiteSpace(text)) return results;
 
         var pattern = @"(?m)^\s*(?:[-*]|\d+\.)?\s*[`""']?([\w./\\\-]+\.[a-zA-Z]{1,8})[`""']?:(\d+):\s*(.+?)(?:\r?\n(?=\s*(?:[-*]|\d+\.))|\r?\n\r?\n|\z)";
@@ -5509,7 +5516,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
             file = file.Replace('\\', '/');
 
-            results.Add(new InlineReviewComment
+            results.Add(new PlatformInlineComment
             {
                 FilePath = file,
                 Line = line,
@@ -5524,7 +5531,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// Parses SE review JSON response into structured components.
     /// Returns null if the response isn't valid JSON.
     /// </summary>
-    private static (bool Approved, string Summary, IReadOnlyList<InlineReviewComment> Comments)? TryParseStructuredSeReview(string text)
+    private static (bool Approved, string Summary, IReadOnlyList<PlatformInlineComment> Comments)? TryParseStructuredSeReview(string text)
     {
         try
         {
@@ -5578,7 +5585,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 ? s.GetString()?.Trim() ?? ""
                 : "";
 
-            var comments = new List<InlineReviewComment>();
+            var comments = new List<PlatformInlineComment>();
             if (root.TryGetProperty("comments", out var commentsArr)
                 && commentsArr.ValueKind == System.Text.Json.JsonValueKind.Array)
             {
@@ -5591,7 +5598,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                     if (!string.IsNullOrEmpty(file) && !string.IsNullOrEmpty(body) && line > 0)
                     {
-                        comments.Add(new InlineReviewComment
+                        comments.Add(new PlatformInlineComment
                         {
                             FilePath = file,
                             Line = line,
@@ -5614,15 +5621,15 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// Tags each comment with [SoftwareEngineer] for ownership tracking.
     /// Falls back gracefully if the GitHub API call fails.
     /// </summary>
-    private async Task SubmitInlineReviewCommentsAsync(
+    private async Task SubmitPlatformInlineCommentsAsync(
         int prNumber, string summary, bool approved,
-        IReadOnlyList<InlineReviewComment> comments, CancellationToken ct)
+        IReadOnlyList<PlatformInlineComment> comments, CancellationToken ct)
     {
         try
         {
             var maxComments = Config.Review.MaxInlineCommentsPerReview;
             var toSubmit = comments.Take(maxComments)
-                .Select(c => new InlineReviewComment
+                .Select(c => new PlatformInlineComment
                 {
                     FilePath = c.FilePath,
                     Line = c.Line,
@@ -5639,7 +5646,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 $"{summary}\n\n" +
                 $"_{toSubmit.Count} inline comment(s) below_";
 
-            await GitHub.CreatePullRequestReviewWithCommentsAsync(
+            await ReviewService.CreateReviewWithInlineCommentsAsync(
                 prNumber, reviewBody, eventType, toSubmit, ct: ct);
 
             Logger.LogInformation(
@@ -5662,7 +5669,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         try
         {
-            var threads = await GitHub.GetPullRequestReviewThreadsAsync(prNumber, ct);
+            var threads = await ReviewService.GetThreadsAsync(prNumber, ct);
             var ownThreads = threads
                 .Where(t => !t.IsResolved && t.Body.Contains("[SoftwareEngineer]", StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -5679,8 +5686,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             foreach (var thread in ownThreads)
             {
                 var replyBody = $"✅ **[SoftwareEngineer] Resolved** — Rework addressed this feedback. Approved.";
-                await GitHub.ReplyAndResolveReviewThreadAsync(
-                    prNumber, thread.Id, thread.NodeId, replyBody, ct);
+                await ReviewService.ResolveThreadAsync(
+                    prNumber, thread.ThreadId, replyBody, ct);
             }
 
             LogActivity("review", $"🔒 Resolved {ownThreads.Count} SE inline review thread(s) on PR #{prNumber}");
@@ -5755,7 +5762,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var issueContext = "";
             if (task.IssueNumber.HasValue)
             {
-                var issue = await GitHub.GetIssueAsync(task.IssueNumber.Value, ct);
+                var issue = await WorkItemService.GetAsync(task.IssueNumber.Value, ct);
                 if (issue is not null)
                     issueContext = $"\n\n## Source Issue #{issue.Number}\n{issue.Body}";
             }
