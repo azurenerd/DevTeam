@@ -203,6 +203,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             try
             {
                 // Priority 1: Process rework feedback from reviewers

@@ -67,35 +67,52 @@ public class AgentSquadWorker : BackgroundService
         Console.WriteLine();
 
         // Try to recover an in-progress run from the database
-        var hasActiveRun = await _runCoordinator.RecoverAsync(ct);
-        if (hasActiveRun)
+        var recovery = await _runCoordinator.RecoverAsync(ct);
+        switch (recovery)
         {
-            var run = _runCoordinator.ActiveRun!;
-            _logger.LogInformation("Recovered {Mode} run {RunId} — resuming agent spawn",
-                run.Mode, run.RunId);
+            case RunCoordinator.RecoveryResult.ResumeImmediately:
+            {
+                var run = _runCoordinator.ActiveRun!;
+                _logger.LogInformation("Recovered {Mode} run {RunId} — resuming agent spawn",
+                    run.Mode, run.RunId);
 
-            // Spawn agents for the recovered run
-            await _runCoordinator.SpawnAgentsForRunAsync(ct);
-            await SpawnCustomAndSmeAgents(ct);
-        }
-        else
-        {
-            // No active run — wait for ProjectKickoff gate (human approval)
-            // This preserves backward compatibility: the gate triggers a new project run
-            _logger.LogInformation("No active run found — waiting for ProjectKickoff gate or dashboard start command");
+                // Spawn agents for the recovered run
+                await _runCoordinator.SpawnAgentsForRunAsync(ct);
+                await SpawnCustomAndSmeAgents(ct);
+                break;
+            }
 
-            await _gateCheck.WaitForGateAsync(
-                GateIds.ProjectKickoff,
-                "Project ready to start, awaiting human approval to begin agent workflow",
-                ct: ct);
+            case RunCoordinator.RecoveryResult.WaitForResume:
+            {
+                var run = _runCoordinator.ActiveRun!;
+                _logger.LogInformation(
+                    "Recovered {Mode} run {RunId} in Paused state — waiting for user to resume via dashboard",
+                    run.Mode, run.RunId);
+                // Don't spawn agents — user must press "Continue" on the dashboard
+                break;
+            }
 
-            // Gate approved — start a new project run via RunCoordinator
-            var run = await _runCoordinator.StartProjectAsync(ct);
-            _logger.LogInformation("ProjectKickoff gate approved — started run {RunId}", run.RunId);
+            case RunCoordinator.RecoveryResult.NoRun:
+            default:
+            {
+                // No active run — wait for ProjectKickoff gate (human approval)
+                // This preserves backward compatibility: the gate triggers a new project run
+                _logger.LogInformation("No active run found — waiting for ProjectKickoff gate or dashboard start command");
 
-            // Spawn agents for the new run
-            await _runCoordinator.SpawnAgentsForRunAsync(ct);
-            await SpawnCustomAndSmeAgents(ct);
+                await _gateCheck.WaitForGateAsync(
+                    GateIds.ProjectKickoff,
+                    "Project ready to start, awaiting human approval to begin agent workflow",
+                    ct: ct);
+
+                // Gate approved — start a new project run via RunCoordinator
+                var run = await _runCoordinator.StartProjectAsync(ct);
+                _logger.LogInformation("ProjectKickoff gate approved — started run {RunId}", run.RunId);
+
+                // Spawn agents for the new run
+                await _runCoordinator.SpawnAgentsForRunAsync(ct);
+                await SpawnCustomAndSmeAgents(ct);
+                break;
+            }
         }
 
         // BUG FIX: Do NOT start agent loops here — SpawnAgentAsync already calls

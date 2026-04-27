@@ -100,6 +100,7 @@ public class ResearcherAgent : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             ResearchDirective? currentDirective = null;
             try
             {

@@ -235,6 +235,7 @@ public class TestEngineerAgent : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             try
             {
                 // Check if our tracked test PR has been closed/merged — clear stale tracking

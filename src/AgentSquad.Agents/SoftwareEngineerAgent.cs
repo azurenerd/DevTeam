@@ -269,6 +269,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             try
             {
                 var isLeader = IsLeader();

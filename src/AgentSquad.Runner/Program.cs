@@ -553,7 +553,22 @@ runsApi.MapPost("/start-feature/{featureId}", async (string featureId, RunCoordi
 runsApi.MapPost("/stop", async (RunCoordinator coordinator, CancellationToken ct) =>
 {
     await coordinator.StopAsync(ct);
-    return Results.Ok(new { message = "Run stopped" });
+    return Results.Ok(new { message = "Run paused" });
+});
+
+runsApi.MapPost("/resume", async (RunCoordinator coordinator, AgentSpawnManager spawnManager, CancellationToken ct) =>
+{
+    try
+    {
+        var run = await coordinator.ResumeAsync(ct);
+        // Spawn agents in background (same path as startup)
+        _ = Task.Run(async () => await coordinator.SpawnAgentsForRunAsync(ct), ct);
+        return Results.Ok(new { run, message = "Run resumed" });
+    }
+    catch (InvalidOperationException ex)
+    {
+        return Results.Conflict(new { error = ex.Message });
+    }
 });
 
 runsApi.MapGet("/history", async (AgentStateStore stateStore, int? limit, CancellationToken ct) =>

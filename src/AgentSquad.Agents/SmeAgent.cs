@@ -82,6 +82,7 @@ public class SmeAgent : CustomAgent
         // Wait for a task assignment (poll the base class queues)
         while (!ct.IsCancellationRequested && !_hasCompletedOneShot)
         {
+            await WaitIfPausedAsync(ct);
             // Defer to base loop for one iteration - it handles queue processing
             await base.RunAgentLoopAsync(CreateOneShotToken(ct));
             _hasCompletedOneShot = true;

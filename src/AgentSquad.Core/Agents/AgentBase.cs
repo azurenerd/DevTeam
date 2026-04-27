@@ -17,6 +17,13 @@ public abstract class AgentBase : IAgent, IDisposable
     private string? _cachedMemorySummary;
 
     /// <summary>
+    /// Async gate for per-agent pause/resume. When reset (paused), WaitIfPausedAsync blocks.
+    /// Default state is signaled (not paused).
+    /// </summary>
+    private readonly SemaphoreSlim _pauseGate = new(1, 1);
+    private volatile bool _isPaused;
+
+    /// <summary>
     /// The Copilot CLI session ID for this agent. Non-engineer agents use a single
     /// persistent session for their lifetime. Engineer agents override this to
     /// manage per-PR sessions via <see cref="SetCliSession"/>.
@@ -240,7 +247,50 @@ public abstract class AgentBase : IAgent, IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, LifetimeCts.Token);
         Logger.LogDebug("Agent {AgentId} received message {MessageType} from {FromAgent}",
             Identity.Id, message.MessageType, message.FromAgentId);
+
+        // Handle system control messages before delegating to derived classes
+        if (message.MessageType is "control.pause")
+        {
+            if (!_isPaused)
+            {
+                _isPaused = true;
+                await _pauseGate.WaitAsync(linked.Token); // Acquire the gate (blocks WaitIfPausedAsync)
+                UpdateStatus(AgentStatus.Paused, "Agent paused by user");
+                LogActivity("system", "Agent paused");
+                Logger.LogInformation("Agent {AgentId} paused via control message", Identity.Id);
+            }
+            return;
+        }
+
+        if (message.MessageType is "control.resume")
+        {
+            if (_isPaused)
+            {
+                _isPaused = false;
+                _pauseGate.Release(); // Release the gate (unblocks WaitIfPausedAsync)
+                UpdateStatus(AgentStatus.Working, "Agent resumed by user");
+                LogActivity("system", "Agent resumed");
+                Logger.LogInformation("Agent {AgentId} resumed via control message", Identity.Id);
+            }
+            return;
+        }
+
         await OnMessageReceivedAsync(message, linked.Token);
+    }
+
+    /// <summary>
+    /// Cooperative pause check. Call this at the top of each agent loop iteration.
+    /// If the agent has been paused via control.pause, this method blocks until resumed
+    /// or the cancellation token is triggered.
+    /// </summary>
+    protected async Task WaitIfPausedAsync(CancellationToken ct)
+    {
+        if (!_isPaused) return;
+
+        Logger.LogDebug("Agent {AgentId} waiting on pause gate...", Identity.Id);
+        await _pauseGate.WaitAsync(ct);
+        _pauseGate.Release(); // Re-release immediately — gate remains "open"
+        Logger.LogDebug("Agent {AgentId} pause gate released, continuing", Identity.Id);
     }
 
     protected void UpdateStatus(AgentStatus newStatus, string? reason = null)

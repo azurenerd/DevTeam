@@ -143,6 +143,7 @@ public class ProgramManagerAgent : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             try
             {
                 Logger.LogInformation("PM loop: CheckExecutiveResponses");

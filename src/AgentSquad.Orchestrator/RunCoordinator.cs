@@ -22,6 +22,7 @@ public class RunCoordinator
     private readonly AgentSquadConfig _config;
 
     private readonly object _lock = new();
+    private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private ActiveRun? _activeRun;
     private IWorkflowProfile? _activeProfile;
     private CancellationTokenSource? _runCts;
@@ -63,16 +64,29 @@ public class RunCoordinator
     }
 
     /// <summary>
-    /// Try to recover an in-progress run from the database on startup.
-    /// Returns true if a run was recovered and agents should be spawned.
+    /// Result of attempting to recover a run on startup.
     /// </summary>
-    public async Task<bool> RecoverAsync(CancellationToken ct = default)
+    public enum RecoveryResult
+    {
+        /// <summary>No saved run found — fresh start.</summary>
+        NoRun,
+        /// <summary>A paused run was recovered — wait for user to resume.</summary>
+        WaitForResume,
+        /// <summary>A running run was recovered after crash — resume immediately.</summary>
+        ResumeImmediately
+    }
+
+    /// <summary>
+    /// Try to recover an in-progress run from the database on startup.
+    /// Returns the recovery action needed.
+    /// </summary>
+    public async Task<RecoveryResult> RecoverAsync(CancellationToken ct = default)
     {
         var savedRun = await _stateStore.GetActiveRunAsync(ct);
         if (savedRun is null)
         {
             _logger.LogInformation("No active run found in database — waiting for start command");
-            return false;
+            return RecoveryResult.NoRun;
         }
 
         // Set run ID on workflow state machine before recovery so it validates against the checkpoint
@@ -91,7 +105,9 @@ public class RunCoordinator
             "Recovered {Mode} run {RunId} in status {Status} (workflow recovered: {WfRecovered})",
             savedRun.Mode, savedRun.RunId, savedRun.Status, workflowRecovered);
 
-        return savedRun.Status == RunStatus.Running;
+        return savedRun.Status == RunStatus.Running
+            ? RecoveryResult.ResumeImmediately
+            : RecoveryResult.WaitForResume;
     }
 
     /// <summary>
@@ -99,11 +115,14 @@ public class RunCoordinator
     /// </summary>
     public async Task<ActiveRun> StartProjectAsync(CancellationToken ct = default)
     {
-        lock (_lock)
+        await _lifecycleLock.WaitAsync(ct);
+        try
         {
-            if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted })
-                throw new InvalidOperationException($"Cannot start a project — run {_activeRun.RunId} is already {_activeRun.Status}");
-        }
+            lock (_lock)
+            {
+                if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted or RunStatus.Paused })
+                    throw new InvalidOperationException($"Cannot start a project — run {_activeRun.RunId} is already {_activeRun.Status}");
+            }
 
         var run = new ActiveRun
         {
@@ -132,6 +151,11 @@ public class RunCoordinator
 
         _logger.LogInformation("Started Project run {RunId} for {Repo}", run.RunId, run.Repo);
         return run;
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
     }
 
     /// <summary>
@@ -141,85 +165,174 @@ public class RunCoordinator
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(featureId);
 
-        lock (_lock)
+        await _lifecycleLock.WaitAsync(ct);
+        try
         {
-            if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted })
-                throw new InvalidOperationException($"Cannot start a feature — run {_activeRun.RunId} is already {_activeRun.Status}");
+            lock (_lock)
+            {
+                if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted or RunStatus.Paused })
+                    throw new InvalidOperationException($"Cannot start a feature — run {_activeRun.RunId} is already {_activeRun.Status}");
+            }
+
+            var feature = await _stateStore.GetFeatureAsync(featureId, ct)
+                ?? throw new InvalidOperationException($"Feature '{featureId}' not found");
+
+            if (feature.Status is not (FeatureStatus.Draft or FeatureStatus.Queued))
+                throw new InvalidOperationException($"Feature '{featureId}' is in status {feature.Status} — only Draft or Queued features can be started");
+
+            var runId = Guid.NewGuid().ToString("N");
+            var run = new ActiveRun
+            {
+                RunId = runId,
+                Mode = WorkMode.Feature,
+                FeatureId = featureId,
+                Status = RunStatus.Running,
+                Repo = feature.TargetRepo ?? _config.Project.GitHubRepo,
+                BaseBranch = feature.BaseBranch,
+                TargetBranch = $"feature/{feature.Title.ToLowerInvariant().Replace(' ', '-').Replace("--", "-").Trim('-')}",
+                StartedAt = DateTime.UtcNow
+            };
+
+            var profile = new FeatureWorkflowProfile(feature, runId);
+
+            // Clear any stale state from a previous run and set the new run ID
+            await _stateStore.ClearAllCheckpointsAsync(ct);
+            _workflow.RunId = run.RunId;
+
+            await _stateStore.SaveActiveRunAsync(run, ct);
+            await _stateStore.UpdateFeatureStatusAsync(featureId, FeatureStatus.Running, runId, ct);
+
+            lock (_lock)
+            {
+                _activeRun = run;
+                _activeProfile = profile;
+                _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            }
+
+            _logger.LogInformation("Started Feature run {RunId} for feature '{Title}' ({FeatureId})",
+                run.RunId, feature.Title, featureId);
+            return run;
         }
-
-        var feature = await _stateStore.GetFeatureAsync(featureId, ct)
-            ?? throw new InvalidOperationException($"Feature '{featureId}' not found");
-
-        if (feature.Status is not (FeatureStatus.Draft or FeatureStatus.Queued))
-            throw new InvalidOperationException($"Feature '{featureId}' is in status {feature.Status} — only Draft or Queued features can be started");
-
-        var runId = Guid.NewGuid().ToString("N");
-        var run = new ActiveRun
+        finally
         {
-            RunId = runId,
-            Mode = WorkMode.Feature,
-            FeatureId = featureId,
-            Status = RunStatus.Running,
-            Repo = feature.TargetRepo ?? _config.Project.GitHubRepo,
-            BaseBranch = feature.BaseBranch,
-            TargetBranch = $"feature/{feature.Title.ToLowerInvariant().Replace(' ', '-').Replace("--", "-").Trim('-')}",
-            StartedAt = DateTime.UtcNow
-        };
-
-        var profile = new FeatureWorkflowProfile(feature, runId);
-
-        // Clear any stale state from a previous run and set the new run ID
-        await _stateStore.ClearAllCheckpointsAsync(ct);
-        _workflow.RunId = run.RunId;
-
-        await _stateStore.SaveActiveRunAsync(run, ct);
-        await _stateStore.UpdateFeatureStatusAsync(featureId, FeatureStatus.Running, runId, ct);
-
-        lock (_lock)
-        {
-            _activeRun = run;
-            _activeProfile = profile;
-            _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _lifecycleLock.Release();
         }
-
-        _logger.LogInformation("Started Feature run {RunId} for feature '{Title}' ({FeatureId})",
-            run.RunId, feature.Title, featureId);
-        return run;
     }
 
     /// <summary>
-    /// Gracefully stop the current run. Checkpoints state for later recovery.
+    /// Pause the current run. Stops all agents, checkpoints state for later resume.
     /// </summary>
     public async Task StopAsync(CancellationToken ct = default)
     {
-        ActiveRun? run;
-        lock (_lock)
+        await _lifecycleLock.WaitAsync(ct);
+        try
         {
-            run = _activeRun;
-            if (run is null or { Status: not RunStatus.Running })
+            ActiveRun? run;
+            lock (_lock)
             {
-                _logger.LogWarning("StopAsync called but no running run to stop");
-                return;
+                run = _activeRun;
+                if (run is null or { Status: not RunStatus.Running })
+                {
+                    _logger.LogWarning("StopAsync called but no running run to stop");
+                    return;
+                }
             }
+
+            _logger.LogInformation("Pausing run {RunId} — stopping all agents...", run.RunId);
+
+            // Checkpoint workflow state FIRST (captures latest phase/signals)
+            await _workflow.CheckpointAsync();
+
+            // Stop all registered agents gracefully
+            var agents = _registry.GetAllAgents();
+            var stopTasks = agents
+                .Where(a => a.Status is not (AgentStatus.Offline or AgentStatus.Terminated))
+                .Select(async agent =>
+                {
+                    try
+                    {
+                        await agent.StopAsync(ct);
+                        _logger.LogDebug("Agent '{AgentId}' stopped during pause", agent.Identity.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to stop agent '{AgentId}' during pause", agent.Identity.Id);
+                    }
+                });
+
+            await Task.WhenAll(stopTasks);
+
+            // Unregister all agents from the registry
+            foreach (var agent in agents)
+            {
+                try
+                {
+                    await _registry.UnregisterAsync(agent.Identity.Id, ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogDebug(ex, "Agent '{AgentId}' already unregistered", agent.Identity.Id);
+                }
+            }
+
+            // Reset spawn slot counters
+            _spawnManager.ResetSlots();
+
+            // Update run status to Paused
+            await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Paused, ct);
+
+            lock (_lock)
+            {
+                _activeRun = run with { Status = RunStatus.Paused };
+            }
+
+            _runCts?.Cancel();
+            _runCts?.Dispose();
+            _runCts = null;
+
+            _logger.LogInformation("Run {RunId} paused — {AgentCount} agents stopped", run.RunId, agents.Count);
         }
-
-        _logger.LogInformation("Stopping run {RunId}...", run.RunId);
-
-        // Checkpoint workflow state
-        await _workflow.CheckpointAsync();
-
-        // Update run status
-        await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Paused, ct);
-
-        lock (_lock)
+        finally
         {
-            _activeRun = run with { Status = RunStatus.Paused };
+            _lifecycleLock.Release();
         }
+    }
 
-        // Cancel the run's token (agents will wind down)
-        _runCts?.Cancel();
+    /// <summary>
+    /// Resume a paused run. Spawns fresh agents that pick up from the checkpointed workflow state.
+    /// </summary>
+    public async Task<ActiveRun> ResumeAsync(CancellationToken ct = default)
+    {
+        await _lifecycleLock.WaitAsync(ct);
+        try
+        {
+            ActiveRun? run;
+            lock (_lock)
+            {
+                run = _activeRun;
+                if (run is null or { Status: not RunStatus.Paused })
+                    throw new InvalidOperationException(
+                        run is null ? "No active run to resume" : $"Run {run.RunId} is {run.Status}, not Paused");
+            }
 
-        _logger.LogInformation("Run {RunId} paused", run.RunId);
+            _logger.LogInformation("Resuming run {RunId}...", run.RunId);
+
+            // Update status to Running
+            await _stateStore.UpdateRunStatusAsync(run.RunId, RunStatus.Running, ct);
+
+            lock (_lock)
+            {
+                _activeRun = run with { Status = RunStatus.Running };
+                _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            }
+
+            _logger.LogInformation("Run {RunId} resumed — ready for agent spawn", run.RunId);
+            return _activeRun!;
+        }
+        finally
+        {
+            _lifecycleLock.Release();
+        }
     }
 
     /// <summary>

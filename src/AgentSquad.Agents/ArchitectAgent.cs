@@ -128,6 +128,7 @@ public class ArchitectAgent : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             ArchitectureDirective? currentDirective = null;
             try
             {

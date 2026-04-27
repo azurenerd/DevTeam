@@ -86,6 +86,7 @@ public class CustomAgent : AgentBase
 
         while (!ct.IsCancellationRequested)
         {
+            await WaitIfPausedAsync(ct);
             try
             {
                 if (_issueQueue.TryDequeue(out var issueAssignment))

@@ -113,8 +113,16 @@
             }
             else if (_runState is "Running")
             {
-                <button class="btn-danger" @onclick="StopRunAsync" disabled="@_runActionPending">
-                    @(_runActionPending ? "Stopping..." : "⏹ Stop")
+                <button class="btn-danger" @onclick="PauseRunAsync" disabled="@_runActionPending"
+                        title="Pauses the current run. All agents will be stopped gracefully and workflow state will be checkpointed. You can resume later with the Continue button.">
+                    @(_runActionPending ? "Pausing..." : "⏸ Pause")
+                </button>
+            }
+            else if (_runState is "Paused")
+            {
+                <button class="btn-primary" @onclick="ResumeRunAsync" disabled="@_runActionPending"
+                        title="Resumes the paused run. Agents will be respawned and continue from the last checkpointed workflow phase.">
+                    @(_runActionPending ? "Resuming..." : "▶ Continue")
                 </button>
             }
         </div>
@@ -933,7 +941,7 @@ else
         }
     }
 
-    private async Task StopRunAsync()
+    private async Task PauseRunAsync()
     {
         _runActionPending = true;
         _runError = "";
@@ -950,7 +958,7 @@ else
                 }
                 else
                 {
-                    _runError = "Failed to stop run";
+                    _runError = "Failed to pause run";
                 }
             }
             else
@@ -960,6 +968,48 @@ else
                 {
                     await coordinator.StopAsync();
                     _runState = "Paused";
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _runError = ex.Message;
+        }
+        finally
+        {
+            _runActionPending = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ResumeRunAsync()
+    {
+        _runActionPending = true;
+        _runError = "";
+        StateHasChanged();
+
+        try
+        {
+            if (_runsHttp is not null)
+            {
+                var resp = await _runsHttp.PostAsync("/api/runs/resume", null);
+                if (resp.IsSuccessStatusCode)
+                {
+                    _runState = "Running";
+                }
+                else
+                {
+                    _runError = "Failed to resume run";
+                }
+            }
+            else
+            {
+                var coordinator = ServiceProvider.GetService<AgentSquad.Orchestrator.RunCoordinator>();
+                if (coordinator is not null)
+                {
+                    await coordinator.ResumeAsync();
+                    await coordinator.SpawnAgentsForRunAsync();
+                    _runState = "Running";
                 }
             }
         }
