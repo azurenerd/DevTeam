@@ -204,7 +204,11 @@ else if (_config is not null)
                                 <label title="Azure AD tenant ID for bearer token authentication. Required for 'az login --tenant'.">Tenant ID</label>
                                 <input type="text" @bind="AdoConfig.TenantId" class="config-input" placeholder="72f988bf-86f1-41af-91ab-2d7cd011db47"
                                     title="Your Azure AD tenant ID. Used to run: az login --tenant <id> --allow-no-subscriptions" />
-                                <p class="config-hint">Bearer tokens are obtained via: <code>az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798</code>. Ensure you are logged in with <code>az login --tenant @(AdoConfig.TenantId) --allow-no-subscriptions</code></p>
+                                @if (_adoTenantIsFromSecrets)
+                                {
+                                    <p class="config-hint">🔐 Tenant ID loaded from <strong>User Secrets</strong>. Manage via: <code>dotnet user-secrets set "AgentSquad:DevPlatform:AzureDevOps:TenantId" "your-tenant-id"</code></p>
+                                }
+                                <p class="config-hint">Bearer tokens are ephemeral — obtained at runtime via: <code>az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798</code>. No token is stored in config.</p>
                             </div>
                         }
                         <div class="config-field-row">
@@ -1909,6 +1913,7 @@ else if (_config is not null)
     private bool _showToken;
     private bool _patIsFromSecrets;
     private bool _adoPatIsFromSecrets;
+    private bool _adoTenantIsFromSecrets;
 
     // Copilot reasoning effort helper (nullable string)
     private string _copilotReasoningEffort
@@ -1961,6 +1966,7 @@ else if (_config is not null)
             // Detect if PAT came from User Secrets (non-empty PAT but appsettings.json has empty value)
             _patIsFromSecrets = !string.IsNullOrEmpty(_config.Project.GitHubToken);
             _adoPatIsFromSecrets = !string.IsNullOrEmpty(_config.DevPlatform?.AzureDevOps?.Pat);
+            _adoTenantIsFromSecrets = !string.IsNullOrEmpty(_config.DevPlatform?.AzureDevOps?.TenantId);
         }
         catch (Exception ex)
         {

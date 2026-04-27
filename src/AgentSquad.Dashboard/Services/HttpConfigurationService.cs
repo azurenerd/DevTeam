@@ -261,5 +261,15 @@ public sealed class HttpConfigurationService : IConfigurationService
                 }
             }
         }
+
+        // Strip ADO secrets from DevPlatform section
+        if (config["DevPlatform"] is JsonObject devPlatform &&
+            devPlatform["AzureDevOps"] is JsonObject azureDevOps)
+        {
+            if (azureDevOps.ContainsKey("Pat"))
+                azureDevOps["Pat"] = "";
+            if (azureDevOps.ContainsKey("TenantId"))
+                azureDevOps["TenantId"] = "";
+        }
     }
 }
