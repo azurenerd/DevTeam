@@ -581,6 +581,8 @@ else
     private async void OnDataChanged()
     {
         RefreshData();
+        // Keep run state in sync with Runner (handles recovered runs, status changes)
+        await LoadRunStateAsync();
         // Re-check for TeamComposition.md if not yet loaded
         if (_teamComposition is null)
             await LoadTeamCompositionAsync();
