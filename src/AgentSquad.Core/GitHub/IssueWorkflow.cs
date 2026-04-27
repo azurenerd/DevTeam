@@ -1,4 +1,6 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub.Models;
 using Microsoft.Extensions.Logging;
 
@@ -10,7 +12,7 @@ namespace AgentSquad.Core.GitHub;
 /// </summary>
 public class IssueWorkflow
 {
-    private readonly IGitHubService _github;
+    private readonly IWorkItemService _workItemService;
     private readonly ILogger<IssueWorkflow> _logger;
 
     public static class Labels
@@ -25,9 +27,9 @@ public class IssueWorkflow
         public const string Documentation = "documentation";
     }
 
-    public IssueWorkflow(IGitHubService github, ILogger<IssueWorkflow> logger)
+    public IssueWorkflow(IWorkItemService workItemService, ILogger<IssueWorkflow> logger)
     {
-        _github = github ?? throw new ArgumentNullException(nameof(github));
+        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -49,9 +51,10 @@ public class IssueWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(titlePrefix);
 
-        var allIssues = await _github.GetOpenIssuesAsync(ct);
-        return allIssues.FirstOrDefault(i =>
+        var allItems = await _workItemService.ListOpenAsync(ct);
+        var match = allItems.FirstOrDefault(i =>
             i.Title.StartsWith(titlePrefix, StringComparison.OrdinalIgnoreCase));
+        return match?.ToAgentIssue();
     }
 
     /// <summary>
@@ -87,10 +90,11 @@ public class IssueWorkflow
 
         _logger.LogInformation("Agent {Agent} requesting {Role} resource", requestingAgent, requestedRole);
 
-        return await _github.CreateIssueAsync(
+        var item = await _workItemService.CreateAsync(
             title, body,
             [Labels.ResourceRequest, Labels.ExecutiveRequest],
             ct);
+        return item.ToAgentIssue();
     }
 
     /// <summary>
@@ -125,10 +129,11 @@ public class IssueWorkflow
 
         _logger.LogInformation("Agent {Agent} creating executive request: {Title}", fromAgent, title);
 
-        return await _github.CreateIssueAsync(
+        var item = await _workItemService.CreateAsync(
             issueTitle, issueBody,
             [Labels.ExecutiveRequest],
             ct);
+        return item.ToAgentIssue();
     }
 
     /// <summary>
@@ -166,10 +171,11 @@ public class IssueWorkflow
 
         _logger.LogWarning("Agent {Agent} reporting blocker: {Title}", agentName, title);
 
-        return await _github.CreateIssueAsync(
+        var item = await _workItemService.CreateAsync(
             issueTitle, issueBody,
             [Labels.Blocker, Labels.AgentStuck],
             ct);
+        return item.ToAgentIssue();
     }
 
     /// <summary>
@@ -206,10 +212,11 @@ public class IssueWorkflow
 
         _logger.LogInformation("Agent {From} asking {To} a question", fromAgent, toAgent);
 
-        return await _github.CreateIssueAsync(
+        var item = await _workItemService.CreateAsync(
             title, body,
             [Labels.AgentQuestion],
             ct);
+        return item.ToAgentIssue();
     }
 
     /// <summary>
@@ -217,14 +224,14 @@ public class IssueWorkflow
     /// </summary>
     public async Task<bool> IsIssueResolvedAsync(int issueNumber, CancellationToken ct = default)
     {
-        var issue = await _github.GetIssueAsync(issueNumber, ct);
-        if (issue is null)
+        var item = await _workItemService.GetAsync(issueNumber, ct);
+        if (item is null)
             return false;
 
-        if (string.Equals(issue.State, "closed", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(item.State, "closed", StringComparison.OrdinalIgnoreCase))
             return true;
 
-        return issue.Labels.Contains(Labels.Resolved, StringComparer.OrdinalIgnoreCase);
+        return item.Labels.Contains(Labels.Resolved, StringComparer.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -234,9 +241,13 @@ public class IssueWorkflow
         int issueNumber,
         CancellationToken ct = default)
     {
-        // Fetch the issue which includes embedded comments
-        var issue = await _github.GetIssueAsync(issueNumber, ct);
-        return issue?.Comments.AsReadOnly() ?? (IReadOnlyList<IssueComment>)[];
+        var comments = await _workItemService.GetCommentsAsync(issueNumber, ct);
+        return comments.Select(c => new IssueComment
+        {
+            Author = c.Author,
+            Body = c.Body,
+            CreatedAt = c.CreatedAt
+        }).ToList().AsReadOnly();
     }
 
     /// <summary>
@@ -248,10 +259,11 @@ public class IssueWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
 
-        var allIssues = await _github.GetOpenIssuesAsync(ct);
-        return allIssues
-            .Where(issue =>
-                string.Equals(ParseAgentNameFromTitle(issue.Title), agentName, StringComparison.OrdinalIgnoreCase))
+        var allItems = await _workItemService.ListOpenAsync(ct);
+        return allItems
+            .Where(item =>
+                string.Equals(ParseAgentNameFromTitle(item.Title), agentName, StringComparison.OrdinalIgnoreCase))
+            .Select(item => item.ToAgentIssue())
             .ToList()
             .AsReadOnly();
     }
@@ -268,11 +280,11 @@ public class IssueWorkflow
 
         _logger.LogInformation("Resolving issue #{Number}", issueNumber);
 
-        await _github.AddIssueCommentAsync(
+        await _workItemService.AddCommentAsync(
             issueNumber,
             $"✅ **Resolved**\n\n{resolutionComment}",
             ct);
 
-        await _github.CloseIssueAsync(issueNumber, ct);
+        await _workItemService.CloseAsync(issueNumber, ct);
     }
 }

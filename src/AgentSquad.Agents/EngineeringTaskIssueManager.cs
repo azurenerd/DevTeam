@@ -1,4 +1,6 @@
 using System.Text.RegularExpressions;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using Microsoft.Extensions.Logging;
@@ -6,9 +8,9 @@ using Microsoft.Extensions.Logging;
 namespace AgentSquad.Agents;
 
 /// <summary>
-/// Manages engineering tasks as GitHub Issues instead of an EngineeringPlan.md file.
-/// Each task is a GitHub issue with the "engineering-task" label and structured metadata
-/// in the issue body (complexity, dependencies, parent issue link).
+/// Manages engineering tasks as work items (GitHub Issues / ADO Tasks).
+/// Each task has the "engineering-task" label and structured metadata
+/// in the body (complexity, dependencies, parent issue link).
 /// </summary>
 internal sealed partial class EngineeringTaskIssueManager
 {
@@ -17,7 +19,7 @@ internal sealed partial class EngineeringTaskIssueManager
     public const string StatusAssigned = "status:assigned";
     public const string StatusInProgress = "status:in-progress";
 
-    private readonly IGitHubService _github;
+    private readonly IWorkItemService _workItems;
     private readonly ILogger _logger;
 
     // In-memory cache refreshed from GitHub on LoadTasksAsync
@@ -32,18 +34,18 @@ internal sealed partial class EngineeringTaskIssueManager
     // is in this set. This prevents stale tasks from prior runs from polluting the cache.
     private HashSet<int>? _enhancementScope;
 
-    public EngineeringTaskIssueManager(IGitHubService github, ILogger logger)
+    public EngineeringTaskIssueManager(IWorkItemService workItems, ILogger logger)
     {
-        ArgumentNullException.ThrowIfNull(github);
+        ArgumentNullException.ThrowIfNull(workItems);
         ArgumentNullException.ThrowIfNull(logger);
-        _github = github;
+        _workItems = workItems;
         _logger = logger;
     }
 
-    /// <summary>Test-only constructor: creates a manager without a GitHub service for unit testing cache-only methods.</summary>
+    /// <summary>Test-only constructor: creates a manager without a work item service for unit testing cache-only methods.</summary>
     internal EngineeringTaskIssueManager(ILogger logger)
     {
-        _github = null!;
+        _workItems = null!;
         _logger = logger;
     }
 
@@ -69,11 +71,11 @@ internal sealed partial class EngineeringTaskIssueManager
     /// </summary>
     public async Task LoadTasksAsync(CancellationToken ct = default)
     {
-        var openIssues = await _github.GetIssuesByLabelAsync(TaskLabel, "open", ct);
-        var closedIssues = await _github.GetIssuesByLabelAsync(TaskLabel, "closed", ct);
+        var openItems = await _workItems.ListByLabelAsync(TaskLabel, "open", ct);
+        var closedItems = await _workItems.ListByLabelAsync(TaskLabel, "closed", ct);
 
-        var allTasks = openIssues.Concat(closedIssues)
-            .Select(MapIssueToTask)
+        var allTasks = openItems.Concat(closedItems)
+            .Select(item => MapIssueToTask(item.ToAgentIssue()))
             .OrderBy(t => t.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -84,7 +86,7 @@ internal sealed partial class EngineeringTaskIssueManager
             allTasks.Where(t => t.IssueNumber.HasValue).Select(t => t.IssueNumber!.Value));
         // Also track which of those are closed, so we can update pending task status
         var closedIssueNumbers = new HashSet<int>(
-            closedIssues.Select(i => i.Number));
+            closedItems.Select(i => i.Number));
 
         // Apply enhancement scope filter to exclude stale tasks from prior runs
         if (_enhancementScope is not null && _enhancementScope.Count > 0)
@@ -132,8 +134,8 @@ internal sealed partial class EngineeringTaskIssueManager
 
         _cache = allTasks;
         _cacheLoaded = true;
-        _logger.LogInformation("Loaded {Count} engineering tasks from GitHub issues ({Open} open, {Closed} closed)",
-            _cache.Count, openIssues.Count, closedIssues.Count);
+        _logger.LogInformation("Loaded {Count} engineering tasks from work items ({Open} open, {Closed} closed)",
+            _cache.Count, openItems.Count, closedItems.Count);
     }
 
     /// <summary>Clear the in-memory cache (e.g., when stale tasks from a prior run are detected).</summary>
@@ -172,8 +174,9 @@ internal sealed partial class EngineeringTaskIssueManager
 
             try
             {
-                var issue = await _github.CreateIssueAsync(
+                var item = await _workItems.CreateAsync(
                     $"[{task.Id}] {task.Name}", validatedBody, labels, ct);
+                var issue = item.ToAgentIssue();
 
                 var updatedTask = task with
                 {
@@ -184,13 +187,13 @@ internal sealed partial class EngineeringTaskIssueManager
                 };
                 created.Add(updatedTask);
                 _cache.Add(updatedTask);
-                // Track for merge-back in LoadTasksAsync (GitHub API indexing delay)
+                // Track for merge-back in LoadTasksAsync (API indexing delay)
                 _pendingVisibilityTasks[issue.Number] = updatedTask;
 
                 // Link as sub-issue of parent PM enhancement issue
                 if (task.ParentIssueNumber.HasValue && issue.GitHubId > 0)
                 {
-                    await _github.AddSubIssueAsync(task.ParentIssueNumber.Value, issue.GitHubId, ct);
+                    await _workItems.AddChildAsync(task.ParentIssueNumber.Value, issue.GitHubId, ct);
                 }
 
                 _logger.LogInformation("Created engineering task issue #{Number} for {TaskId}: {Name}",
@@ -225,7 +228,7 @@ internal sealed partial class EngineeringTaskIssueManager
             {
                 if (issueNumToGitHubId.TryGetValue(depIssueNum, out var blockingGitHubId))
                 {
-                    await _github.AddIssueDependencyAsync(task.IssueNumber.Value, blockingGitHubId, ct);
+                    await _workItems.AddDependencyAsync(task.IssueNumber.Value, blockingGitHubId, ct);
                 }
             }
         }
@@ -364,7 +367,7 @@ internal sealed partial class EngineeringTaskIssueManager
         var newTitle = $"{engineerName}: {task.Name}";
         var newLabels = ReplaceStatusLabel(task.Labels, StatusAssigned);
 
-        await _github.UpdateIssueAsync(issueNumber, title: newTitle, labels: newLabels, ct: ct);
+        await _workItems.UpdateAsync(issueNumber, title: newTitle, labels: newLabels, ct: ct);
 
         _cache[idx] = task with { Status = "Assigned", AssignedTo = engineerName };
         _logger.LogInformation("Assigned task issue #{Number} ({Name}) to {Engineer}",
@@ -380,8 +383,8 @@ internal sealed partial class EngineeringTaskIssueManager
         var task = _cache[idx];
         var newLabels = ReplaceStatusLabel(task.Labels, StatusInProgress);
 
-        await _github.UpdateIssueAsync(issueNumber, labels: newLabels, ct: ct);
-        await _github.AddIssueCommentAsync(issueNumber, $"PR #{prNumber} created for this task.", ct);
+        await _workItems.UpdateAsync(issueNumber, labels: newLabels, ct: ct);
+        await _workItems.AddCommentAsync(issueNumber, $"PR #{prNumber} created for this task.", ct);
 
         _cache[idx] = task with { Status = "InProgress", PullRequestNumber = prNumber };
     }
@@ -395,7 +398,7 @@ internal sealed partial class EngineeringTaskIssueManager
         var task = _cache[idx];
         try
         {
-            await _github.CloseIssueAsync(issueNumber, ct);
+            await _workItems.CloseAsync(issueNumber, ct);
         }
         catch (Exception ex)
         {
@@ -424,7 +427,7 @@ internal sealed partial class EngineeringTaskIssueManager
 
         // Strip agent prefix from title back to just task name
         var cleanTitle = $"[{task.Id}] {task.Name}";
-        await _github.UpdateIssueAsync(issueNumber, title: cleanTitle, labels: newLabels, state: "open", ct: ct);
+        await _workItems.UpdateAsync(issueNumber, title: cleanTitle, labels: newLabels, state: "open", ct: ct);
 
         _cache[idx] = task with
         {
@@ -473,8 +476,8 @@ internal sealed partial class EngineeringTaskIssueManager
         {
             try
             {
-                await _github.CloseIssueAsync(task.IssueNumber!.Value, ct);
-                await _github.AddIssueCommentAsync(task.IssueNumber!.Value,
+                await _workItems.CloseAsync(task.IssueNumber!.Value, ct);
+                await _workItems.AddCommentAsync(task.IssueNumber!.Value,
                     "✅ Closing — engineering pipeline complete. All tasks delivered.", ct);
                 var idx = _cache.FindIndex(t => t.IssueNumber == task.IssueNumber);
                 if (idx >= 0) _cache[idx] = task with { Status = "Done" };

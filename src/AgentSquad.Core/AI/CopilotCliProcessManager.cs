@@ -1,5 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.Strategies;
 using Microsoft.Extensions.Hosting;
@@ -26,6 +28,14 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
     private readonly SemaphoreSlim _agenticPool;
     private readonly StrategyConcurrencyGate _globalGate;
     private readonly CliInteractiveWatchdog _watchdog;
+    /// <summary>
+    /// Tracks all copilot processes spawned by this manager. On shutdown/dispose,
+    /// every tracked process is killed to prevent orphaned Electron processes from
+    /// leaking 200-400MB each. Only processes WE start are tracked — never system-wide scans.
+    /// </summary>
+    private readonly ConcurrentDictionary<int, Process> _activeProcesses = new();
+    private static readonly string ProcessManifestPath = Path.Combine(
+        Path.GetTempPath(), "agentsquad-process-manifest.json");
     private bool _copilotAvailable;
     private bool _disposed;
 

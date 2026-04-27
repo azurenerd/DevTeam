@@ -1,5 +1,6 @@
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Config;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.GitHub;
@@ -70,7 +71,10 @@ builder.Services.AddSingleton<PullRequestWorkflow>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;
     return new PullRequestWorkflow(
-        sp.GetRequiredService<IGitHubService>(),
+        sp.GetRequiredService<IPullRequestService>(),
+        sp.GetRequiredService<IRepositoryContentService>(),
+        sp.GetRequiredService<IReviewService>(),
+        sp.GetRequiredService<IBranchService>(),
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<PullRequestWorkflow>>(),
         config.Project.DefaultBranch,
         sp.GetRequiredService<ConflictDetector>());

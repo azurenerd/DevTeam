@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Core.GitHub;
@@ -10,7 +11,7 @@ namespace AgentSquad.Core.GitHub;
 /// </summary>
 public class ConflictDetector
 {
-    private readonly IGitHubService _github;
+    private readonly IRepositoryContentService _repoContent;
     private readonly ILogger<ConflictDetector> _logger;
 
     // Cache the main branch tree to avoid repeated API calls within a session
@@ -18,9 +19,9 @@ public class ConflictDetector
     private DateTime _cacheExpiry = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
 
-    public ConflictDetector(IGitHubService github, ILogger<ConflictDetector> logger)
+    public ConflictDetector(IRepositoryContentService repoContent, ILogger<ConflictDetector> logger)
     {
-        _github = github;
+        _repoContent = repoContent;
         _logger = logger;
     }
 
@@ -32,7 +33,7 @@ public class ConflictDetector
         if (_cachedTree is not null && DateTime.UtcNow < _cacheExpiry)
             return _cachedTree;
 
-        _cachedTree = await _github.GetRepositoryTreeAsync("main", ct);
+        _cachedTree = await _repoContent.GetRepositoryTreeAsync("main", ct);
         _cacheExpiry = DateTime.UtcNow + CacheTtl;
         return _cachedTree;
     }

@@ -3,6 +3,8 @@ using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
@@ -24,7 +26,7 @@ namespace AgentSquad.Agents;
 public class CustomAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
-    private readonly IGitHubService _github;
+    private readonly IWorkItemService _workItems;
     private readonly PullRequestWorkflow _prWorkflow;
     private readonly ProjectFileManager _projectFiles;
     private readonly ModelRegistry _modelRegistry;
@@ -40,7 +42,6 @@ public class CustomAgent : AgentBase
     public CustomAgent(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
@@ -49,11 +50,12 @@ public class CustomAgent : AgentBase
         IGateCheckService gateCheck,
         ILogger<CustomAgent> logger,
         RoleContextProvider? roleContextProvider = null,
-        IPromptTemplateService? promptService = null)
+        IPromptTemplateService? promptService = null,
+        IWorkItemService? workItemService = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _github = github ?? throw new ArgumentNullException(nameof(github));
+        _workItems = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
         _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
@@ -165,7 +167,8 @@ public class CustomAgent : AgentBase
 
         try
         {
-            var issue = await _github.GetIssueAsync(assignment.IssueNumber, ct);
+            var item = await _workItems.GetAsync(assignment.IssueNumber, ct);
+            var issue = item?.ToAgentIssue();
             if (issue is null)
             {
                 Logger.LogWarning("Could not find issue #{IssueNumber}", assignment.IssueNumber);
@@ -273,7 +276,8 @@ public class CustomAgent : AgentBase
     {
         try
         {
-            var issues = await _github.GetOpenIssuesAsync(ct);
+            var items = await _workItems.ListOpenAsync(ct);
+            var issues = items.ToAgentIssues();
 
             foreach (var issue in issues)
             {

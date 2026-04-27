@@ -3,6 +3,7 @@ using AgentSquad.Core.Agents.Decisions;
 using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -31,7 +32,6 @@ public class SpecialistEngineerAgent : EngineerAgentBase
         AgentIdentity identity,
         SMEAgentDefinition definition,
         IMessageBus messageBus,
-        IGitHubService github,
         IssueWorkflow issueWorkflow,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
@@ -48,10 +48,12 @@ public class SpecialistEngineerAgent : EngineerAgentBase
         Core.Metrics.BuildTestMetrics? metrics = null,
         PlaywrightRunner? playwrightRunner = null,
         DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null)
-        : base(identity, messageBus, github, prWorkflow, issueWorkflow,
+        IAgentTaskTracker? taskTracker = null,
+        IBranchService? branchService = null)
+        : base(identity, messageBus, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker)
+               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
+               branchService: branchService)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
     }

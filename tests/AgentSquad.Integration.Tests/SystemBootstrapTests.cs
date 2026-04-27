@@ -60,12 +60,16 @@ public class SystemBootstrapTests : IDisposable
             limits.MaxConcurrentAgents = 10;
         });
 
-        // Mock GitHub service
         var mockGitHub = new Mock<IGitHubService>();
         mockGitHub.Setup(g => g.RepositoryFullName).Returns("test-owner/test-repo");
         services.AddSingleton(mockGitHub.Object);
 
-        // Core services
+        // Platform interfaces (mock — tests don't exercise real platform calls)
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IPullRequestService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IWorkItemService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IRepositoryContentService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IReviewService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IBranchService>().Object);
         services.AddInProcessMessageBus();
         services.AddSingleton<AgentUsageTracker>();
         services.AddSemanticKernelModels();
@@ -80,10 +84,7 @@ public class SystemBootstrapTests : IDisposable
                 sp.GetRequiredService<ILogger<ProjectFileManager>>()));
 
         // GitHub workflows
-        services.AddSingleton<PullRequestWorkflow>(sp =>
-            new PullRequestWorkflow(
-                sp.GetRequiredService<IGitHubService>(),
-                sp.GetRequiredService<ILogger<PullRequestWorkflow>>()));
+        services.AddSingleton<PullRequestWorkflow>();
         services.AddSingleton<IssueWorkflow>();
         services.AddSingleton<ConflictResolver>();
         services.AddSingleton<IGateCheckService, GateCheckService>();

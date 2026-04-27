@@ -25,7 +25,6 @@ namespace AgentSquad.Agents;
 public class ProgramManagerAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
-    private readonly IGitHubService _github;
     private readonly IPullRequestService _prService;
     private readonly IWorkItemService? _workItemService;
     private readonly IRepositoryContentService _repoContent;
@@ -69,7 +68,6 @@ public class ProgramManagerAgent : AgentBase
     public ProgramManagerAgent(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         IPullRequestService prService,
         IssueWorkflow issueWorkflow,
         PullRequestWorkflow prWorkflow,
@@ -96,7 +94,6 @@ public class ProgramManagerAgent : AgentBase
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _github = github ?? throw new ArgumentNullException(nameof(github));
         _prService = prService ?? throw new ArgumentNullException(nameof(prService));
         _workItemService = workItemService;
         _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));

@@ -22,8 +22,17 @@ public sealed class GitHubPullRequestAdapter : IPullRequestService
         string title, string body, string headBranch, string baseBranch,
         IReadOnlyList<string> labels, CancellationToken ct = default)
     {
-        var pr = await _github.CreatePullRequestAsync(title, body, headBranch, baseBranch, labels.ToArray(), ct);
-        return GitHubModelMapper.ToPlatform(pr);
+        try
+        {
+            var pr = await _github.CreatePullRequestAsync(title, body, headBranch, baseBranch, labels.ToArray(), ct);
+            return GitHubModelMapper.ToPlatform(pr);
+        }
+        catch (Octokit.ApiValidationException ex)
+        {
+            throw new PlatformConflictException(
+                PlatformConflictKind.AlreadyExists,
+                $"PR creation failed (likely duplicate): {ex.Message}", ex);
+        }
     }
 
     public async Task<PlatformPullRequest?> GetAsync(int id, CancellationToken ct = default)
@@ -65,7 +74,16 @@ public sealed class GitHubPullRequestAdapter : IPullRequestService
 
     public async Task MergeAsync(int id, string? commitMessage = null, CancellationToken ct = default)
     {
-        await _github.MergePullRequestAsync(id, commitMessage, ct);
+        try
+        {
+            await _github.MergePullRequestAsync(id, commitMessage, ct);
+        }
+        catch (Octokit.PullRequestNotMergeableException ex)
+        {
+            throw new PlatformConflictException(
+                PlatformConflictKind.NotMergeable,
+                $"PR #{id} not mergeable: {ex.Message}", ex);
+        }
     }
 
     public async Task CloseAsync(int id, CancellationToken ct = default)

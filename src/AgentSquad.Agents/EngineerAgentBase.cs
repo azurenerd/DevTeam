@@ -27,11 +27,11 @@ namespace AgentSquad.Agents;
 public abstract class EngineerAgentBase : AgentBase
 {
     protected readonly IMessageBus MessageBus;
-    protected readonly IGitHubService GitHub;
     protected readonly IPullRequestService PrService;
     protected readonly IWorkItemService WorkItemService;
     protected readonly IRepositoryContentService RepoContent;
     protected readonly IReviewService ReviewService;
+    protected readonly IBranchService BranchService;
     protected readonly PullRequestWorkflow PrWorkflow;
     protected readonly IssueWorkflow IssueWf;
     protected readonly ProjectFileManager ProjectFiles;
@@ -79,7 +79,6 @@ public abstract class EngineerAgentBase : AgentBase
     protected EngineerAgentBase(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         PullRequestWorkflow prWorkflow,
         IssueWorkflow issueWorkflow,
         ProjectFileManager projectFiles,
@@ -100,11 +99,11 @@ public abstract class EngineerAgentBase : AgentBase
         IPullRequestService? prService = null,
         IWorkItemService? workItemService = null,
         IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null)
+        IReviewService? reviewService = null,
+        IBranchService? branchService = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        GitHub = github ?? throw new ArgumentNullException(nameof(github));
         PrWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
         IssueWf = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
         ProjectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
@@ -123,6 +122,7 @@ public abstract class EngineerAgentBase : AgentBase
         WorkItemService = workItemService!;
         RepoContent = repoContent!;
         ReviewService = reviewService!;
+        BranchService = branchService!;
     }
 
     #region Lifecycle

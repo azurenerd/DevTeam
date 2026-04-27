@@ -132,7 +132,6 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     public SoftwareEngineerAgent(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         IssueWorkflow issueWorkflow,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
@@ -163,17 +162,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         IPullRequestService? prService = null,
         IWorkItemService? workItemService = null,
         IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null)
-        : base(identity, messageBus, github, prWorkflow, issueWorkflow,
+        IReviewService? reviewService = null,
+        IBranchService? branchService = null)
+        : base(identity, messageBus, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
-               prService, workItemService, repoContent, reviewService)
+               prService, workItemService, repoContent, reviewService, branchService)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
         _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
         _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
-        _taskManager = new EngineeringTaskIssueManager(github, logger);
+        _taskManager = new EngineeringTaskIssueManager(workItemService!, logger);
         _smeGenerator = smeGenerator;
         _spawnManager = spawnManager;
         _decisionGate = decisionGate;
@@ -3867,7 +3867,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         }
                     }
                     if (!string.IsNullOrEmpty(pr.HeadBranch))
-                        await GitHub.DeleteBranchAsync(pr.HeadBranch, ct);
+                        await BranchService.DeleteAsync(pr.HeadBranch, ct);
 
                     var taskTitle2 = PullRequestWorkflow.ParseTaskTitleFromTitle(pr.Title);
                     var task2 = taskTitle2 is not null ? _taskManager.FindByName(taskTitle2) : null;
@@ -4585,7 +4585,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
             if (!string.IsNullOrEmpty(pr.HeadBranch))
             {
-                try { await GitHub.DeleteBranchAsync(pr.HeadBranch, ct); }
+                try { await BranchService.DeleteAsync(pr.HeadBranch, ct); }
                 catch (Exception ex)
                 {
                     Logger.LogDebug(ex, "Could not delete old branch {Branch}", pr.HeadBranch);

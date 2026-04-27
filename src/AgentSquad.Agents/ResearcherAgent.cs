@@ -19,7 +19,6 @@ namespace AgentSquad.Agents;
 public class ResearcherAgent : AgentBase
 {
     private readonly IMessageBus _messageBus;
-    private readonly IGitHubService _github;
     private readonly IPullRequestService _prService;
     private readonly IWorkItemService _workItemService;
     private readonly IRepositoryContentService _repoContent;
@@ -42,7 +41,6 @@ public class ResearcherAgent : AgentBase
     public ResearcherAgent(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
@@ -63,7 +61,6 @@ public class ResearcherAgent : AgentBase
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _github = github ?? throw new ArgumentNullException(nameof(github));
         _prService = prService ?? throw new ArgumentNullException(nameof(prService));
         _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
         _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));

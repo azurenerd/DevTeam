@@ -1,6 +1,7 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -33,7 +34,6 @@ public class SmeAgent : CustomAgent
         AgentIdentity identity,
         SMEAgentDefinition definition,
         IMessageBus messageBus,
-        IGitHubService github,
         PullRequestWorkflow prWorkflow,
         ProjectFileManager projectFiles,
         ModelRegistry modelRegistry,
@@ -42,9 +42,11 @@ public class SmeAgent : CustomAgent
         IGateCheckService gateCheck,
         ILogger<SmeAgent> logger,
         SmeMetrics smeMetrics,
-        RoleContextProvider? roleContextProvider = null)
-        : base(identity, messageBus, github, prWorkflow, projectFiles, modelRegistry,
-               memoryStore, config, gateCheck, logger, roleContextProvider)
+        RoleContextProvider? roleContextProvider = null,
+        IWorkItemService? workItemService = null)
+        : base(identity, messageBus, prWorkflow, projectFiles, modelRegistry,
+               memoryStore, config, gateCheck, logger, roleContextProvider,
+               workItemService: workItemService)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
         _messageBus = messageBus;

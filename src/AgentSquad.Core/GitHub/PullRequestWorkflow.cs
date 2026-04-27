@@ -1,5 +1,7 @@
 using System.Text.RegularExpressions;
 using AgentSquad.Core.AI;
+using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub.Models;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
@@ -28,7 +30,10 @@ public enum MergeAttemptResult
 /// </summary>
 public partial class PullRequestWorkflow
 {
-    private readonly IGitHubService _github;
+    private readonly IPullRequestService _prService;
+    private readonly IRepositoryContentService _repoContent;
+    private readonly IReviewService _reviewService;
+    private readonly IBranchService _branchService;
     private readonly ILogger<PullRequestWorkflow> _logger;
     private readonly string _defaultBranch;
 
@@ -77,12 +82,18 @@ public partial class PullRequestWorkflow
     private readonly ConflictDetector? _conflictDetector;
 
     public PullRequestWorkflow(
-        IGitHubService github,
+        IPullRequestService prService,
+        IRepositoryContentService repoContent,
+        IReviewService reviewService,
+        IBranchService branchService,
         ILogger<PullRequestWorkflow> logger,
         string defaultBranch = "main",
         ConflictDetector? conflictDetector = null)
     {
-        _github = github ?? throw new ArgumentNullException(nameof(github));
+        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
+        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
+        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
+        _branchService = branchService ?? throw new ArgumentNullException(nameof(branchService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _defaultBranch = defaultBranch;
         _conflictDetector = conflictDetector;
@@ -96,7 +107,7 @@ public partial class PullRequestWorkflow
     {
         try
         {
-            var allFiles = await _github.GetRepositoryTreeAsync(_defaultBranch, ct);
+            var allFiles = await _repoContent.GetRepositoryTreeAsync(_defaultBranch, ct);
             var staleFiles = allFiles
                 .Where(f => f.StartsWith(".agentsquad/", StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -114,7 +125,7 @@ public partial class PullRequestWorkflow
             {
                 try
                 {
-                    await _github.DeleteFileAsync(file, $"Cleanup stale task lock: {file}", _defaultBranch, ct);
+                    await _repoContent.DeleteFileAsync(file, $"Cleanup stale task lock: {file}", _defaultBranch, ct);
                     _logger.LogDebug("Deleted stale task file: {File}", file);
                 }
                 catch (Exception ex)
@@ -219,7 +230,7 @@ public partial class PullRequestWorkflow
         var trackingPath = $".agentsquad/{taskSlug}.task";
         var trackingContent = $"agent: {agentName}\ntask: {taskTitle}\ncomplexity: {complexity}\nstatus: in-progress\n";
         _logger.LogInformation("Committing task marker to {Branch} for '{Title}'", branchName, taskTitle);
-        await _github.CreateOrUpdateFileAsync(
+        await _repoContent.CreateOrUpdateFileAsync(
             trackingPath, trackingContent, $"Start task: {taskTitle}", branchName, ct);
 
         var body = FormatPullRequestBody(agentName, complexity, branchName, taskDescription, architectureRef, specRef);
@@ -234,10 +245,10 @@ public partial class PullRequestWorkflow
         AgentPullRequest pr;
         try
         {
-            pr = await _github.CreatePullRequestAsync(
-                prTitle, body, branchName, _defaultBranch, [.. labels], ct);
+            pr = (await _prService.CreateAsync(
+                prTitle, body, branchName, _defaultBranch, [.. labels], ct)).ToAgentPR();
         }
-        catch (Octokit.ApiValidationException)
+        catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
         {
             _logger.LogWarning("Task PR creation returned Validation Failed — looking for existing PR");
             var fallback = await FindExistingPullRequestAsync(prTitle, ct);
@@ -281,10 +292,10 @@ public partial class PullRequestWorkflow
         AgentPullRequest pr;
         try
         {
-            pr = await _github.CreatePullRequestAsync(
-                title, body, branchName, _defaultBranch, [.. prLabels], ct);
+            pr = (await _prService.CreateAsync(
+                title, body, branchName, _defaultBranch, [.. prLabels], ct)).ToAgentPR();
         }
-        catch (Octokit.ApiValidationException)
+        catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
         {
             _logger.LogWarning("PR creation for pushed branch returned Validation Failed — looking for existing PR");
             var fallback = await FindExistingPullRequestAsync(title, ct);
@@ -304,7 +315,7 @@ public partial class PullRequestWorkflow
         string titlePrefix,
         CancellationToken ct = default)
     {
-        var openPrs = await _github.GetOpenPullRequestsAsync(ct);
+        var openPrs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
         return openPrs.FirstOrDefault(pr =>
             pr.Title.StartsWith(titlePrefix, StringComparison.OrdinalIgnoreCase));
     }
@@ -318,7 +329,7 @@ public partial class PullRequestWorkflow
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(agentName);
 
-        var allPrs = await _github.GetOpenPullRequestsAsync(ct);
+        var allPrs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
         return allPrs
             .Where(pr => string.Equals(ParseAgentNameFromTitle(pr.Title), agentName, StringComparison.OrdinalIgnoreCase))
             .ToList()
@@ -331,7 +342,7 @@ public partial class PullRequestWorkflow
     public async Task<IReadOnlyList<AgentPullRequest>> GetUnassignedTasksAsync(
         CancellationToken ct = default)
     {
-        var allPrs = await _github.GetOpenPullRequestsAsync(ct);
+        var allPrs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
         return allPrs
             .Where(pr => ParseAgentNameFromTitle(pr.Title) is null)
             .ToList()
@@ -353,7 +364,7 @@ public partial class PullRequestWorkflow
         // an agent already reviewed/approved/tested it. Re-posting "ready for review" at this point
         // is always a duplicate caused by polling loops re-visiting a PR they already completed.
         // Labels checked: architect-approved, pm-approved, approved, tests-added
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is not null)
         {
             var progressLabels = new[]
@@ -378,7 +389,7 @@ public partial class PullRequestWorkflow
         {
             // Label already exists. Only post a comment if there's been a changes-requested
             // review since the last "ready for review" comment (i.e., actual rework happened).
-            var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+            var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
             var lastReadyComment = comments
                 .Where(c => c.Body.Contains("has marked this PR as ready for review"))
                 .OrderByDescending(c => c.CreatedAt)
@@ -397,7 +408,7 @@ public partial class PullRequestWorkflow
                 var reworkBody = $"✅ **{agentName}** has marked this PR as ready for review.\n\nRework complete — ready for re-review.";
                 if (!string.IsNullOrWhiteSpace(extraMarkdown))
                     reworkBody += "\n\n" + extraMarkdown;
-                await _github.AddPullRequestCommentAsync(prNumber, reworkBody, ct);
+                await _reviewService.AddCommentAsync(prNumber, reworkBody, ct);
             }
             else
             {
@@ -412,11 +423,11 @@ public partial class PullRequestWorkflow
         if (!string.IsNullOrWhiteSpace(extraMarkdown))
             readyBody += "\n\n" + extraMarkdown;
 
-        await _github.AddPullRequestCommentAsync(prNumber, readyBody, ct);
+        await _reviewService.AddCommentAsync(prNumber, readyBody, ct);
 
         // Update labels: swap in-progress for ready-for-review
         // Re-fetch since we may have fetched earlier for duplicate check
-        pr = await _github.GetPullRequestAsync(prNumber, ct);
+        pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is not null)
         {
             var updatedLabels = pr.Labels
@@ -425,7 +436,7 @@ public partial class PullRequestWorkflow
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
 
-            await _github.UpdatePullRequestAsync(prNumber, labels: updatedLabels, ct: ct);
+            await _prService.UpdateAsync(prNumber, labels: updatedLabels, ct: ct);
         }
     }
 
@@ -451,17 +462,19 @@ public partial class PullRequestWorkflow
 
         if (inlineComments is { Count: > 0 })
         {
-            await _github.CreatePullRequestReviewWithCommentsAsync(
-                prNumber, reviewBody, eventType, inlineComments, ct: ct);
+            await _reviewService.CreateReviewWithInlineCommentsAsync(
+                prNumber, reviewBody, eventType,
+                inlineComments.Select(c => new PlatformInlineComment { FilePath = c.FilePath, Line = c.Line, Body = c.Body }).ToList(),
+                ct: ct);
         }
         else
         {
-            await _github.AddPullRequestReviewAsync(prNumber, reviewBody, eventType, ct);
+            await _reviewService.AddReviewAsync(prNumber, reviewBody, eventType, ct);
         }
 
         if (approve)
         {
-            var pr = await _github.GetPullRequestAsync(prNumber, ct);
+            var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
             if (pr is not null)
             {
                 var updatedLabels = pr.Labels
@@ -469,7 +482,7 @@ public partial class PullRequestWorkflow
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();
 
-                await _github.UpdatePullRequestAsync(prNumber, labels: updatedLabels, ct: ct);
+                await _prService.UpdateAsync(prNumber, labels: updatedLabels, ct: ct);
             }
         }
     }
@@ -480,7 +493,7 @@ public partial class PullRequestWorkflow
     public async Task<IReadOnlyList<AgentPullRequest>> GetPendingReviewsAsync(
         CancellationToken ct = default)
     {
-        var allPrs = await _github.GetOpenPullRequestsAsync(ct);
+        var allPrs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
         return allPrs
             .Where(pr =>
                 pr.Labels.Contains(Labels.ReadyForReview) &&
@@ -506,13 +519,13 @@ public partial class PullRequestWorkflow
 
         _logger.LogInformation("Creating task branch {Branch} from {DefaultBranch}", branchName, _defaultBranch);
 
-        if (await _github.BranchExistsAsync(branchName, ct))
+        if (await _branchService.ExistsAsync(branchName, ct))
         {
             _logger.LogWarning("Branch {Branch} already exists, reusing it", branchName);
             return branchName;
         }
 
-        await _github.CreateBranchAsync(branchName, _defaultBranch, ct);
+        await _branchService.CreateAsync(branchName, _defaultBranch, ct);
         return branchName;
     }
 
@@ -558,7 +571,7 @@ public partial class PullRequestWorkflow
         // 2. Clean up any stale document content from a prior run on this branch
         try
         {
-            await _github.DeleteFileAsync(documentPath, "Clean stale document from prior run", branchName, ct);
+            await _repoContent.DeleteFileAsync(documentPath, "Clean stale document from prior run", branchName, ct);
             _logger.LogInformation("Removed stale {Path} from branch {Branch}", documentPath, branchName);
         }
         catch
@@ -569,7 +582,7 @@ public partial class PullRequestWorkflow
         // 3. Create a tracking marker so the branch has a diff from main (required for PR creation)
         // We do NOT commit a WIP placeholder into the actual document — only the final content goes there.
         _logger.LogInformation("Creating branch marker on {Branch} for {Path}", branchName, documentPath);
-        await _github.CreateOrUpdateFileAsync(
+        await _repoContent.CreateOrUpdateFileAsync(
             $".agentsquad/{docSlug}.tracking",
             $"agent: {agentName}\ndocument: {documentPath}\nstatus: in-progress\n",
             $"Start work on {documentPath}",
@@ -592,11 +605,11 @@ public partial class PullRequestWorkflow
         AgentPullRequest pr;
         try
         {
-            pr = await _github.CreatePullRequestAsync(
+            pr = (await _prService.CreateAsync(
                 fullPrTitle, prBody, branchName, _defaultBranch,
-                [Labels.InProgress], ct);
+                [Labels.InProgress], ct)).ToAgentPR();
         }
-        catch (Octokit.ApiValidationException)
+        catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
         {
             // A PR already exists for this head→base (API caching race).
             // Fall back to finding the existing open PR.
@@ -628,7 +641,7 @@ public partial class PullRequestWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(documentContent);
 
         _logger.LogInformation("Committing {Path} to branch {Branch} for review", documentPath, pr.HeadBranch);
-        await _github.CreateOrUpdateFileAsync(documentPath, documentContent, commitMessage, pr.HeadBranch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(documentPath, documentContent, commitMessage, pr.HeadBranch, ct);
     }
 
     /// <summary>
@@ -648,7 +661,7 @@ public partial class PullRequestWorkflow
         var trackingPath = $".agentsquad/{docSlug}.tracking";
         try
         {
-            await _github.DeleteFileAsync(trackingPath, "Remove tracking marker", pr.HeadBranch, ct);
+            await _repoContent.DeleteFileAsync(trackingPath, "Remove tracking marker", pr.HeadBranch, ct);
         }
         catch (Exception ex)
         {
@@ -656,7 +669,7 @@ public partial class PullRequestWorkflow
         }
 
         // Update labels to show completion
-        await _github.UpdatePullRequestAsync(pr.Number,
+        await _prService.UpdateAsync(pr.Number,
             labels: [Labels.ReadyForReview, Labels.Approved], ct: ct);
 
         // Auto-merge
@@ -666,10 +679,10 @@ public partial class PullRequestWorkflow
         {
             try
             {
-                await _github.MergePullRequestAsync(pr.Number,
+                await _prService.MergeAsync(pr.Number,
                     $"Merge {documentPath} — approved by {agentName}", ct);
                 _logger.LogInformation("Merged document PR #{Number}", pr.Number);
-                try { await _github.DeleteBranchAsync(pr.HeadBranch, ct); } catch { /* best-effort */ }
+                try { await _branchService.DeleteAsync(pr.HeadBranch, ct); } catch { /* best-effort */ }
                 return;
             }
             catch (Exception ex) when (attempt < 3)
@@ -702,14 +715,14 @@ public partial class PullRequestWorkflow
 
         // 1. Commit final content to the PR branch
         _logger.LogInformation("Committing final {Path} to branch {Branch}", documentPath, pr.HeadBranch);
-        await _github.CreateOrUpdateFileAsync(documentPath, documentContent, commitMessage, pr.HeadBranch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(documentPath, documentContent, commitMessage, pr.HeadBranch, ct);
 
         // 2. Clean up the tracking marker file so it doesn't merge into main
         var docSlug = Slugify(System.IO.Path.GetFileNameWithoutExtension(documentPath));
         var trackingPath = $".agentsquad/{docSlug}.tracking";
         try
         {
-            await _github.DeleteFileAsync(trackingPath, "Remove tracking marker", pr.HeadBranch, ct);
+            await _repoContent.DeleteFileAsync(trackingPath, "Remove tracking marker", pr.HeadBranch, ct);
         }
         catch (Exception ex)
         {
@@ -717,7 +730,7 @@ public partial class PullRequestWorkflow
         }
 
         // 3. Update PR labels and description to show completion
-        await _github.UpdatePullRequestAsync(pr.Number,
+        await _prService.UpdateAsync(pr.Number,
             labels: [Labels.ReadyForReview, Labels.Approved], ct: ct);
 
         // 4. Auto-merge (no review needed for initial docs)
@@ -728,10 +741,10 @@ public partial class PullRequestWorkflow
         {
             try
             {
-                await _github.MergePullRequestAsync(pr.Number,
+                await _prService.MergeAsync(pr.Number,
                     $"Merge {documentPath} — auto-approved by {agentName}", ct);
                 _logger.LogInformation("Auto-merged document PR #{Number}", pr.Number);
-                try { await _github.DeleteBranchAsync(pr.HeadBranch, ct); } catch { /* best-effort */ }
+                try { await _branchService.DeleteAsync(pr.HeadBranch, ct); } catch { /* best-effort */ }
                 return;
             }
             catch (Exception ex) when (attempt < 3)
@@ -824,7 +837,7 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<bool> HasAgentApprovedAsync(int prNumber, string agentName, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         // Walk comments in reverse to find the most recent action by this agent
         foreach (var comment in comments.OrderByDescending(c => c.CreatedAt))
         {
@@ -874,11 +887,11 @@ public partial class PullRequestWorkflow
         var comment = string.IsNullOrWhiteSpace(reason)
             ? $"**[{approverAgent}] APPROVED**"
             : $"**[{approverAgent}] APPROVED**\n\n{reason}";
-        await _github.AddPullRequestCommentAsync(prNumber, comment, ct);
+        await _reviewService.AddCommentAsync(prNumber, comment, ct);
         _logger.LogInformation("Agent {Agent} approved PR #{Number}", approverAgent, prNumber);
 
         // Determine required reviewers based on PR author
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         var authorRole = DetectAuthorRole(pr?.Title ?? "");
         var requiredReviewers = GetRequiredReviewers(authorRole);
 
@@ -897,7 +910,7 @@ public partial class PullRequestWorkflow
                     .Append(Labels.Approved)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();
-                await _github.UpdatePullRequestAsync(prNumber, labels: updatedLabels, ct: ct);
+                await _prService.UpdateAsync(prNumber, labels: updatedLabels, ct: ct);
             }
 
             // If inline test workflow is active, don't merge yet — wait for TE to add tests AND post results
@@ -908,7 +921,7 @@ public partial class PullRequestWorkflow
                 _logger.LogInformation(
                     "PR #{Number} approved by all reviewers but waiting for Test Engineer to add tests",
                     prNumber);
-                await _github.AddPullRequestCommentAsync(prNumber,
+                await _reviewService.AddCommentAsync(prNumber,
                     "✅ **Code approved by all reviewers.** Waiting for the Test Engineer to add tests before merging.", ct);
                 return MergeAttemptResult.AwaitingTests;
             }
@@ -919,7 +932,7 @@ public partial class PullRequestWorkflow
                 pr is not null &&
                 pr.Labels.Contains(Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
             {
-                var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+                var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
                 bool hasTeResultComment = comments.Any(c =>
                     c.Body.Contains("Test Engineer", StringComparison.OrdinalIgnoreCase) &&
                     (c.Body.Contains("Test Results", StringComparison.OrdinalIgnoreCase) ||
@@ -959,7 +972,7 @@ public partial class PullRequestWorkflow
     public async Task<MergeAttemptResult> MergeApprovedTestedPRAsync(
         int prNumber, string mergerAgent, CancellationToken ct = default)
     {
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
             return MergeAttemptResult.NotOpen;
 
@@ -976,17 +989,17 @@ public partial class PullRequestWorkflow
     {
         try
         {
-            await _github.MergePullRequestAsync(prNumber,
+            await _prService.MergeAsync(prNumber,
                 $"Merged by {mergerAgent} after approval from {string.Join(" and ", approvedReviewers)}", ct);
         }
-        catch (Octokit.PullRequestNotMergeableException)
+        catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.NotMergeable)
         {
             _logger.LogWarning("PR #{Number} not mergeable, attempting branch update", prNumber);
-            var updated = await _github.UpdatePullRequestBranchAsync(prNumber, ct);
+            var updated = await _prService.UpdateBranchAsync(prNumber, ct);
             if (!updated)
             {
                 _logger.LogWarning("PR #{Number} branch update failed — attempting force-rebase onto main", prNumber);
-                updated = await _github.RebaseBranchOnMainAsync(prNumber, ct);
+                updated = await _prService.RebaseBranchAsync(prNumber, ct);
             }
 
             if (updated)
@@ -1000,12 +1013,12 @@ public partial class PullRequestWorkflow
                     await Task.Delay(delayMs, ct);
                     try
                     {
-                        await _github.MergePullRequestAsync(prNumber,
+                        await _prService.MergeAsync(prNumber,
                             $"Merged by {mergerAgent} after branch sync and approval from {string.Join(" and ", approvedReviewers)}", ct);
                         lastException = null;
                         break;
                     }
-                    catch (Octokit.PullRequestNotMergeableException retryEx)
+                    catch (PlatformConflictException retryEx) when (retryEx.Kind == PlatformConflictKind.NotMergeable)
                     {
                         lastException = retryEx;
                         _logger.LogDebug(retryEx,
@@ -1017,7 +1030,7 @@ public partial class PullRequestWorkflow
                 if (lastException is not null)
                 {
                     _logger.LogWarning(lastException, "PR #{Number} still not mergeable after branch update and {Max} retries", prNumber, maxMergeRetries);
-                    await _github.AddPullRequestCommentAsync(prNumber,
+                    await _reviewService.AddCommentAsync(prNumber,
                         $"⚠️ **Merge blocked** — PR has conflicts with `main` that could not be auto-resolved. " +
                         $"Branch update was attempted but merge still failed after {maxMergeRetries} retries.", ct);
                     return MergeAttemptResult.ConflictBlocked;
@@ -1026,7 +1039,7 @@ public partial class PullRequestWorkflow
             else
             {
                 _logger.LogWarning("PR #{Number} branch update and rebase both failed", prNumber);
-                await _github.AddPullRequestCommentAsync(prNumber,
+                await _reviewService.AddCommentAsync(prNumber,
                     $"⚠️ **Merge blocked** — PR has conflicts with `main` that require resolution. " +
                     $"The engineer should rebase and resolve conflicts.", ct);
                 return MergeAttemptResult.ConflictBlocked;
@@ -1035,7 +1048,7 @@ public partial class PullRequestWorkflow
 
         // Clean up the head branch after merge
         if (pr is not null && !string.IsNullOrEmpty(pr.HeadBranch))
-            await _github.DeleteBranchAsync(pr.HeadBranch, ct);
+            await _branchService.DeleteAsync(pr.HeadBranch, ct);
 
         // Proactively sync other open PRs with main to prevent merge conflicts from accumulating.
         // This runs after every successful merge so other PRs stay up-to-date.
@@ -1053,7 +1066,7 @@ public partial class PullRequestWorkflow
     {
         try
         {
-            var openPRs = await _github.GetOpenPullRequestsAsync(ct);
+            var openPRs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
             var behindPRs = openPRs
                 .Where(pr => pr.Number != justMergedPrNumber)
                 .ToList();
@@ -1080,11 +1093,11 @@ public partial class PullRequestWorkflow
                         continue;
                     }
 
-                    var isBehind = await _github.IsBranchBehindMainAsync(pr.Number, ct);
+                    var isBehind = await _prService.IsBehindBaseAsync(pr.Number, ct);
                     if (!isBehind)
                         continue;
 
-                    var updated = await _github.UpdatePullRequestBranchAsync(pr.Number, ct);
+                    var updated = await _prService.UpdateBranchAsync(pr.Number, ct);
                     if (updated)
                     {
                         _logger.LogInformation("Synced PR #{PrNumber} branch with main", pr.Number);
@@ -1117,7 +1130,7 @@ public partial class PullRequestWorkflow
     public async Task<(string Reviewer, string Feedback)?> GetPendingChangesRequestedAsync(
         int prNumber, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         var latestByAgent = new Dictionary<string, (bool IsApproval, string Body)>(StringComparer.OrdinalIgnoreCase);
 
         // Walk forward so later comments overwrite earlier ones per agent
@@ -1179,7 +1192,7 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<string> GetPRScreenshotContextAsync(int prNumber, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         var screenshots = new List<(string url, string context)>();
 
         foreach (var comment in comments)
@@ -1237,7 +1250,7 @@ public partial class PullRequestWorkflow
     public async Task<List<ScreenshotImage>> GetPRScreenshotImagesAsync(
         int prNumber, int maxImages = 5, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         var imageInfos = new List<(string url, string context)>();
 
         foreach (var comment in comments)
@@ -1360,7 +1373,7 @@ public partial class PullRequestWorkflow
     public async Task<string> GetPRCodeContextAsync(
         int prNumber, string headBranch, int maxFileSizeChars = 15000, CancellationToken ct = default)
     {
-        var changedFiles = await _github.GetPullRequestChangedFilesAsync(prNumber, ct);
+        var changedFiles = await _prService.GetChangedFilesAsync(prNumber, ct);
         if (changedFiles.Count == 0)
             return "";
 
@@ -1384,7 +1397,7 @@ public partial class PullRequestWorkflow
 
             try
             {
-                var content = await _github.GetFileContentAsync(filePath, headBranch, ct);
+                var content = await _repoContent.GetFileContentAsync(filePath, headBranch, ct);
                 if (string.IsNullOrWhiteSpace(content))
                     continue;
 
@@ -1427,7 +1440,7 @@ public partial class PullRequestWorkflow
         ArgumentException.ThrowIfNullOrWhiteSpace(details);
 
         var comment = $"**[{reviewerAgent}] CHANGES REQUESTED**\n\n{details}";
-        await _github.AddPullRequestCommentAsync(prNumber, comment, ct);
+        await _reviewService.AddCommentAsync(prNumber, comment, ct);
         _logger.LogInformation("Agent {Agent} requested changes on PR #{Number}", reviewerAgent, prNumber);
     }
 
@@ -1442,14 +1455,14 @@ public partial class PullRequestWorkflow
         string commitMessage,
         CancellationToken ct = default)
     {
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is null)
             throw new InvalidOperationException($"PR #{prNumber} not found");
 
         _logger.LogInformation("Committing fix to PR #{Number} branch {Branch}: {Path}",
             prNumber, pr.HeadBranch, filePath);
 
-        await _github.CreateOrUpdateFileAsync(filePath, content, commitMessage, pr.HeadBranch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(filePath, content, commitMessage, pr.HeadBranch, ct);
     }
 
     /// <summary>
@@ -1465,7 +1478,7 @@ public partial class PullRequestWorkflow
         string commitMessage,
         CancellationToken ct = default)
     {
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is null)
             throw new InvalidOperationException($"PR #{prNumber} not found");
 
@@ -1488,7 +1501,7 @@ public partial class PullRequestWorkflow
                 if (conflicts.Count > 0)
                 {
                     // Dedup: skip if a conflict warning with the same content already exists on this PR
-                    var existingComments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+                    var existingComments = await _reviewService.GetCommentsAsync(prNumber, ct);
                     var alreadyWarned = existingComments.Any(c =>
                         c.Body.Contains("Conflict Detection Warnings", StringComparison.OrdinalIgnoreCase)
                         && conflicts.All(conflict => c.Body.Contains(
@@ -1499,7 +1512,7 @@ public partial class PullRequestWorkflow
                         var warningComment = "## ⚠️ Conflict Detection Warnings\n\n" +
                             string.Join("\n\n", conflicts) +
                             "\n\n_These warnings were generated automatically. Please review for potential duplicate code._";
-                        await _github.AddPullRequestCommentAsync(prNumber, warningComment, ct);
+                        await _reviewService.AddCommentAsync(prNumber, warningComment, ct);
                     }
                     _logger.LogWarning("Detected {Count} potential conflicts for PR #{Number}", conflicts.Count, prNumber);
                 }
@@ -1517,7 +1530,9 @@ public partial class PullRequestWorkflow
 
         try
         {
-            await _github.BatchCommitFilesAsync(fileTuples, commitMessage, pr.HeadBranch, ct);
+            await _repoContent.BatchCommitFilesAsync(
+                fileTuples.Select(f => new PlatformFileCommit { Path = f.Path, Content = f.Content }).ToList(),
+                commitMessage, pr.HeadBranch, ct);
         }
         catch (Exception ex)
         {
@@ -1530,7 +1545,7 @@ public partial class PullRequestWorkflow
             {
                 try
                 {
-                    await _github.CreateOrUpdateFileAsync(
+                    await _repoContent.CreateOrUpdateFileAsync(
                         file.Path, file.Content,
                         $"{commitMessage}: {file.Path}",
                         pr.HeadBranch, ct);
@@ -1552,7 +1567,7 @@ public partial class PullRequestWorkflow
     public async Task<IReadOnlyList<AgentPullRequest>> GetCodePRsPendingReviewAsync(
         CancellationToken ct = default)
     {
-        var allPrs = await _github.GetOpenPullRequestsAsync(ct);
+        var allPrs = (await _prService.ListOpenAsync(ct)).ToAgentPRs();
         var pending = new List<AgentPullRequest>();
 
         foreach (var pr in allPrs)
@@ -1581,7 +1596,7 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<bool> NeedsReviewFromAsync(int prNumber, string agentName, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         var ordered = comments.OrderByDescending(c => c.CreatedAt).ToList();
 
         // Find the agent's most recent review comment and whether it was an approval
@@ -1637,7 +1652,7 @@ public partial class PullRequestWorkflow
         // This agent APPROVED but rework happened (triggered by a different reviewer).
         // Only re-review if this agent is the SOLE required reviewer for this PR.
         // Otherwise, let the reviewer who requested changes handle it.
-        var pr = await _github.GetPullRequestAsync(prNumber, ct);
+        var pr = (await _prService.GetAsync(prNumber, ct))?.ToAgentPR();
         if (pr is not null)
         {
             var authorRole = DetectAuthorRole(pr.Title);
@@ -1661,7 +1676,7 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<bool> HasNewCommitsSinceReviewAsync(int prNumber, string reviewerName, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         var ordered = comments.OrderByDescending(c => c.CreatedAt).ToList();
 
         // Find this reviewer's last "CHANGES REQUESTED" comment
@@ -1682,7 +1697,7 @@ public partial class PullRequestWorkflow
             return true;
 
         // Get PR commits and check if any are newer than the last review
-        var commits = await _github.GetPullRequestCommitsWithDatesAsync(prNumber, ct);
+        var commits = await _prService.GetCommitsWithDatesAsync(prNumber, ct);
         return commits.Any(c => c.CommittedAt > lastReviewTime.Value);
     }
 
@@ -1692,7 +1707,7 @@ public partial class PullRequestWorkflow
     /// </summary>
     public async Task<bool> HasAgentReviewedAsync(int prNumber, string agentName, CancellationToken ct = default)
     {
-        var comments = await _github.GetPullRequestCommentsAsync(prNumber, ct);
+        var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
         foreach (var comment in comments.OrderByDescending(c => c.CreatedAt))
         {
             var approvalMatch = ApprovalPattern.Match(comment.Body);

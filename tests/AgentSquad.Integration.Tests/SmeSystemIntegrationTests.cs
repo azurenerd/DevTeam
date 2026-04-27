@@ -106,21 +106,25 @@ public class SmeSystemIntegrationTests : IDisposable
         mockGitHub.Setup(g => g.RepositoryFullName).Returns("test-owner/test-repo");
         services.AddSingleton(mockGitHub.Object);
 
+        // Platform interfaces (mock — tests don't exercise real platform calls)
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IPullRequestService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IWorkItemService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IRepositoryContentService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IReviewService>().Object);
+        services.AddSingleton(new Mock<AgentSquad.Core.DevPlatform.Capabilities.IBranchService>().Object);
+
         services.AddInProcessMessageBus();
         services.AddSingleton<AgentUsageTracker>();
         services.AddSemanticKernelModels();
 
-        var testDbPath = Path.Combine(Path.GetTempPath(), $"agentsquad-test-{Guid.NewGuid():N}.db");
+        var testDbPath= Path.Combine(Path.GetTempPath(), $"agentsquad-test-{Guid.NewGuid():N}.db");
         services.AddSingleton(new AgentStateStore(testDbPath));
         services.AddSingleton(new AgentMemoryStore(testDbPath));
         services.AddSingleton<ProjectFileManager>(sp =>
             new ProjectFileManager(
                 sp.GetRequiredService<IGitHubService>(),
                 sp.GetRequiredService<ILogger<ProjectFileManager>>()));
-        services.AddSingleton<PullRequestWorkflow>(sp =>
-            new PullRequestWorkflow(
-                sp.GetRequiredService<IGitHubService>(),
-                sp.GetRequiredService<ILogger<PullRequestWorkflow>>()));
+        services.AddSingleton<PullRequestWorkflow>();
         services.AddSingleton<IssueWorkflow>();
         services.AddSingleton<ConflictResolver>();
         services.AddSingleton<IGateCheckService, GateCheckService>();

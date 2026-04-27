@@ -53,7 +53,6 @@ public class TestEngineerAgent : AgentBase
         string TestOutput);
 
     private readonly IMessageBus _messageBus;
-    private readonly IGitHubService _github;
     private readonly IPullRequestService _prService;
     private readonly IWorkItemService _workItemService;
     private readonly IRepositoryContentService _repoContent;
@@ -105,7 +104,6 @@ public class TestEngineerAgent : AgentBase
     public TestEngineerAgent(
         AgentIdentity identity,
         IMessageBus messageBus,
-        IGitHubService github,
         IPullRequestService prService,
         IWorkItemService workItemService,
         IRepositoryContentService repoContent,
@@ -130,7 +128,6 @@ public class TestEngineerAgent : AgentBase
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _github = github ?? throw new ArgumentNullException(nameof(github));
         _prService = prService ?? throw new ArgumentNullException(nameof(prService));
         _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
         _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
