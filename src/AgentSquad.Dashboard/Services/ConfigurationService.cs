@@ -79,6 +79,19 @@ public sealed class ConfigurationService : IConfigurationService
     /// <summary>Returns the latest config — either from last save or from IOptionsMonitor.</summary>
     public AgentSquadConfig GetCurrentConfig() => _lastSavedConfig ?? _config.CurrentValue;
 
+    /// <inheritdoc/>
+    public AgentSquadConfig RefreshFromDisk()
+    {
+        // Clear the in-memory cache so we fall through to IOptionsMonitor
+        _lastSavedConfig = null;
+
+        // Force the configuration root to reload from disk
+        if (_rootConfiguration is IConfigurationRoot configRoot)
+            configRoot.Reload();
+
+        return _config.CurrentValue;
+    }
+
     /// <summary>
     /// Validates a GitHub PAT token against a specified repo.
     /// Returns a result with repo info on success, or error message on failure.

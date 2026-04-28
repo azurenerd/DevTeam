@@ -1968,8 +1968,8 @@ else if (_config is not null)
     {
         try
         {
-            // Deep-copy the config so edits don't affect the running system until save
-            var current = ConfigService.GetCurrentConfig();
+            // Re-read from disk to pick up any external changes (manual edits, other processes)
+            var current = ConfigService.RefreshFromDisk();
             _config = DeepCopy(current);
 
             // Detect if PAT came from User Secrets (non-empty PAT but appsettings.json has empty value)

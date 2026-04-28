@@ -81,6 +81,13 @@ public sealed class HttpConfigurationService : IConfigurationService
         return new AgentSquadConfig();
     }
 
+    /// <inheritdoc/>
+    public AgentSquadConfig RefreshFromDisk()
+    {
+        _cachedConfig = null;
+        return GetCurrentConfig();
+    }
+
     public async Task SaveConfigAsync(AgentSquadConfig updatedConfig)
     {
         // Serialize on the calling thread (safe, CPU-bound)

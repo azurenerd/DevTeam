@@ -10,6 +10,12 @@ public interface IConfigurationService
     /// <summary>Returns the current in-memory config snapshot.</summary>
     AgentSquadConfig GetCurrentConfig();
 
+    /// <summary>
+    /// Re-reads appsettings.json from disk and clears any in-memory cache,
+    /// so the next GetCurrentConfig call returns the latest on-disk values.
+    /// </summary>
+    AgentSquadConfig RefreshFromDisk();
+
     /// <summary>Saves updated configuration to appsettings.json.</summary>
     Task SaveConfigAsync(AgentSquadConfig updatedConfig);
 
