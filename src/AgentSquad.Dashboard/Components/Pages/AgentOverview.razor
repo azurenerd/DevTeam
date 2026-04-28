@@ -1034,16 +1034,16 @@ else
         {
             0 => "NotStarted",
             1 => "Running",
-            2 => "Completed",
-            3 => "Failed",
-            4 => "Cancelled",
+            2 => "Paused",
+            3 => "Completed",
+            4 => "Failed",
+            5 => "Cancelled",
             _ => "Idle"
         };
         public string ModeText => mode switch
         {
             0 => "Project",
-            1 => "SinglePR",
-            2 => "Feature",
+            1 => "Feature",
             _ => ""
         };
     }

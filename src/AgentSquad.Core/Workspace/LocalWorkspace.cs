@@ -57,6 +57,21 @@ public class LocalWorkspace
             if (Directory.Exists(Path.Combine(RepoPath, ".git")))
             {
                 _logger.LogInformation("[{Agent}] Workspace exists at {Path}, fetching latest", _agentId, RepoPath);
+
+                // Validate remote URL matches expected platform — update if platform changed
+                var originResult = await RunGitAsync("remote", "get-url", "origin", ct: ct, throwOnError: false);
+                var currentOrigin = originResult.StandardOutput?.Trim();
+                if (string.IsNullOrWhiteSpace(currentOrigin))
+                {
+                    _logger.LogWarning("[{Agent}] Git origin remote missing, adding it", _agentId);
+                    await RunGitAsync("remote", "add", "origin", _repoUrl, ct: ct, throwOnError: false);
+                }
+                else if (currentOrigin != _repoUrl.Trim())
+                {
+                    _logger.LogWarning("[{Agent}] Git remote origin changed, updating to match platform", _agentId);
+                    await RunGitAsync("remote", "set-url", "origin", _repoUrl, ct: ct);
+                }
+
                 await RunGitAsync("fetch", "--all", ct: ct);
                 // Self-heal any mid-rebase/merge/cherry-pick state left behind by a
                 // crashed prior run before attempting checkout.

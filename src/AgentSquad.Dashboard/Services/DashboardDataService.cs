@@ -1078,8 +1078,15 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         {
             using var cts = new CancellationTokenSource(DashboardApiTimeout);
             var allPrs = await _github.GetAllPullRequestsAsync(cts.Token);
-            _cachedPullRequests = allPrs.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
-            _lastPrFetchUtc = DateTime.UtcNow;
+            if (allPrs != null)
+            {
+                _cachedPullRequests = allPrs.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
+                _lastPrFetchUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _logger.LogWarning("PR fetch returned null — keeping cached data");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1111,9 +1118,16 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         {
             using var cts = new CancellationTokenSource(DashboardApiTimeout);
             var allIssues = await _github.GetAllIssuesAsync(cts.Token);
-            _logger.LogInformation("Work item fetch: total={Total} items from platform", allIssues.Count);
-            _cachedIssues = allIssues.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
-            _lastIssueFetchUtc = DateTime.UtcNow;
+            if (allIssues != null)
+            {
+                _logger.LogInformation("Work item fetch: total={Total} items from platform", allIssues.Count);
+                _cachedIssues = allIssues.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
+                _lastIssueFetchUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _logger.LogWarning("Work item fetch returned null — keeping cached data");
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1148,9 +1162,12 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                 try
                 {
                     var allIssues = await _github.GetAllIssuesAsync();
-                    _cachedIssues = allIssues.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
-                    _lastIssueFetchUtc = DateTime.UtcNow;
-                    _logger.LogInformation("Background refresh: loaded {Count} work items", _cachedIssues.Count);
+                    if (allIssues != null)
+                    {
+                        _cachedIssues = allIssues.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
+                        _lastIssueFetchUtc = DateTime.UtcNow;
+                        _logger.LogInformation("Background refresh: loaded {Count} work items", _cachedIssues.Count);
+                    }
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Background work item refresh failed"); }
 
@@ -1158,9 +1175,12 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                 try
                 {
                     var allPrs = await _github.GetAllPullRequestsAsync();
-                    _cachedPullRequests = allPrs.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
-                    _lastPrFetchUtc = DateTime.UtcNow;
-                    _logger.LogInformation("Background refresh: loaded {Count} PRs", _cachedPullRequests.Count);
+                    if (allPrs != null)
+                    {
+                        _cachedPullRequests = allPrs.Select(AgentSquad.Core.DevPlatform.Providers.GitHub.GitHubModelMapper.ToPlatform).ToList();
+                        _lastPrFetchUtc = DateTime.UtcNow;
+                        _logger.LogInformation("Background refresh: loaded {Count} PRs", _cachedPullRequests.Count);
+                    }
                 }
                 catch (Exception ex) { _logger.LogDebug(ex, "Background PR refresh failed"); }
 

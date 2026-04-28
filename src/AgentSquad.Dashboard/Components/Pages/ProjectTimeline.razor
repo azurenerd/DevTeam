@@ -455,8 +455,8 @@ else
             try { await Task.WhenAll(issuesTask, prsTask).WaitAsync(cts.Token); }
             catch (OperationCanceledException) { }
 
-            var newIssues = issuesTask.IsCompletedSuccessfully ? issuesTask.Result.ToList() : [];
-            var newPRs = prsTask.IsCompletedSuccessfully ? prsTask.Result.ToList() : [];
+            var newIssues = issuesTask.IsCompletedSuccessfully && issuesTask.Result != null ? issuesTask.Result.ToList() : [];
+            var newPRs = prsTask.IsCompletedSuccessfully && prsTask.Result != null ? prsTask.Result.ToList() : [];
             _isRateLimited = DataService.IsRateLimited;
 
             // Compute fingerprint: issue/PR numbers + states + labels count + PR merged status
