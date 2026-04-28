@@ -47,7 +47,10 @@ public sealed class AdoWorkItemService : AdoHttpClientBase, IWorkItemService
         string title, string body, IReadOnlyList<string> labels,
         CancellationToken ct = default)
     {
-        var type = DefaultWorkItemType;
+        // Map "enhancement" label to User Story type in ADO
+        var type = labels.Any(l => l.Equals("enhancement", StringComparison.OrdinalIgnoreCase))
+            ? (_platformConfig.AzureDevOps?.ExecutiveWorkItemType ?? "User Story")
+            : DefaultWorkItemType;
         var url = BuildUrl($"{Project}/_apis/wit/workitems/${Uri.EscapeDataString(type)}");
 
         var patchDoc = new List<object>
