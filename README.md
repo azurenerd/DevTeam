@@ -48,7 +48,7 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 - **Strategy Framework (A/B/C/D Code Generation)** — The SE can generate multiple candidate implementations in parallel (baseline, mcp-enhanced, copilot-cli, squad) in isolated git worktrees, score each via an LLM judge on Acceptance Criteria / Design / Readability, and apply the winner to the PR branch. After the build gate passes, `CandidateEvaluator` captures a Playwright screenshot for each strategy candidate and commits them to `.screenshots/pr-{N}-{strategyId}.png` on the PR branch. Screenshots are displayed inline in the expandable candidate detail rows on the Frameworks dashboard page. A `<!-- winner-strategy: {key} -->` HTML comment is appended to the PR body so the dashboard can identify the winning tile. Feature-flagged via `AgentSquad.StrategyFramework.Enabled` (default OFF). Sampling policy + cost budget + optional adaptive selector built in; per-strategy cost attribution in `AgentUsageTracker`; live experiment data in `/api/strategies/*` and the `/strategies` dashboard page. Validated end-to-end against live Copilot CLI in April 2026
 - **Feature Mode (WIP)** — In addition to greenfield project creation, AgentSquad supports building individual features against existing repositories. Define features via the `/features` dashboard page with title, description, acceptance criteria, base branch, and optional tech stack overrides. Each run (project or feature) is wrapped in an `ActiveRun` with a unique `RunId` — all workflow state, gates, issues, and PRs are scoped per-run. `RunCoordinator` enforces single-active-run semantics. `WorkflowProfile` abstraction provides different gate definitions, artifact paths, and agent requirements for each mode. Project Control card on the Overview page provides Start/Stop controls
 - **Phase-Gated Workflow** — State machine enforces linear progression: Initialization → Research → Architecture → Planning → Development → Testing → Review → Finalization
-- **Multi-Platform Support** — Works with GitHub (default) or Azure DevOps. ADO support includes PAT and Azure CLI bearer token auth, Work Items (Task/Bug/User Story), WIQL queries, Git Pushes API, and PR threads. Switch platforms via the dashboard dropdown — no code changes needed. See [docs/AzureDevOpsSetup.md](docs/AzureDevOpsSetup.md)
+- **Multi-Platform Support** — Works with GitHub (default) or Azure DevOps. ADO support includes PAT and Azure CLI bearer token auth, Work Items (Task/Bug/User Story), WIQL queries, Git Pushes API, PR threads, and native PR-to-task linking in the Development section. Switch platforms via the dashboard dropdown — no code changes needed. See [docs/AzureDevOpsSetup.md](docs/AzureDevOpsSetup.md)
 - **SinglePRMode** — When enabled, the entire project is delivered through a single engineering task and PR, simplifying the workflow for smaller projects. PM correctly gates issue closure on positive merge evidence (at least one merged PR must exist), preventing premature closure after resets
 - **GitHub-Native Coordination** — Dual-layer communication: in-process message bus (<1ms, real-time) + GitHub API (durable PRs/Issues, human-visible). All work products are real GitHub artifacts
 - **Multi-Model Support** — Anthropic Claude, OpenAI GPT, Azure OpenAI, and local Ollama with four configurable tiers (premium / standard / budget / local) assigned per agent role
@@ -431,15 +431,15 @@ Candidates that fail any gate are eliminated. If zero candidates survive, the SE
 
 ### LLM Judge Scoring
 
-Surviving candidates are scored by an LLM judge (`LlmJudge`) on three 0–10 axes:
+Surviving candidates are scored by **`LlmJudge`** (`AgentSquad.Agents.AI.LlmJudge`, registered via `Program.cs` as the production override) on three 0–10 axes:
 
 | Axis | What It Measures |
 |------|-----------------|
-| **Acceptance Criteria (AC)** | How completely the code satisfies the task's acceptance criteria from the issue |
+| **Acceptance Criteria (AC)** | How completely the code satisfies the task's acceptance criteria from the issue. Apps that reference data files but don't include them are penalized (AC ≤ 3) |
 | **Design** | Architecture quality, API design, separation of concerns, pattern adherence |
 | **Readability** | Code clarity, naming conventions, comment quality, consistency |
 
-The judge receives sanitized diffs (capped at `MaxJudgePatchChars`) for all surviving candidates in a single batch call and returns structured JSON scores.
+The judge receives sanitized diffs (capped at `MaxJudgePatchChars`) for all surviving candidates in a single batch call and returns structured JSON scores. If the judge fails, winner selection falls back to token/speed/ID tiebreakers.
 
 ### Winner Selection & Tiebreaking
 
@@ -471,7 +471,7 @@ flowchart LR
 ```
 
 
-If no LLM judge is configured, scoring is skipped and winner selection uses only the token/speed/ID tiebreakers.
+If no LLM judge is available (e.g., all AI providers are down), scoring is skipped and winner selection uses only the token/speed/ID tiebreakers.
 
 ### Post-Winner Flow
 
@@ -733,6 +733,11 @@ The Runner exposes lightweight health endpoints for monitoring and debugging:
 
 ### Recent Changes (2025–2026)
 
+- **LLM Judge for Strategy Framework** — Real `LlmJudge` (in `AgentSquad.Agents.AI`) scores candidates on Acceptance Criteria, Design, and Readability (0-10 each). Critical rule: apps that reference data files without including them score AC ≤ 3. Falls back to token/time tiebreaker on LLM failure. Registered via `Program.cs` override.
+- **ADO PR-to-Task Native Linking** — PRs created in Azure DevOps are now linked to their parent work items in the Development section (via `GitPullRequestToWorkItem` artifact link), enabling native ADO traceability.
+- **ADO 404 Log Noise Suppressed** — `GetFileContentAsync` uses `suppressNotFound: true` to silently return null on 404, eliminating ERROR-level noise for expected missing files.
+- **Git Apply --whitespace=fix** — All 4 `git apply` call sites (CandidateEvaluator + WinnerApplyService) now include `--whitespace=fix` to handle AI-generated trailing whitespace in patches.
+- **ADO Task State on Assignment** — `AssignTaskAsync` now transitions ADO work items from "New" → "Active" when assigned to an engineer.
 - **Feature Mode (WIP)** — New `ActiveRun` model scopes all workflow state by `RunId`. `RunCoordinator` manages run lifecycle with single-active-run enforcement. Features dashboard page for defining, managing, and launching feature builds. Project Control card on Overview for Start/Stop. REST APIs at `/api/runs/*` and `/api/features/*`
 - **Squad Framework Integration** — [bradygaster/squad](https://github.com/bradygaster/squad) added as a 4th strategy candidate alongside baseline, MCP-enhanced, and GitHub Copilot CLI. Auto-installs on first use. Configurable timeout via `SquadSeconds` (default 1800s). Stuck detection threshold 600s for long-running sub-agents
 - **Framework Screenshots in Dashboard** — Expandable candidate detail rows on the Frameworks page now show preview screenshots inline (base64 PNG), with scores, progress pipeline, timing, and failure details for each strategy candidate
@@ -742,10 +747,6 @@ The Runner exposes lightweight health endpoints for monitoring and debugging:
 - **TE gate bypass in SinglePRMode** — PM review no longer requires TE completion comment when SinglePRMode is enabled
 - **Inline review comments** — Architect and SE review comments now post as inline comments on the Files-changed tab using text-parse fallback when structured JSON output fails
 - **Strategy Framework validated** — A/B/C code generation with per-candidate screenshots, winner selection, and dashboard display confirmed working end-to-end with live Copilot CLI
-
-### Roadmap
-
-- **Interactive CLI A/B/C testing framework** — parallel multi-option agent testing to compare prompt/model/tool variants on identical tasks. See [docs/InteractiveCLIPlan.md](docs/InteractiveCLIPlan.md) for the full design.
 
 ## Technology Stack
 

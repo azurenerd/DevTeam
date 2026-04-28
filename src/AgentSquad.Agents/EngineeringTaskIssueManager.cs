@@ -367,7 +367,7 @@ internal sealed partial class EngineeringTaskIssueManager
         var newTitle = $"{engineerName}: {task.Name}";
         var newLabels = ReplaceStatusLabel(task.Labels, StatusAssigned);
 
-        await _workItems.UpdateAsync(issueNumber, title: newTitle, labels: newLabels, ct: ct);
+        await _workItems.UpdateAsync(issueNumber, title: newTitle, labels: newLabels, state: "inprogress", ct: ct);
 
         _cache[idx] = task with { Status = "Assigned", AssignedTo = engineerName };
         _logger.LogInformation("Assigned task issue #{Number} ({Name}) to {Engineer}",

@@ -97,6 +97,10 @@ public class AdoHttpClientBase : IDisposable
     }
 
     /// <summary>Send a GET request with authentication and retry logic.</summary>
+    /// <param name="url">The API endpoint URL.</param>
+    /// <param name="ct">Cancellation token.</param>
+    /// <param name="suppressNotFound">If true, returns default(T) for 404 responses without logging.
+    /// Use only for operations where 404 is expected (e.g., checking if optional files exist).</param>
     protected async Task<T?> GetAsync<T>(string url, CancellationToken ct = default, bool suppressNotFound = false)
     {
         var response = await SendWithRetryAsync(HttpMethod.Get, url, null, ct);
