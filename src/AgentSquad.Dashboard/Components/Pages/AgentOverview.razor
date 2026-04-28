@@ -237,8 +237,9 @@ else
                         var stepName = agent.CurrentStepName ?? activeStep?.Name;
                         var stepDescription = agent.CurrentStepDescription ?? activeStep?.Description;
                         // Resolve the parent task display name from the task tracker groups
-                        string? parentTaskName = null;
-                        if (activeStep is not null && _taskTracker is not null)
+                        // In standalone mode (5051), use the pre-resolved CurrentTaskName from the DTO
+                        string? parentTaskName = agent.CurrentTaskName;
+                        if (parentTaskName is null && activeStep is not null && _taskTracker is not null)
                         {
                             var groups = _taskTracker.GetGroupedSteps(agent.Id);
                             parentTaskName = groups.FirstOrDefault(g => g.TaskId == activeStep.TaskId)?.DisplayName;

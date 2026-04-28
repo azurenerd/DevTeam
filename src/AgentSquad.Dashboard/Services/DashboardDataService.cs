@@ -26,6 +26,9 @@ public sealed record AgentSnapshot
     public DateTime LastStatusChange { get; set; } = DateTime.UtcNow;
     public int ErrorCount { get; init; }
 
+    /// <summary>Current parent task name (e.g., "PM Specification", "Architecture Design").</summary>
+    public string? CurrentTaskName { get; init; }
+
     /// <summary>Current task tracker step name (e.g., "Generate PM Spec", "Review PR #5").</summary>
     public string? CurrentStepName { get; init; }
 
@@ -534,6 +537,12 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                     : cached.LastStatusChange;
 
                 var currentStep = _taskTracker?.GetCurrentStep(e.Agent.Id);
+                string? taskName = null;
+                if (currentStep is not null && _taskTracker is not null)
+                {
+                    taskName = _taskTracker.GetGroupedSteps(e.Agent.Id)
+                        .FirstOrDefault(g => g.TaskId == currentStep.TaskId)?.DisplayName;
+                }
 
                 _agentCache[e.Agent.Id] = cached with
                 {
@@ -542,6 +551,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                     LastStatusChange = statusChangeTime,
                     AssignedPullRequest = e.Agent.AssignedPullRequest,
                     ActiveModel = _modelRegistry.GetEffectiveModel(e.Agent.Id),
+                    CurrentTaskName = taskName,
                     CurrentStepName = currentStep?.Name,
                     CurrentStepDescription = currentStep?.Description
                 };
@@ -601,11 +611,19 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                 var step = _taskTracker.GetCurrentStep(agentId);
                 var stepName = step?.Name;
                 var stepDesc = step?.Description;
+                string? taskName = null;
+                if (step is not null)
+                {
+                    taskName = _taskTracker.GetGroupedSteps(agentId)
+                        .FirstOrDefault(g => g.TaskId == step.TaskId)?.DisplayName;
+                }
 
-                if (snapshot.CurrentStepName != stepName || snapshot.CurrentStepDescription != stepDesc)
+                if (snapshot.CurrentStepName != stepName || snapshot.CurrentStepDescription != stepDesc
+                    || snapshot.CurrentTaskName != taskName)
                 {
                     _agentCache[agentId] = snapshot with
                     {
+                        CurrentTaskName = taskName,
                         CurrentStepName = stepName,
                         CurrentStepDescription = stepDesc
                     };
@@ -868,6 +886,12 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         var usage = _modelRegistry.UsageTracker.GetStats(agent.Identity.Id);
         var diag = agent.CurrentDiagnostic;
         var currentStep = _taskTracker?.GetCurrentStep(agent.Identity.Id);
+        string? taskName = null;
+        if (currentStep is not null && _taskTracker is not null)
+        {
+            taskName = _taskTracker.GetGroupedSteps(agent.Identity.Id)
+                .FirstOrDefault(g => g.TaskId == currentStep.TaskId)?.DisplayName;
+        }
         return new()
         {
             Id = agent.Identity.Id,
@@ -885,6 +909,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             ActiveModel = _modelRegistry.GetEffectiveModel(agent.Identity.Id),
             LastStatusChange = DateTime.UtcNow,
             ErrorCount = agent.RecentErrors.Count,
+            CurrentTaskName = taskName,
             CurrentStepName = currentStep?.Name,
             CurrentStepDescription = currentStep?.Description,
             DiagnosticSummary = diag?.Summary,
