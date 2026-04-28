@@ -1086,10 +1086,16 @@ public class GitHubService : IGitHubService
 
             var result = await _rl.ExecuteAsync(async _ =>
             {
-                var issues = await _client.Issue.GetAllForRepository(_owner, _repo,
-                    new RepositoryIssueRequest { State = ItemStateFilter.Open });
+                var request = new RepositoryIssueRequest { State = ItemStateFilter.Open };
+                // Pre-filter by updated_at to reduce API payload; post-filter by CreatedAt for precision
+                if (_runStartedUtc.HasValue)
+                    request.Since = new DateTimeOffset(_runStartedUtc.Value, TimeSpan.Zero);
+                var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
                 TrackRateLimit();
-                return (IReadOnlyList<AgentIssue>)issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
+                var mapped = issues.Where(i => i.PullRequest == null).Select(i => MapIssue(i)).ToList();
+                if (_runStartedUtc.HasValue)
+                    mapped = mapped.Where(i => i.CreatedAt >= _runStartedUtc.Value).ToList();
+                return (IReadOnlyList<AgentIssue>)mapped;
             }, ct);
 
             _openIssuesCache = result;
@@ -1298,13 +1304,18 @@ public class GitHubService : IGitHubService
                     Filter = IssueFilter.All
                 };
                 request.Labels.Add(label);
+                if (_runStartedUtc.HasValue)
+                    request.Since = new DateTimeOffset(_runStartedUtc.Value, TimeSpan.Zero);
 
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
                 TrackRateLimit();
-                return (IReadOnlyList<AgentIssue>)issues
+                var mapped = issues
                     .Where(i => i.PullRequest is null)
                     .Select(i => MapIssue(i))
                     .ToList();
+                if (_runStartedUtc.HasValue)
+                    mapped = mapped.Where(i => i.CreatedAt >= _runStartedUtc.Value).ToList();
+                return (IReadOnlyList<AgentIssue>)mapped;
             }, ct);
 
             _labelIssuesCache[cacheKey] = (result, DateTime.UtcNow);
@@ -1395,13 +1406,18 @@ public class GitHubService : IGitHubService
                     Filter = IssueFilter.All
                 };
                 request.Labels.Add(label);
+                if (_runStartedUtc.HasValue)
+                    request.Since = new DateTimeOffset(_runStartedUtc.Value, TimeSpan.Zero);
 
                 var issues = await _client.Issue.GetAllForRepository(_owner, _repo, request);
                 TrackRateLimit();
-                return (IReadOnlyList<AgentIssue>)issues
+                var mapped = issues
                     .Where(i => i.PullRequest is null)
                     .Select(i => MapIssue(i))
                     .ToList();
+                if (_runStartedUtc.HasValue)
+                    mapped = mapped.Where(i => i.CreatedAt >= _runStartedUtc.Value).ToList();
+                return (IReadOnlyList<AgentIssue>)mapped;
             }, ct);
 
             _labelIssuesCache[cacheKey] = (result, DateTime.UtcNow);
