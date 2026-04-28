@@ -160,7 +160,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var repoUrl = $"https://x-access-token:{_config.Project.GitHubToken}@github.com/{_config.Project.GitHubRepo}.git";
+                var repoUrl = _config.GetGitCloneUrl();
                 _workspace = new LocalWorkspace(
                     _config.Workspace,
                     Identity.Id,

@@ -304,6 +304,21 @@ public sealed class HttpDashboardDataService : IDashboardDataService, IHostedSer
     public string RepositoryDisplayName => _repoFullName;
     public string PlatformName => _rateLimitInfo.PlatformName ?? "GitHub";
 
+    public string GetPullRequestUrl(int prNumber)
+    {
+        // In standalone mode, fall back to GitHub URL pattern. Platform-aware URLs require the runner.
+        if (PlatformName.Contains("Azure DevOps", StringComparison.OrdinalIgnoreCase))
+            return $"#pr-{prNumber}"; // ADO URL not available standalone
+        return $"https://github.com/{_repoFullName}/pull/{prNumber}";
+    }
+
+    public string GetWorkItemUrl(int workItemId)
+    {
+        if (PlatformName.Contains("Azure DevOps", StringComparison.OrdinalIgnoreCase))
+            return $"#wi-{workItemId}";
+        return $"https://github.com/{_repoFullName}/issues/{workItemId}";
+    }
+
     public PlatformRateLimitInfo GetRateLimitInfo() => _rateLimitInfo;
 
     public async Task<IReadOnlyList<PlatformPullRequest>> GetPullRequestsAsync()

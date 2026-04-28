@@ -253,7 +253,7 @@ else
                     {
                         <div class="agent-detail" @onclick:stopPropagation="true">
                             <span class="detail-label">🔗 Work</span>
-                            <a class="detail-value work-link" href="https://github.com/@DataService.RepositoryDisplayName/pull/@prNum" target="_blank" rel="noopener">
+                            <a class="detail-value work-link" href="@(int.TryParse(prNum, out var prId) ? DataService.GetPullRequestUrl(prId) : $"#pr-{prNum}")" target="_blank" rel="noopener">
                                 PR #@prNum ↗
                             </a>
                         </div>

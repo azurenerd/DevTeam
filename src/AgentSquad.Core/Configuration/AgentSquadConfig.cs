@@ -23,6 +23,22 @@ public class AgentSquadConfig
     public ReviewConfig Review { get; set; } = new();
     public StrategyFrameworkConfig StrategyFramework { get; set; } = new();
     public DevPlatformConfig DevPlatform { get; set; } = new();
+
+    /// <summary>
+    /// Build the authenticated git clone URL for the configured platform.
+    /// GitHub: https://x-access-token:{token}@github.com/{owner}/{repo}.git
+    /// ADO:    https://{pat}@dev.azure.com/{org}/{project}/_git/{repo}
+    /// </summary>
+    public string GetGitCloneUrl()
+    {
+        if (DevPlatform.Platform == DevPlatformType.AzureDevOps && DevPlatform.AzureDevOps is { } ado)
+        {
+            var pat = ado.Pat;
+            return $"https://{pat}@dev.azure.com/{ado.Organization}/{ado.Project}/_git/{ado.Repository}";
+        }
+
+        return $"https://x-access-token:{Project.GitHubToken}@github.com/{Project.GitHubRepo}.git";
+    }
 }
 
 public class ProjectConfig

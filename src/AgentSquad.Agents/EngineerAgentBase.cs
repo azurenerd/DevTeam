@@ -152,7 +152,7 @@ public abstract class EngineerAgentBase : AgentBase
         {
             try
             {
-                var repoUrl = $"https://x-access-token:{Config.Project.GitHubToken}@github.com/{Config.Project.GitHubRepo}.git";
+                var repoUrl = Config.GetGitCloneUrl();
                 Workspace = new LocalWorkspace(
                     Config.Workspace,
                     Identity.Id,

@@ -26,7 +26,7 @@ else if (_phases.Count == 0)
     {
         <div class="empty-state">
             <div class="empty-icon">⏳</div>
-            <div class="empty-text">GitHub API rate-limited</div>
+            <div class="empty-text">API rate-limited</div>
             <div class="empty-sub">Waiting for rate limit to reset. Timeline will load automatically when data becomes available.</div>
         </div>
     }
@@ -71,7 +71,7 @@ else
                 <button class="ntl-pill @(_statusFilter == "open" ? "active" : "")" @onclick='() => SetFilter("open")' data-testid="timeline-status-open">Open</button>
                 <button class="ntl-pill @(_statusFilter == "closed" ? "active" : "")" @onclick='() => SetFilter("closed")' data-testid="timeline-status-closed">Closed</button>
             </div>
-            <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh from GitHub" disabled="@_refreshing" data-testid="timeline-refresh"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
+            <button class="ntl-refresh-btn @(_refreshing ? "spinning" : "")" @onclick="ForceRefreshAsync" title="Force refresh" disabled="@_refreshing" data-testid="timeline-refresh"><svg class="ntl-refresh-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v2h-2"/></svg></button>
             <span class="ntl-topbar-divider">|</span>
             <div class="ntl-zoom-controls">
                 <button class="ntl-zoom-btn" @onclick="ScrollToStart" title="Jump to beginning">⏮</button>
@@ -227,7 +227,7 @@ else
     {
         <div class="ntl-detail-panel">
             <div class="ntl-detail-header">
-                <a class="ntl-detail-num ntl-type-@(sg.IsPullRequest ? "pr" : "issue")" href="@sg.Issue.Url" target="_blank" title="Open on GitHub">
+                <a class="ntl-detail-num ntl-type-@(sg.IsPullRequest ? "pr" : "issue")" href="@sg.Issue.Url" target="_blank" title="Open in platform">
                     @(sg.IsPullRequest ? "PR" : "Issue") #@sg.Issue.Number ↗
                 </a>
                 <span class="ntl-detail-state @(sg.Issue.State == "closed" ? "state-closed" : "state-open")">
@@ -308,7 +308,7 @@ else
         var screenshotUrl = BuildReadyForReviewScreenshotUrl(spr);
         <div class="ntl-detail-panel ntl-detail-pr-panel">
             <div class="ntl-detail-header">
-                <a class="ntl-detail-num ntl-type-pr" href="@spr.Url" target="_blank" title="Open on GitHub">
+                <a class="ntl-detail-num ntl-type-pr" href="@spr.Url" target="_blank" title="Open in platform">
                     PR #@spr.Number ↗
                 </a>
                 <span class="ntl-detail-state @(spr.IsMerged ? "state-merged" : spr.State == "closed" ? "state-closed" : "state-open")">
@@ -343,7 +343,7 @@ else
                         var tileClass = cand.IsWinner ? "ntl-screenshot-tile ntl-screenshot-winner" : "ntl-screenshot-tile";
                         <a class="@tileClass"
                            href="@cand.ImageUrl" target="_blank" rel="noopener"
-                           title="@(cand.IsWinner ? $"Winning candidate ({cand.MethodLabel}) — click to open on GitHub" : $"{cand.MethodLabel}")">
+                           title="@(cand.IsWinner ? $"Winning candidate ({cand.MethodLabel})" : $"{cand.MethodLabel}")">
                             <div class="ntl-screenshot-image-wrap">
                                 <img src="@cand.ImageUrl"
                                      alt="PR #@spr.Number @cand.MethodLabel preview"
@@ -428,7 +428,7 @@ else
     /// <summary>
     /// Background poll — refreshes timeline every 15s so new issues/PRs
     /// appear quickly. Uses cached data from DashboardDataService so it
-    /// only hits GitHub when the cache expires.
+    /// only hits the platform API when the cache expires.
     /// </summary>
     private async Task PollForUpdatesAsync(CancellationToken ct)
     {
@@ -1105,13 +1105,17 @@ else
         if (string.IsNullOrEmpty(pr.Url) || string.IsNullOrEmpty(pr.HeadSha))
             return results;
 
+        // Try GitHub URL pattern first, then ADO
+        string? owner = null, repo = null;
         var m = System.Text.RegularExpressions.Regex.Match(
             pr.Url,
             @"github\.com/([^/]+)/([^/]+)/pull/\d+",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (!m.Success) return results;
-        var owner = m.Groups[1].Value;
-        var repo = m.Groups[2].Value;
+        if (m.Success)
+        {
+            owner = m.Groups[1].Value;
+            repo = m.Groups[2].Value;
+        }
 
         // Winner resolution: body marker `<!-- winner-strategy: {key} -->` takes priority.
         var winnerKey = "baseline";
@@ -1124,24 +1128,28 @@ else
 
         // Try to find in-memory screenshot data from the CandidateStateStore.
         var storeScreenshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var task in CandidateStore.GetRecentTasks(20))
+        if (CandidateStore is not null)
         {
-            foreach (var (stratId, snap) in task.Candidates)
+            foreach (var task in CandidateStore.GetRecentTasks(20))
             {
-                if (!string.IsNullOrEmpty(snap.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))
+                if (task?.Candidates is null) continue;
+                foreach (var (stratId, snap) in task.Candidates)
                 {
-                    storeScreenshots[stratId] = $"data:image/png;base64,{snap.ScreenshotBase64}";
+                    if (!string.IsNullOrEmpty(snap?.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))
+                    {
+                        storeScreenshots[stratId] = $"data:image/png;base64,{snap.ScreenshotBase64}";
+                    }
                 }
             }
-        }
-        // Also check active tasks
-        foreach (var task in CandidateStore.GetActiveTasks())
-        {
-            foreach (var (stratId, snap) in task.Candidates)
+            foreach (var task in CandidateStore.GetActiveTasks())
             {
-                if (!string.IsNullOrEmpty(snap.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))
+                if (task?.Candidates is null) continue;
+                foreach (var (stratId, snap) in task.Candidates)
                 {
-                    storeScreenshots[stratId] = $"data:image/png;base64,{snap.ScreenshotBase64}";
+                    if (!string.IsNullOrEmpty(snap?.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))
+                    {
+                        storeScreenshots[stratId] = $"data:image/png;base64,{snap.ScreenshotBase64}";
+                    }
                 }
             }
         }
@@ -1165,12 +1173,12 @@ else
 
         foreach (var (key, label) in filtered)
         {
-            // Prefer in-memory screenshot from evaluation; fall back to GitHub raw URL.
+            // Prefer in-memory screenshot from evaluation; fall back to raw URL (GitHub only).
             if (storeScreenshots.TryGetValue(key, out var dataUrl))
             {
                 results.Add(new ScreenshotCandidate(key, label, dataUrl, IsWinner: key == winnerKey));
             }
-            else
+            else if (owner is not null && repo is not null)
             {
                 var path = $".screenshots/pr-{pr.Number}-{key}.png";
                 var url = $"https://raw.githubusercontent.com/{owner}/{repo}/{pr.HeadSha}/{path}";

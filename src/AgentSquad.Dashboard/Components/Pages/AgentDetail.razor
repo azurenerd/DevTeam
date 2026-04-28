@@ -108,7 +108,9 @@ else
                         }
                         @if (GetEffectivePrNumber() is { } detectedPr)
                         {
-                            var prUrl = $"https://github.com/{DataService.RepositoryDisplayName}/pull/{detectedPr}";
+                            var prUrl = int.TryParse(detectedPr, out var prId)
+                                ? DataService.GetPullRequestUrl(prId)
+                                : $"#pr-{detectedPr}";
                             <div class="detail-task-active">
                                 <span class="detail-field-label">Pull Request</span>
                                 <a class="detail-pr-link" href="@prUrl" target="_blank" rel="noopener noreferrer" data-testid="agent-detail-pr-link" data-pr-number="@detectedPr">

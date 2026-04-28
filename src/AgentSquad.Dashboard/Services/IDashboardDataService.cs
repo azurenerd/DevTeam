@@ -48,6 +48,11 @@ public interface IDashboardDataService
     string PlatformName { get; }
     bool IsRateLimited { get; }
     PlatformRateLimitInfo GetRateLimitInfo();
+
+    /// <summary>Build a web URL for a pull request on the current platform.</summary>
+    string GetPullRequestUrl(int prNumber);
+    /// <summary>Build a web URL for a work item on the current platform.</summary>
+    string GetWorkItemUrl(int workItemId);
     Task<IReadOnlyList<PlatformPullRequest>> GetPullRequestsAsync();
     Task<IReadOnlyList<PlatformWorkItem>> GetWorkItemsAsync();
 

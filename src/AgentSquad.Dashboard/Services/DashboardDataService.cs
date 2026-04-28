@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.Diagnostics;
 using AgentSquad.Core.GitHub;
@@ -109,6 +110,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly AgentChatService _chatService;
     private readonly IHubContext<AgentHub> _hubContext;
     private readonly IGitHubService _github;
+    private readonly IPlatformHostContext _platformHost;
     private readonly RateLimitManager _rateLimitManager;
     private readonly ILogger<DashboardDataService> _logger;
 
@@ -141,6 +143,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         AgentChatService chatService,
         IHubContext<AgentHub> hubContext,
         IGitHubService github,
+        IPlatformHostContext platformHost,
         RateLimitManager rateLimitManager,
         ILogger<DashboardDataService> logger)
     {
@@ -153,6 +156,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _chatService = chatService;
         _hubContext = hubContext;
         _github = github;
+        _platformHost = platformHost;
         _rateLimitManager = rateLimitManager;
         _logger = logger;
     }
@@ -1040,7 +1044,11 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     public bool IsRateLimited => _rateLimitManager.IsRateLimited;
 
     public string RepositoryDisplayName => _github.RepositoryFullName;
-    public string PlatformName => "GitHub";
+    public string PlatformName => _platformHost is Core.DevPlatform.Providers.AzureDevOps.AdoHostContext
+        ? "Azure DevOps" : "GitHub";
+
+    public string GetPullRequestUrl(int prNumber) => _platformHost.GetPullRequestWebUrl(prNumber);
+    public string GetWorkItemUrl(int workItemId) => _platformHost.GetWorkItemWebUrl(workItemId);
 
     public PlatformRateLimitInfo GetRateLimitInfo() => new()
     {
@@ -1049,7 +1057,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         ResetAt = _rateLimitManager.ResetAtUtc,
         TotalApiCalls = _rateLimitManager.TotalApiCalls,
         IsRateLimited = _rateLimitManager.IsRateLimited,
-        PlatformName = "GitHub"
+        PlatformName = PlatformName
     };
 
     /// <summary>Short timeout for dashboard API calls to avoid blocking on rate limiter semaphore contention.</summary>
