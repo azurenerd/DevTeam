@@ -14,6 +14,7 @@ public class DashboardDataService : IDashboardDataService
 {
     private readonly string _filePath;
     private readonly ILogger<DashboardDataService> _logger;
+    private readonly JsonSerializerOptions _jsonOptions;
     private DashboardData? _data;
     private string? _error;
     private FileSystemWatcher? _watcher;
@@ -26,6 +27,11 @@ public class DashboardDataService : IDashboardDataService
     public DashboardDataService(IConfiguration config, ILogger<DashboardDataService> logger)
     {
         _logger = logger;
+        _jsonOptions = new JsonSerializerOptions
+        {
+            ReadCommentHandling = JsonCommentHandling.Skip,
+            AllowTrailingCommas = true
+        };
         var configPath = config["DashboardDataFile"] ?? "wwwroot/data/dashboard-data.json";
         _filePath = Path.GetFullPath(configPath);
 
@@ -43,28 +49,50 @@ public class DashboardDataService : IDashboardDataService
         {
             if (!File.Exists(_filePath))
             {
-                _data = null;
-                _error = $"Dashboard data file not found. Expected location: {_filePath}";
+                if (_data == null)
+                {
+                    _error = $"Dashboard data file not found: {_filePath}";
+                }
                 _logger.LogWarning("Dashboard data file not found: {Path}", _filePath);
                 return;
             }
 
             var json = ReadFileWithRetry();
-            _data = JsonSerializer.Deserialize<DashboardData>(json);
+            var parsed = JsonSerializer.Deserialize<DashboardData>(json, _jsonOptions);
+            if (parsed == null)
+            {
+                _logger.LogWarning("Deserialization returned null for {Path}", _filePath);
+                if (_data == null)
+                {
+                    _error = "Dashboard data file is empty or invalid.";
+                }
+                return;
+            }
+
+            _data = parsed;
             _error = null;
             _lastWriteTime = File.GetLastWriteTimeUtc(_filePath);
+            _logger.LogInformation("Dashboard data loaded successfully from {Path}", _filePath);
         }
         catch (JsonException ex)
         {
-            _data = null;
-            _error = $"Error reading dashboard data: {ex.Message}";
-            _logger.LogError(ex, "Failed to deserialize dashboard data from {Path}", _filePath);
+            _logger.LogError(ex, "JSON parse error in {Path}: {Message}", _filePath, ex.Message);
+            if (_data == null)
+            {
+                _error = $"Error parsing dashboard data: {ex.Message}";
+            }
+            else
+            {
+                _logger.LogWarning("Keeping previous valid data; new file has errors.");
+            }
         }
         catch (Exception ex)
         {
-            _data = null;
-            _error = $"Error reading dashboard data: {ex.Message}";
             _logger.LogError(ex, "Failed to load dashboard data from {Path}", _filePath);
+            if (_data == null)
+            {
+                _error = $"Error reading dashboard data: {ex.Message}";
+            }
         }
     }
 

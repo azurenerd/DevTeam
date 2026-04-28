@@ -137,20 +137,19 @@ The repo name is read from `src/AgentSquad.Runner/appsettings.json` under `Agent
 
 ## 3. Building & Running
 
-### Architecture: Two Processes
+### Architecture: Single Process
 
-The system runs as two independent processes:
+The system runs as a single process — the Runner hosts everything (agents + dashboard + API):
 
 | Process | Port | Purpose |
 |---------|------|---------|
-| **Runner** | 5050 | Agent orchestration + REST API + embedded dashboard |
-| **Dashboard.Host** | 5051 | Standalone dashboard — **ALWAYS start alongside Runner** |
+| **Runner** | 5050 | Agent orchestration + REST API + full Blazor dashboard (all 18 pages) |
 
-The **Runner** hosts an embedded Blazor dashboard at port 5050 that has full functionality (including Configuration page, Develop wizard, and cleanup).
-
-The **Dashboard.Host** is an optional standalone process that connects to the Runner's REST API via `HttpDashboardDataService`. It retrieves ALL data (agents, activity, cost, status) via HTTP polling — no in-process access needed. It can be restarted independently without disrupting running agents. Only the Configuration settings editor and Engineering Plan page require embedded mode (port 5050).
+The Runner hosts a full Blazor Server dashboard with direct in-process access to all services (AgentRegistry, TaskTracker, etc.) — no HTTP proxying, real-time data, zero DI stub issues.
 
 **Primary onboarding flow:** Navigate to the **Develop** page (`/develop`) in the dashboard for a guided multi-step wizard: What to Build → Repo & Auth → Work Item selection → Review & Launch.
+
+> 💡 **Standalone Dashboard (optional):** A separate `Dashboard.Host` project exists at `src/AgentSquad.Dashboard.Host` for scenarios where you need a remote UI (e.g., monitoring from another machine) or want to iterate on UI without restarting agents. Start it with `cd src\AgentSquad.Dashboard.Host && dotnet run` — it connects to the Runner's REST API on port 5050 and runs on port 5051. This is rarely needed for normal operation.
 
 ### Starting the Runner
 
@@ -167,25 +166,7 @@ dotnet build AgentSquad.sln
 Start-Process -FilePath "src\AgentSquad.Runner\bin\Debug\net8.0\AgentSquad.Runner.exe" -WindowStyle Hidden -PassThru
 ```
 
-Dashboard is available at **http://localhost:5050** once the Runner starts.
-
-### Starting the Standalone Dashboard (REQUIRED)
-
-> ⚠️ **ALWAYS start the standalone dashboard alongside the Runner.** The embedded dashboard on port 5050 cannot be rebuilt without stopping the Runner. The standalone dashboard on port 5051 can be restarted independently for UI changes without disrupting running agents.
-
-```powershell
-# Option 1: Use the start script
-.\scripts\start-dashboard.ps1
-
-# Option 2: Manual start (from AgentSquad root)
-cd src\AgentSquad.Dashboard
-dotnet run
-
-# Option 3: Detached via Copilot CLI
-# Use mode="async", detach=true, shellId="dashboard"
-```
-
-Standalone dashboard at **http://localhost:5051** connects to Runner API at port 5050.
+Dashboard is available at **http://localhost:5050** once the Runner starts — all 18 pages are accessible from a single process.
 
 ### Stopping
 
@@ -285,14 +266,8 @@ CREATE TABLE IF NOT EXISTS run_monitor (
 
 ## 5. Dashboard Features
 
-### Embedded Dashboard (http://localhost:5050)
-Full-featured dashboard hosted by the Runner process. Includes all 18 pages, Configuration/cleanup functionality, and the Develop wizard.
-
-### Standalone Dashboard (http://localhost:5051)
-Optional independent process. Connects to Runner REST API at `/api/dashboard/*`.
-- **Can restart** without disrupting running agents
-- **Hidden pages**: Configuration, Engineering Plan (require Runner-only services)
-- **All other pages** work identically via HTTP proxy
+### Dashboard (http://localhost:5050)
+Full-featured dashboard hosted by the Runner process. All 18 pages with direct in-process access to all services — real-time data, no HTTP polling latency.
 
 ### Key features
 - **Develop Wizard** (`/develop`): Multi-step guided setup — project description, platform/auth (GitHub or ADO), work item selection, review & launch. Primary onboarding flow

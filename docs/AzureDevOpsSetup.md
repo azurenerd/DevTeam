@@ -34,7 +34,7 @@ AgentSquad uses the ADO resource ID (`499b84ac-1321-427f-aa17-267ca6975798`) and
 
 ### Dashboard UI
 
-1. Open the Configuration page (`http://localhost:5051/configuration`)
+1. Open the Configuration page (`http://localhost:5050/configuration`)
 2. In the **Project** card, change **Dev Platform** dropdown from `GitHub` to `Azure DevOps`
 3. Fill in the ADO-specific fields that appear:
    - **ADO Organization** — your org name (e.g., `contoso` for `https://dev.azure.com/contoso`)

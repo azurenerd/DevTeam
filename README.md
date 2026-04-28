@@ -40,7 +40,7 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 - **Per-Reviewer Rework Limits** — Rework cycles tracked per (PR, reviewer) pair. Each reviewer (Architect, SE, PM, TE) gets 1 cycle independently, so a PR with 3 reviewers gets up to 3 rounds total
 - **Visual Scaffold Placeholders** — Foundation tasks for web/UI projects create components with colored backgrounds, dashed borders, and bold labels. Playwright screenshots show a clear grid of sections, never blank white
 - **Crash-Resilient Sessions** — CLI session IDs persist to SQLite so agents resume the same Copilot conversation after runner restarts. SE agents recover in-memory state flags (`_allTasksComplete`, `_integrationPrCreated`, `_engineeringSignaled`) from GitHub on restart, preventing duplicate task/PR creation
-- **16-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, features management, agentic frameworks, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, approval management, and a **Develop wizard** for guided project setup. Standalone mode (port 5051) provides full data via HTTP polling to the Runner API
+- **16-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, features management, agentic frameworks, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, approval management, and a **Develop wizard** for guided project setup. All pages served from the Runner process on port 5050 with direct in-process access to all services
 - **Run-Scoped Task Management** — All GitHub queries (merged PRs, open PRs, open issues) are scoped to the current run via `_runStartedUtc` to prevent stale data from previous runs interfering with task assignment or overlap detection
 - **Decision Impact Classification & Gating** — Agents classify decisions by impact level (XS–XL) using AI. High-impact decisions are gated for human approval before agents proceed. Configurable threshold levels, structured implementation plans for gated decisions, and a rich dashboard UI for reviewing and approving decisions
 - **Agent Task Steps** — Real-time workflow visibility: all 7 agents report step-by-step progress (BeginStep/CompleteStep/RecordSubStep) with per-step timing, LLM call counts, and cost. Dashboard shows live step timelines with progress bars, expected-step templates per role, and rich tooltips with detailed context on mouseover — zero LLM overhead, pure observability
@@ -94,7 +94,7 @@ flowchart TB
     end
 
     PLT["🔀 Dev Platform — Remote<br/>GitHub or Azure DevOps<br/>PRs · Work Items · Code"]
-    DASH["📊 Dashboard — port 5051<br/>Blazor Server · 18 pages"]
+    DASH["📊 Dashboard — port 5050<br/>Blazor Server · 18 pages"]
 
     Orch -->|coordinates| Bus
     Bus -->|routes messages| Team
@@ -167,7 +167,7 @@ dotnet build
 
 ### 3. Configure via Develop Wizard (Recommended)
 
-The **Develop wizard** in the dashboard provides a guided setup experience. Start the Runner, then navigate to **http://localhost:5050/develop** (or **http://localhost:5051/develop** for standalone). The wizard walks through:
+The **Develop wizard** in the dashboard provides a guided setup experience. Start the Runner, then navigate to **http://localhost:5050/develop**. The wizard walks through:
 
 1. **What to Build** — Project name and description
 2. **Repo & Auth** — Platform selection (GitHub or Azure DevOps), PAT configuration, repository setup
@@ -246,29 +246,23 @@ cd src/AgentSquad.Runner
 dotnet run
 
 # Option B: Use the PowerShell scripts (recommended — runs as background process)
-./scripts/start-runner.ps1      # Starts Runner on port 5050, writes PID to runner.pid
-./scripts/start-dashboard.ps1   # Starts standalone Dashboard on port 5051
+./scripts/start-runner.ps1      # Starts Runner on port 5050 (includes full dashboard)
 ```
 
 ### 6. Monitor
 
-The dashboard runs embedded at `http://localhost:5050`, or standalone:
-
-```powershell
-cd src/AgentSquad.Dashboard.Host
-dotnet run    # → http://localhost:5051
-```
+The dashboard runs at `http://localhost:5050` — all 18 pages are served directly by the Runner process with real-time data access.
 
 Navigate to the **Develop** page (`/develop`) for guided project setup and run initiation, or the **Overview** page (`/`) for real-time agent monitoring.
 
-Standalone mode lets you restart the dashboard without disrupting running agents.
+> 💡 **Standalone mode (optional):** For remote monitoring or independent UI restarts, run `cd src/AgentSquad.Dashboard.Host && dotnet run` — this connects to the Runner API and serves the dashboard on port 5051.
 
 ### Port Reference
 
 | Port | Service | Notes |
 |------|---------|-------|
-| `5050` | Runner (API + embedded dashboard) | Main process |
-| `5051` | Standalone Dashboard | Optional, for independent restarts |
+| `5050` | Runner (API + full dashboard) | Single process, all 18 pages |
+| `5051` | Standalone Dashboard | Optional, for remote/independent UI |
 | `5100–5899` | Playwright test apps | Hash-derived per workspace, auto-managed |
 | `11434` | Ollama | Only if using local AI tier |
 
@@ -629,8 +623,8 @@ AgentSquad/
 │   │       # Dashboard decision UI: Reasoning tab filters, Approvals tab decision view,
 │   │       # Overview stat card for pending/approved/rejected decisions
 │   │
-│   ├── AgentSquad.Dashboard.Host/      # Standalone dashboard process (port 5051)
-│   └── AgentSquad.Runner/              # Application host (port 5050)
+│   ├── AgentSquad.Dashboard.Host/      # Optional standalone dashboard (port 5051, for remote monitoring)
+│   └── AgentSquad.Runner/              # Application host + full dashboard (port 5050)
 │       ├── Program.cs                  # DI setup, REST API, service registration
 │       └── AgentSquadWorker.cs         # Bootstrap: spawns core agents in phased sequence
 │
@@ -648,7 +642,7 @@ AgentSquad/
 │   ├── start-runner.ps1                # Start the Runner process
 │   ├── stop-runner.ps1                 # Stop the Runner process
 │   ├── runner-status.ps1               # Check Runner health
-│   ├── start-dashboard.ps1             # Start standalone dashboard
+│   ├── start-dashboard.ps1             # Start standalone dashboard (optional, for remote monitoring)
 │   ├── fresh-reset.ps1                 # Full cleanup: close PRs/Issues, delete branches, reset DB
 │   ├── minimal-reset.ps1               # Mini reset — preserves startup docs (OriginalDesignConcept.html,
 │   │                                   #   Research.md, PMSpec.md, Architecture.md) for fast-forward to

@@ -37,11 +37,7 @@ $headers = @{ Authorization = "token $pat"; Accept = "application/vnd.github+jso
 ```powershell
 # Start runner (builds, launches, logs to logs/ directory)
 .\scripts\start-runner.ps1
-# Dashboard available at http://localhost:5050
-
-# Optional: Start standalone dashboard (can restart without killing agents)
-.\scripts\start-dashboard.ps1
-# Standalone dashboard at http://localhost:5051
+# Full dashboard available at http://localhost:5050 (all 18 pages)
 ```
 
 ---
@@ -216,4 +212,4 @@ $headers = @{ Authorization = "token $token"; Accept = "application/vnd.github.v
 | 2026-04-11 | Added TE workspace init failure mode: git clone timeout → silent API-only fallback → no screenshots/no test execution |
 | 2026-04-11 | Added SE self-merge bug: SE was skipping own PRs in MergeTestedPRsAsync (fixed) |
 | 2026-04-13 | Updated pre-run verification with reset commands, rate limit check, dashboard startup instructions |
-| 2026-04-13 | Added dashboard architecture section: two-process model (Runner:5050 + Dashboard.Host:5051) |
+| 2026-04-13 | Added dashboard architecture section: single-process model (Runner:5050 serves full dashboard) |

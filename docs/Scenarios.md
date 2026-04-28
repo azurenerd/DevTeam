@@ -1,8 +1,8 @@
 # Dashboard Scenario Test Results
 
 > **Generated:** 2026-04-15
-> **Dashboard:** http://localhost:5051 (standalone mode)
-> **Runner:** http://localhost:5050 (API backend)
+> **Dashboard:** http://localhost:5050 (embedded in Runner)
+> **Runner:** http://localhost:5050 (single process)
 > **Browser:** Chromium (Playwright 1.52.0)
 > **Resolution:** 1920×1080
 
@@ -117,7 +117,7 @@ Validates: Approval gates page renders with content.
 ### How to Run
 
 ```bash
-# Ensure dashboard (port 5051) and runner (port 5050) are running
+# Ensure runner (port 5050) is running — dashboard is embedded
 dotnet test tests/AgentSquad.Dashboard.Tests
 
 # Run a single scenario
@@ -126,6 +126,6 @@ dotnet test tests/AgentSquad.Dashboard.Tests --filter "S01"
 
 ### Known Limitations
 
-- **Metrics page** (`/metrics`) now properly registers `BuildTestMetrics` in standalone DI and returns 200.
+- **Metrics page** (`/metrics`) now properly registers `BuildTestMetrics` in DI and returns 200.
 - **Engineering Plan page** was removed (duplicate of Timeline). Agent Reasoning page (`/reasoning`) is tested instead.
-- Tests require both Runner (API backend on 5050) and Dashboard (UI on 5051) to be running.
+- Tests require the Runner (port 5050) to be running — it serves both the API and dashboard UI.

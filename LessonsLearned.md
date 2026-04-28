@@ -457,13 +457,13 @@ The agents will not "figure out" what you want from a high-level description. Th
 
 ### Technical decisions and pitfalls:
 - **`IDashboardDataService` interface**: Decouples Razor pages from the data source. `DashboardDataService` (in-process) vs. `HttpDashboardDataService` (HTTP client for standalone mode). Razor pages never know which implementation they're using.
-- **REST API exposure**: Runner exposes ~30 endpoints at `/api/dashboard/*` for the standalone dashboard to consume. This was the path of least resistance — SignalR cross-process would have been more complex.
+- **REST API exposure**: Runner exposes ~30 endpoints at `/api/dashboard/*` for external tooling and the optional standalone dashboard. SignalR cross-process would have been more complex.
 - **`IHttpClientFactory` vs `AddHttpClient<T>`**: `AddHttpClient<T>` registers a transient factory, which conflicts with singleton service registration. The standalone dashboard's `HttpDashboardDataService` is a singleton (it holds HTTP client state). Using `IHttpClientFactory` with named clients resolved the DI conflict.
 - **Stub services**: The standalone dashboard project needs registrations for services it doesn't host (`NullGitHubService`, `GateNotificationService`, `AgentStateStore`, `BuildTestMetrics`) because Razor pages reference them transitively through shared components.
-- **`DashboardMode(IsStandalone: bool)`**: A simple record that controls NavMenu visibility and other behavioral differences. Injected via DI — pages check `_dashboardMode.IsStandalone` to conditionally render elements.
+- **`DashboardMode(IsStandalone: bool)`**: A simple record that controls behavioral differences. Injected via DI — pages check `_dashboardMode.IsStandalone` to use HTTP polling (standalone) or direct DI access (embedded).
 
 ### Takeaway:
-**Separate the monitoring UI from the agent runtime from the start.** The embedded-dashboard shortcut saves 30 minutes of initial setup and costs hours of lost productivity during UI iteration. Architecture pattern: Runner exposes a REST API, Dashboard.Host consumes it via `HttpDashboardDataService`, shared Razor components use `IDashboardDataService` abstraction so they work in both modes.
+**Single-process is better for development.** The standalone dashboard was created to allow UI iteration without restarting agents, but in practice it caused constant DI synchronization issues (every new Runner service needed a stub in `StandaloneServiceRegistration`). The embedded dashboard (port 5050) provides all pages with real-time in-process data and zero DI mismatch issues. The standalone project is kept only for remote monitoring scenarios.
 
 ---
 
@@ -766,18 +766,24 @@ if (_gateCheck.RequiresHuman("pm_spec_review"))
 
 ---
 
-## 27. Always Start the Standalone Dashboard
+## 27. Single-Process Dashboard Architecture (Consolidated)
 
-**Lesson:** The standalone dashboard (port 5051) must ALWAYS be started alongside the Runner (port 5050). The embedded dashboard inside the Runner cannot be rebuilt without stopping the Runner process (file locks on DLLs). The standalone dashboard can be restarted independently for UI iterations without disrupting running agents.
+**Lesson:** The standalone dashboard (port 5051) caused constant friction — DI errors whenever new services were added, stale data from HTTP polling, and the operational burden of starting two processes. The embedded dashboard in the Runner (port 5050) has full in-process access to all services and works reliably.
 
-**Startup checklist:**
-1. Start the Runner: `cd src\AgentSquad.Runner && dotnet run` (detached)
-2. Start the standalone dashboard: `cd src\AgentSquad.Dashboard && dotnet run` (detached)
-3. Verify both ports: 5050 (Runner + embedded) and 5051 (standalone)
+**Current architecture (single-process):**
+1. Start only the Runner: `cd src\AgentSquad.Runner && dotnet run` (or `.\scripts\start-runner.ps1`)
+2. Dashboard at http://localhost:5050 — all 18 pages, real-time data, zero DI issues
 
-**Why both matter:**
-- Port 5050 (embedded): Has Configuration page, Engineering Plan, full in-process access
-- Port 5051 (standalone): Can be rebuilt/restarted without killing agents, shares SQLite DB for live data
+**Standalone dashboard (optional, for remote monitoring):**
+- `cd src\AgentSquad.Dashboard.Host && dotnet run` → port 5051
+- Connects to Runner REST API — useful if monitoring from another machine
+- Has known DI stub synchronization issues (every new service needs registration in `StandaloneServiceRegistration.cs`)
+
+**Why single-process won:**
+- Zero DI mismatch errors (pages access real services directly)
+- Real-time data (in-process events vs HTTP polling latency)
+- Simpler operations (one process to manage, not two)
+- All pages visible (no NavMenu hiding based on IsStandalone)
 
 ---
 
