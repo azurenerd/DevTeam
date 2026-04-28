@@ -571,68 +571,54 @@ public class ProgramManagerAgent : AgentBase
 
             foreach (var (fileName, localPath) in referencedFiles)
             {
+                // 1. Already in the repo (e.g., existing project with design files checked in) → skip
                 if (repoFileNames.Contains(fileName))
                 {
                     Logger.LogDebug("Design input {FileName} already in repo, skipping", fileName);
                     continue;
                 }
 
-                // Try to read from local filesystem
-                var resolvedPath = localPath ?? fileName;
-                if (!Path.IsPathFullyQualified(resolvedPath))
+                // 2. Has a full local path in the description → read from disk and commit
+                if (localPath is not null && Path.IsPathFullyQualified(localPath))
                 {
-                    // Try common locations: working dir, solution root, sibling project dirs
-                    var solutionRoot = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", ".."));
-                    var gitRoot = Path.GetFullPath(Path.Combine(solutionRoot, ".."));
-                    var candidates = new[]
+                    if (!File.Exists(localPath))
                     {
-                        Path.Combine(Environment.CurrentDirectory, resolvedPath),
-                        Path.Combine(AppContext.BaseDirectory, resolvedPath),
-                        Path.Combine(solutionRoot, resolvedPath),
-                    };
+                        Logger.LogWarning(
+                            "Design input '{FileName}' not found in repo and local path '{Path}' does not exist on disk",
+                            fileName, localPath);
+                        continue;
+                    }
 
-                    // Also check sibling directories under the git root (other checked-out repos)
-                    var siblingCandidates = Directory.Exists(gitRoot)
-                        ? Directory.GetDirectories(gitRoot)
-                            .Select(d => Path.Combine(d, resolvedPath))
-                            .Where(File.Exists)
-                        : Enumerable.Empty<string>();
+                    var extension = Path.GetExtension(fileName).ToLowerInvariant();
+                    var isBinary = extension is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".ico" or ".webp" or ".svg";
 
-                    resolvedPath = candidates.FirstOrDefault(File.Exists)
-                        ?? siblingCandidates.FirstOrDefault()
-                        ?? resolvedPath;
-                }
+                    if (isBinary)
+                    {
+                        var bytes = await File.ReadAllBytesAsync(localPath, ct);
+                        await _repoContent.CommitBinaryFileAsync(
+                            fileName, bytes,
+                            $"Add design input: {fileName}",
+                            _config.Project.DefaultBranch, ct);
+                    }
+                    else
+                    {
+                        var content = await File.ReadAllTextAsync(localPath, ct);
+                        await _repoContent.CreateOrUpdateFileAsync(
+                            fileName, content,
+                            $"Add design input: {fileName}",
+                            null, ct);
+                    }
 
-                if (!File.Exists(resolvedPath))
-                {
-                    Logger.LogWarning(
-                        "Design input {FileName} referenced in project description but not found locally at {Path}",
-                        fileName, resolvedPath);
+                    Logger.LogInformation("Added design input {FileName} to repository from {Path}", fileName, localPath);
                     continue;
                 }
 
-                // Determine if binary or text and commit to repo root
-                var extension = Path.GetExtension(fileName).ToLowerInvariant();
-                var isBinary = extension is ".png" or ".jpg" or ".jpeg" or ".gif" or ".bmp" or ".ico" or ".webp" or ".svg";
-
-                if (isBinary)
-                {
-                    var bytes = await File.ReadAllBytesAsync(resolvedPath, ct);
-                    await _repoContent.CommitBinaryFileAsync(
-                        fileName, bytes,
-                        $"Add design input: {fileName}",
-                        _config.Project.DefaultBranch, ct);
-                }
-                else
-                {
-                    var content = await File.ReadAllTextAsync(resolvedPath, ct);
-                    await _repoContent.CreateOrUpdateFileAsync(
-                        fileName, content,
-                        $"Add design input: {fileName}",
-                        null, ct);
-                }
-
-                Logger.LogInformation("Added design input {FileName} to repository from {Path}", fileName, resolvedPath);
+                // 3. Bare filename with no full path → warn the user
+                Logger.LogWarning(
+                    "Design input '{FileName}' is referenced in project description but is not in the repo " +
+                    "and no full local path was provided. Either check it into the repo or add a full path " +
+                    "(e.g., C:/Designs/{FileName}) to the project description.",
+                    fileName, fileName);
             }
         }
         catch (Exception ex)
