@@ -1078,18 +1078,17 @@ else
         StateHasChanged();
     }
 
-    // Builds a stable raw.githubusercontent.com URL for the canonical ready-for-review
-    // screenshot captured at the PR's head SHA. Using HeadSha (not branch name) guards
-    // against branch mutation or deletion after merge.
+    // Builds a stable URL for the canonical ready-for-review screenshot captured at the PR's head SHA.
+    // GitHub: raw.githubusercontent.com, ADO: not supported (relies on in-memory CandidateStore).
     private static string? BuildReadyForReviewScreenshotUrl(PlatformPullRequest pr)
     {
         if (string.IsNullOrEmpty(pr.Url) || string.IsNullOrEmpty(pr.HeadSha)) return null;
-        // pr.Url: https://github.com/{owner}/{repo}/pull/{N}
+        // GitHub: pr.Url = https://github.com/{owner}/{repo}/pull/{N}
         var match = System.Text.RegularExpressions.Regex.Match(
             pr.Url,
             @"github\.com/([^/]+)/([^/]+)/pull/\d+",
             System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        if (!match.Success) return null;
+        if (!match.Success) return null; // ADO URLs won't match — return null (CandidateStore is primary)
         var owner = match.Groups[1].Value;
         var repo = match.Groups[2].Value;
         return $"https://raw.githubusercontent.com/{owner}/{repo}/{pr.HeadSha}/.screenshots/pr-{pr.Number}-ready-for-review.png";
@@ -1098,14 +1097,15 @@ else
     private record ScreenshotCandidate(string MethodKey, string MethodLabel, string ImageUrl, bool IsWinner);
 
     // Returns one tile per code-generation strategy. Checks CandidateStateStore for in-memory
-    // screenshot data first (base64 from evaluation), then falls back to GitHub raw URLs.
+    // screenshot data first (base64 from evaluation), then falls back to platform raw file URLs.
+    // ADO doesn't support unauthenticated raw file URLs, so only in-memory screenshots work for ADO.
     private List<ScreenshotCandidate> GetScreenshotCandidates(PlatformPullRequest pr)
     {
         var results = new List<ScreenshotCandidate>();
         if (string.IsNullOrEmpty(pr.Url) || string.IsNullOrEmpty(pr.HeadSha))
             return results;
 
-        // Try GitHub URL pattern first, then ADO
+        // GitHub raw file URL fallback (ADO uses CandidateStore only — no public raw file URLs)
         string? owner = null, repo = null;
         var m = System.Text.RegularExpressions.Regex.Match(
             pr.Url,

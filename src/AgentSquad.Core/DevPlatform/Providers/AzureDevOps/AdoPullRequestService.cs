@@ -74,7 +74,7 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
 
         _logger.LogInformation("Created ADO PR #{Id}: {Title} (overflow={Overflow})",
             result.PullRequestId, title, needsOverflow);
-        return AdoModelMapper.ToPlatform(result with { Description = body }, Organization, Project);
+        return AdoModelMapper.ToPlatform(result with { Description = body }, Organization, Project, Repository);
     }
 
     public async Task<PlatformPullRequest?> GetAsync(int id, CancellationToken ct = default)
@@ -87,7 +87,7 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
         pr = await HydrateLabelsAsync(pr, ct);
         // If description was overflow-truncated, hydrate full body from first comment.
         pr = await HydrateOverflowBodyAsync(pr, ct);
-        return AdoModelMapper.ToPlatform(pr, Organization, Project);
+        return AdoModelMapper.ToPlatform(pr, Organization, Project, Repository);
     }
 
     public async Task<IReadOnlyList<PlatformPullRequest>> ListOpenAsync(CancellationToken ct = default)
@@ -107,7 +107,7 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
                 ?? listPr;
             fullPr = await HydrateLabelsAsync(fullPr, ct);
             fullPr = await HydrateOverflowBodyAsync(fullPr, ct);
-            results.Add(AdoModelMapper.ToPlatform(fullPr, Organization, Project));
+            results.Add(AdoModelMapper.ToPlatform(fullPr, Organization, Project, Repository));
         }
 
         // Scope to current run to exclude stale PRs from previous runs
@@ -121,7 +121,7 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
         var url = BuildUrl($"{Project}/_apis/git/repositories/{Repository}/pullrequests",
             "searchCriteria.status=all&$top=200");
         var response = await GetAsync<AdoListResponse<AdoPullRequest>>(url, ct);
-        return response?.Value?.Select(p => AdoModelMapper.ToPlatform(p, Organization, Project)).ToList()
+        return response?.Value?.Select(p => AdoModelMapper.ToPlatform(p, Organization, Project, Repository)).ToList()
             ?? new List<PlatformPullRequest>();
     }
 
@@ -133,7 +133,7 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
         // Filter to agent-created PRs (branch prefix "agent/") to avoid stale completed PRs
         var prs = response?.Value
             .Where(p => p.SourceBranch.StartsWith("refs/heads/agent/", StringComparison.OrdinalIgnoreCase))
-            .Select(p => AdoModelMapper.ToPlatform(p, Organization, Project)).ToList()
+            .Select(p => AdoModelMapper.ToPlatform(p, Organization, Project, Repository)).ToList()
             ?? new List<PlatformPullRequest>();
         // Scope to current run
         if (_runStartedUtc.HasValue)

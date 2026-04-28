@@ -7,7 +7,7 @@ namespace AgentSquad.Core.DevPlatform.Providers.AzureDevOps;
 /// </summary>
 internal static class AdoModelMapper
 {
-    public static PlatformPullRequest ToPlatform(AdoPullRequest pr, string orgUrl, string project)
+    public static PlatformPullRequest ToPlatform(AdoPullRequest pr, string organization, string project, string? repository = null)
     {
         var state = pr.Status switch
         {
@@ -20,12 +20,9 @@ internal static class AdoModelMapper
         var headBranch = StripRefsPrefix(pr.SourceBranch);
         var baseBranch = StripRefsPrefix(pr.TargetBranch);
 
-        var webUrl = $"{orgUrl}{project}/_git/{Uri.EscapeDataString(pr.SourceBranch.Split('/').Last())}/pullrequest/{pr.PullRequestId}";
-        if (!string.IsNullOrEmpty(pr.Url))
-        {
-            // Construct proper web URL from org/project
-            webUrl = $"https://dev.azure.com/{orgUrl.TrimEnd('/')}/{project}/_git/pullrequest/{pr.PullRequestId}";
-        }
+        var org = organization.TrimEnd('/');
+        var repoName = !string.IsNullOrEmpty(repository) ? repository : project;
+        var webUrl = $"https://dev.azure.com/{org}/{project}/_git/{Uri.EscapeDataString(repoName)}/pullrequest/{pr.PullRequestId}";
 
         return new PlatformPullRequest
         {
@@ -46,7 +43,7 @@ internal static class AdoModelMapper
         };
     }
 
-    public static PlatformWorkItem ToPlatform(AdoWorkItem wi, string orgUrl, string project)
+    public static PlatformWorkItem ToPlatform(AdoWorkItem wi, string organization, string project)
     {
         var fields = wi.Fields;
 
@@ -69,7 +66,7 @@ internal static class AdoModelMapper
             _ => "open"
         };
 
-        var webUrl = $"https://dev.azure.com/{orgUrl.TrimEnd('/')}/{project}/_workitems/edit/{wi.Id}";
+        var webUrl = $"https://dev.azure.com/{organization.TrimEnd('/')}/{project}/_workitems/edit/{wi.Id}";
         var labels = string.IsNullOrEmpty(tags)
             ? new List<string>()
             : tags.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
