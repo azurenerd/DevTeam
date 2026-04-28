@@ -2780,33 +2780,47 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 
 ## 49. Multi-Platform Support (GitHub & Azure DevOps)
 
-> **Status (2026-04-24):** Phase 4–6 shipped. GitHub remains default. ADO provider implemented with full interface coverage. Dashboard platform selector live on Configuration page. See `docs/AzureDevOpsSetup.md` for configuration guide.
+> **Status (2026-04-28):** Phase 5 complete (all workflows platform-abstracted). First successful end-to-end ADO run completed. Dashboard fully platform-aware with dynamic URLs and terminology. See `docs/AzureDevOpsSetup.md` for configuration guide and lessons learned.
 
 ### REQ-PLAT-001: Platform Abstraction
 
 - **REQ-PLAT-001a**: All platform-specific operations MUST be accessed through 7 capability interfaces: `IPullRequestService`, `IWorkItemService`, `IRepositoryContentService`, `IBranchService`, `IReviewService`, `IPlatformInfoService`, `IPlatformHostContext`. No agent, orchestrator, or dashboard code may call platform-specific APIs directly.
 - **REQ-PLAT-001b**: Platform selection is config-driven via `DevPlatformConfig.Platform` enum (`GitHub` | `AzureDevOps`). DI registration switches all 7 interfaces based on this setting.
 - **REQ-PLAT-001c**: GitHub adapters wrap the existing `IGitHubService` with zero breaking changes to existing behavior.
+- **REQ-PLAT-001d**: Agent workspace clone URLs MUST be platform-aware. Use `AgentSquadConfig.GetGitCloneUrl()` which returns the correct authenticated URL for GitHub or ADO.
+- **REQ-PLAT-001e**: Dashboard PR/work item links MUST use `IDashboardDataService.GetPullRequestUrl()`/`GetWorkItemUrl()` backed by `IPlatformHostContext`, not hardcoded `github.com` URLs.
 
 ### REQ-PLAT-002: Azure DevOps Provider
 
 - **REQ-PLAT-002a**: ADO provider MUST support PAT authentication (Basic auth header) and Azure CLI bearer token authentication (`az account get-access-token --resource 499b84ac-...`).
-- **REQ-PLAT-002b**: ADO provider MUST use API version 7.1 across all REST calls.
+- **REQ-PLAT-002b**: ADO provider MUST use API version 7.1 across all REST calls. Exception: work item comments require `api-version=7.1-preview`.
 - **REQ-PLAT-002c**: ADO work item operations MUST use WIQL for querying/filtering.
 - **REQ-PLAT-002d**: ADO file operations MUST use the Git Pushes API (RefUpdates + Changes).
 - **REQ-PLAT-002e**: ADO does NOT support work item deletion — `DeleteAsync` MUST close the item instead.
 - **REQ-PLAT-002f**: ADO provider MUST handle rate limiting via `X-RateLimit-*` headers with exponential backoff and `Retry-After` support.
+- **REQ-PLAT-002g**: ADO PR descriptions MUST be truncated to 4000 characters (hard API limit). Truncation suffix length must be calculated exactly to avoid 400 errors.
+- **REQ-PLAT-002h**: ADO work item Description fields MUST use HTML format (not Markdown). Markdig converts Markdown to HTML before writing.
+- **REQ-PLAT-002i**: ADO work item types MUST be configurable via `DefaultWorkItemType` (default: Task) and `ExecutiveWorkItemType` (default: User Story). The PM creates User Stories, not Enhancements.
 
 ### REQ-PLAT-003: Dashboard Platform Configuration
 
 - **REQ-PLAT-003a**: Configuration page MUST provide a Dev Platform dropdown (GitHub / Azure DevOps).
 - **REQ-PLAT-003b**: When AzureDevOps is selected, MUST show: Organization, Project, Repository, Auth method (PAT/Bearer), token/tenant fields, work item type settings.
 - **REQ-PLAT-003c**: Platform terminology MUST adapt dynamically — "Issues" vs "Work Items", "Repository Cleanup" instead of "GitHub Repository Cleanup".
+- **REQ-PLAT-003d**: `DashboardDataService.PlatformName` MUST return "Azure DevOps" or "GitHub" based on `IPlatformHostContext` type.
+- **REQ-PLAT-003e**: All tooltip/title text in dashboard pages MUST be platform-neutral (e.g., "Open in platform" not "Open on GitHub").
 
 ### REQ-PLAT-004: Work Item State Mappings
 
 - **REQ-PLAT-004a**: ADO work item states are configurable via `AzureDevOps.StateMappings` dictionary mapping AgentSquad states (`Open`, `InProgress`, `Blocked`, `Resolved`) to ADO process template states.
 - **REQ-PLAT-004b**: Default mappings: Open→New, InProgress→Active, Blocked→Active, Resolved→Closed.
+- **REQ-PLAT-004c**: State-aware close MUST resolve the correct terminal state per work item type (Task→Closed, User Story→Closed, Bug→Closed) by querying the ADO process template.
+
+### REQ-PLAT-005: Work Item Lifecycle Guards
+
+- **REQ-PLAT-005a**: PM MUST NOT close User Stories until all related engineering tasks (identified by `engineering-task` label) are complete.
+- **REQ-PLAT-005b**: In SinglePRMode, PM MUST verify at least one merged PR exists AND no open engineering tasks remain before closing stories.
+- **REQ-PLAT-005c**: Orphan recovery MUST include self-assigned tasks (tasks assigned to the current agent), not only unassigned ones.
 
 **Scenario: Switching from GitHub to Azure DevOps**
 ```
@@ -2817,4 +2831,6 @@ These bugs were discovered during scenario analysis and fixed. Listed here as re
 5. On next runner restart, DI registers ADO providers for all 7 interfaces
 6. Agents create Work Items (not Issues), file commits via Pushes API, PRs in ADO
 7. Dashboard displays ADO-specific terminology throughout
+8. Agent workspaces clone from ADO repository URL
+9. Dashboard PR/work item links point to dev.azure.com
 ```

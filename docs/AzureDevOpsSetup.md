@@ -127,6 +127,34 @@ Override these in `StateMappings` if your process template uses different state 
 3. **WIQL queries** — Work item filtering uses ADO's SQL-like query language internally.
 4. **Rate limiting** — ADO uses `X-RateLimit-*` headers. AgentSquad tracks these and backs off automatically.
 5. **File commits** — Each file operation is an ADO Push (with RefUpdates + Changes) rather than a Git Tree update.
+6. **Comment API version** — Work item comments require `api-version=7.1-preview` (not `7.1`). Returns 400 without the `-preview` suffix.
+7. **PR description limit** — ADO enforces a hard 4000-character limit on PR descriptions. AgentSquad auto-truncates with a suffix note.
+8. **HTML descriptions** — ADO Work Item Description field renders HTML, not Markdown. AgentSquad auto-converts Markdown to HTML via Markdig before writing.
+9. **Work item types** — ADO uses "User Story" (not "Enhancement") for PM-created stories. Configured via `ExecutiveWorkItemType` setting.
+
+## Lessons Learned from ADO End-to-End Runs
+
+### Workspace Clone URLs
+Agent workspaces (C:\Agents4\) must clone from the ADO repository URL, not GitHub. The `GetGitCloneUrl()` helper on `AgentSquadConfig` returns the correct URL based on `DevPlatform.Platform`.
+
+### Premature Work Item Closure
+In SinglePRMode with no parent-child work item links, the PM must check for open engineering tasks (by label) before closing User Stories. Old merged PRs from previous runs can trigger false "all work complete" signals.
+
+### Dashboard Platform Awareness
+Dashboard pages use `IPlatformHostContext` via `DashboardDataService.GetPullRequestUrl()` and `GetWorkItemUrl()` to construct platform-correct URLs. The `PlatformName` property dynamically returns "GitHub" or "Azure DevOps".
+
+### Mini-Reset Procedure
+To clean up and restart an ADO run:
+1. Stop runner and dashboard processes
+2. Delete agent workspace folders (`C:\Agents4\*`)
+3. Delete state DB (`agentsquad.db`)
+4. Abandon active PRs via ADO REST API
+5. Delete or remove work items from previous run
+6. Delete agent branches (`refs/heads/agent/*`)
+7. Restart runner and dashboard
+
+### Known Remaining GitHub References
+Some non-critical paths still contain GitHub-specific code (review thread replies via GitHub API, raw.githubusercontent.com screenshot URLs, GateNotificationService URLs). These are documented in `future_fixes` and don't block ADO end-to-end runs.
 
 ## Architecture
 
