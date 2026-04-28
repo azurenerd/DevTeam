@@ -1,6 +1,7 @@
 using System.Net.Http.Json;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.Frameworks;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
@@ -10,6 +11,7 @@ using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Strategies;
 using AgentSquad.Dashboard.Services;
 using AgentSquad.Orchestrator;
+using Microsoft.Extensions.Options;
 
 namespace AgentSquad.Dashboard.Host;
 
@@ -46,6 +48,24 @@ public static class StandaloneServiceRegistration
         // CandidateStateStore — needed by ProjectTimeline and Strategies pages
         services.AddSingleton<CandidateStateStore>(sp =>
             new CandidateStateStore(sp.GetService<AgentStateStore>()));
+
+        // DevelopSettingsService — file-based, path points to Runner's directory
+        services.AddSingleton(sp =>
+        {
+            var logger = sp.GetRequiredService<ILogger<DevelopSettingsService>>();
+            var config = sp.GetService<IOptions<AgentSquadConfig>>();
+            var runnerDir = Path.GetFullPath(Path.Combine(
+                sp.GetRequiredService<IWebHostEnvironment>().ContentRootPath,
+                "..", "AgentSquad.Runner"));
+            var filePath = Path.Combine(runnerDir, "develop-settings.json");
+            return new DevelopSettingsService(logger, config, filePath);
+        });
+
+        // IWorkItemSearchService — proxies to Runner's /api/develop/work-items/search
+        services.AddSingleton<IWorkItemSearchService, HttpWorkItemSearchProxy>();
+
+        // IRepositoryManagementService — proxies to Runner's /api/develop/repo/create
+        services.AddSingleton<IRepositoryManagementService, HttpRepositoryManagementProxy>();
 
         return services;
     }
@@ -199,3 +219,65 @@ file sealed class NullGitHubService : IGitHubService
 }
 
 file record FileContentResponse(string? Content);
+
+/// <summary>
+/// HTTP-proxying work item search for standalone dashboard.
+/// Delegates to Runner's /api/develop/work-items/search endpoint.
+/// </summary>
+file sealed class HttpWorkItemSearchProxy : IWorkItemSearchService
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public HttpWorkItemSearchProxy(IHttpClientFactory httpClientFactory) =>
+        _httpClientFactory = httpClientFactory;
+
+    public async Task<IReadOnlyList<WorkItemSearchResult>> SearchAsync(
+        string query, int maxResults = 10, CancellationToken ct = default)
+    {
+        try
+        {
+            using var client = _httpClientFactory.CreateClient("RunnerApi");
+            var encoded = Uri.EscapeDataString(query);
+            var results = await client.GetFromJsonAsync<List<WorkItemSearchResult>>(
+                $"/api/develop/work-items/search?q={encoded}", ct);
+            return results ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+}
+
+/// <summary>
+/// HTTP-proxying repo creation for standalone dashboard.
+/// Delegates to Runner's /api/develop/repo/create endpoint.
+/// </summary>
+file sealed class HttpRepositoryManagementProxy : IRepositoryManagementService
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public HttpRepositoryManagementProxy(IHttpClientFactory httpClientFactory) =>
+        _httpClientFactory = httpClientFactory;
+
+    public async Task<RepositoryCreationResult> CreateRepositoryAsync(
+        string name, bool isPrivate = true, CancellationToken ct = default)
+    {
+        try
+        {
+            using var client = _httpClientFactory.CreateClient("RunnerApi");
+            var payload = new { name, isPrivate };
+            var response = await client.PostAsJsonAsync("/api/develop/repo/create", payload, ct);
+            if (response.IsSuccessStatusCode)
+            {
+                var result = await response.Content.ReadFromJsonAsync<RepositoryCreationResult>(ct);
+                return result ?? new RepositoryCreationResult(false, null, "Empty response");
+            }
+            return new RepositoryCreationResult(false, null, $"Runner returned {response.StatusCode}");
+        }
+        catch (Exception ex)
+        {
+            return new RepositoryCreationResult(false, null, $"Runner unreachable: {ex.Message}");
+        }
+    }
+}
