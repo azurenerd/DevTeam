@@ -60,6 +60,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     // pair in the dashboard, none of which ever completes.
     private bool _loggedWaitingForPmIssues;
     private bool _loggedArchitectureRead;
+    private bool _taskInventoryLogged;
     private bool _planningSignalReceived;
     private bool _architectureReady;
     private bool _resourceRequestPending;
@@ -349,6 +350,35 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                             UpdateStatus(hasActionableWork ? AgentStatus.Working : AgentStatus.Idle,
                                 $"[{leaderTag}] {statusVerb} — {pendingDesc}");
                         }
+                    }
+
+                    // ── Task inventory step: log task states so the dashboard shows the breakdown ──
+                    if (!_taskInventoryLogged && total > 0)
+                    {
+                        var taskGroupId = "task-inventory";
+                        var inventoryStepId = _taskTracker.BeginStep(Identity.Id, taskGroupId, "Task Inventory",
+                            $"{done}/{total} done, {pending} pending, {total - done - pending} in-progress", Identity.ModelTier);
+
+                        foreach (var t in _taskManager.Tasks.Where(t => t.Id != IntegrationTaskId))
+                        {
+                            var statusIcon = t.Status switch
+                            {
+                                "Pending" => "⏳",
+                                "Assigned" => "👤",
+                                "InProgress" => "🔧",
+                                "Done" or "Closed" => "✅",
+                                _ => "❓"
+                            };
+                            var prRef = t.PullRequestNumber.HasValue ? $" PR #{t.PullRequestNumber}" : "";
+                            var taskStepId = _taskTracker.BeginStep(Identity.Id, taskGroupId,
+                                $"{statusIcon} {t.Name}",
+                                $"Status: {t.Status}, Complexity: {t.Complexity}{prRef}",
+                                Identity.ModelTier);
+                            _taskTracker.CompleteStep(taskStepId);
+                        }
+
+                        _taskTracker.CompleteStep(inventoryStepId);
+                        _taskInventoryLogged = true;
                     }
 
                     // Recovery: re-track and re-broadcast review for our own ready-for-review PRs
@@ -1773,10 +1803,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (trackedIssueNums.Contains(task.IssueNumber!.Value))
                     continue;
 
-                // Skip tasks assigned to us (leader) — we know our own state and should not
-                // reset our own in-progress tasks. This prevents the pathological cycle where
-                // orphan recovery resets a task the leader is actively reworking/force-approving.
-                if (string.Equals(task.AssignedTo, Identity.DisplayName, StringComparison.OrdinalIgnoreCase))
+                // Skip tasks assigned to us (leader) IF we're actively tracking a PR for them.
+                // This prevents the pathological cycle where orphan recovery resets a task the
+                // leader is actively reworking/force-approving.
+                // BUT: if CurrentPrNumber is null (e.g., after restart with no PR created),
+                // let the orphan check proceed — the task truly is orphaned.
+                if (string.Equals(task.AssignedTo, Identity.DisplayName, StringComparison.OrdinalIgnoreCase)
+                    && CurrentPrNumber is not null)
                     continue;
 
                 // Check if there's an open PR that references this task's issue.
@@ -2257,6 +2290,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             _currentTaskName = task.Name;
 
             UpdateStatus(AgentStatus.Working, $"Working on: {task.Name}");
+            LogActivity("task", $"📋 Claimed task #{task.IssueNumber}: {task.Name} ({task.Complexity})");
             Logger.LogInformation("Software Engineer working on task {TaskId}: {TaskName}",
                 task.Id, task.Name);
 
@@ -2533,9 +2567,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             // Track step: Mark ready for review
             await FinalizeReadyForReviewAsync(pr, task, ct);
         }
+        catch (OperationCanceledException) { throw; }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Failed to work on own tasks");
+            Logger.LogError(ex, "Failed to work on own tasks: {Message}", ex.Message);
+            RecordError($"WorkOnOwnTasks: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
+            LogActivity("task", $"❌ Task failed: {ex.Message}");
         }
     }
 

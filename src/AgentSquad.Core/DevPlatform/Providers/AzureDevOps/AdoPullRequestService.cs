@@ -30,8 +30,9 @@ public sealed class AdoPullRequestService : AdoHttpClientBase, IPullRequestServi
     {
         // ADO PR descriptions have a 4000-character limit
         const int maxDescriptionLength = 4000;
+        const string truncationSuffix = "\n\n---\n*Description truncated (ADO 4000 char limit)*";
         var truncatedBody = body.Length > maxDescriptionLength
-            ? body[..(maxDescriptionLength - 50)] + "\n\n---\n*Description truncated (ADO 4000 char limit)*"
+            ? body[..(maxDescriptionLength - truncationSuffix.Length)] + truncationSuffix
             : body;
 
         var url = BuildUrl($"{Project}/_apis/git/repositories/{Repository}/pullrequests");

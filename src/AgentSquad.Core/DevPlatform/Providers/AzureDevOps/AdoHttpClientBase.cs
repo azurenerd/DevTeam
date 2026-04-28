@@ -86,6 +86,16 @@ public class AdoHttpClientBase : IDisposable
         return url;
     }
 
+    /// <summary>Build an API URL using a preview API version (e.g., "7.1-preview").</summary>
+    protected string BuildPreviewUrl(string path, string? extraQuery = null)
+    {
+        var separator = path.Contains('?') ? "&" : "?";
+        var url = $"{path}{separator}api-version={ApiVersion}-preview";
+        if (!string.IsNullOrEmpty(extraQuery))
+            url += $"&{extraQuery}";
+        return url;
+    }
+
     /// <summary>Send a GET request with authentication and retry logic.</summary>
     protected async Task<T?> GetAsync<T>(string url, CancellationToken ct = default)
     {

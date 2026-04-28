@@ -158,13 +158,13 @@ public sealed class AdoWorkItemService : AdoHttpClientBase, IWorkItemService
 
     public async Task AddCommentAsync(int id, string comment, CancellationToken ct = default)
     {
-        var url = BuildUrl($"{Project}/_apis/wit/workitems/{id}/comments");
+        var url = BuildPreviewUrl($"{Project}/_apis/wit/workitems/{id}/comments");
         await PostAsync<object>(url, new { text = comment }, ct);
     }
 
     public async Task<IReadOnlyList<PlatformComment>> GetCommentsAsync(int id, CancellationToken ct = default)
     {
-        var url = BuildUrl($"{Project}/_apis/wit/workitems/{id}/comments", "$top=200");
+        var url = BuildPreviewUrl($"{Project}/_apis/wit/workitems/{id}/comments", "$top=200");
         var response = await GetAsync<AdoListResponse<AdoPrComment>>(url, ct);
         return response?.Value.Select(AdoModelMapper.ToPlatform).ToList()
             ?? new List<PlatformComment>();

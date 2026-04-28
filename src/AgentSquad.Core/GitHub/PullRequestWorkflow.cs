@@ -230,8 +230,18 @@ public partial class PullRequestWorkflow
         var trackingPath = $".agentsquad/{taskSlug}.task";
         var trackingContent = $"agent: {agentName}\ntask: {taskTitle}\ncomplexity: {complexity}\nstatus: in-progress\n";
         _logger.LogInformation("Committing task marker to {Branch} for '{Title}'", branchName, taskTitle);
-        await _repoContent.CreateOrUpdateFileAsync(
-            trackingPath, trackingContent, $"Start task: {taskTitle}", branchName, ct);
+        try
+        {
+            await _repoContent.CreateOrUpdateFileAsync(
+                trackingPath, trackingContent, $"Start task: {taskTitle}", branchName, ct);
+            _logger.LogInformation("Marker commit succeeded on {Branch}", branchName);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Marker commit FAILED on {Branch} for path {Path}: {Error}",
+                branchName, trackingPath, ex.Message);
+            throw;
+        }
 
         var body = FormatPullRequestBody(agentName, complexity, branchName, taskDescription, architectureRef, specRef);
         var complexityLabel = GetComplexityLabel(complexity);
@@ -240,7 +250,7 @@ public partial class PullRequestWorkflow
         if (complexityLabel is not null)
             labels.Add(complexityLabel);
 
-        _logger.LogInformation("Creating task PR '{Title}' on branch {Branch}", prTitle, branchName);
+        _logger.LogInformation("Creating task PR '{Title}' on branch {Branch} (body length: {BodyLen})", prTitle, branchName, body.Length);
 
         AgentPullRequest pr;
         try
@@ -254,6 +264,12 @@ public partial class PullRequestWorkflow
             var fallback = await FindExistingPullRequestAsync(prTitle, ct);
             if (fallback is not null)
                 return fallback;
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Task PR creation FAILED for '{Title}' on branch {Branch}: {Error}",
+                prTitle, branchName, ex.Message);
             throw;
         }
 
