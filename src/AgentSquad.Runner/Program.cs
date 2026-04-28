@@ -512,19 +512,21 @@ runsApi.MapGet("/active", (RunCoordinator coordinator) =>
     });
 });
 
-runsApi.MapPost("/start-project", async (RunCoordinator coordinator, CancellationToken ct) =>
+runsApi.MapPost("/start-project", async (RunCoordinator coordinator, IHostApplicationLifetime lifetime, CancellationToken ct) =>
 {
     try
     {
         var run = await coordinator.StartProjectAsync(ct);
+        // Use the application stopping token (not the HTTP request token) for background agent work
+        var appToken = lifetime.ApplicationStopping;
         _ = Task.Run(async () =>
         {
-            try { await coordinator.SpawnAgentsForRunAsync(ct); }
+            try { await coordinator.SpawnAgentsForRunAsync(appToken); }
             catch (Exception ex)
             {
                 coordinator.FailRunAsync($"Agent spawn failed: {ex.Message}").GetAwaiter().GetResult();
             }
-        }, ct);
+        }, appToken);
         return Results.Ok(new { run, message = "Project run started" });
     }
     catch (InvalidOperationException ex)
@@ -533,19 +535,20 @@ runsApi.MapPost("/start-project", async (RunCoordinator coordinator, Cancellatio
     }
 });
 
-runsApi.MapPost("/start-feature/{featureId}", async (string featureId, RunCoordinator coordinator, CancellationToken ct) =>
+runsApi.MapPost("/start-feature/{featureId}", async (string featureId, RunCoordinator coordinator, IHostApplicationLifetime lifetime, CancellationToken ct) =>
 {
     try
     {
         var run = await coordinator.StartFeatureAsync(featureId, ct);
+        var appToken = lifetime.ApplicationStopping;
         _ = Task.Run(async () =>
         {
-            try { await coordinator.SpawnAgentsForRunAsync(ct); }
+            try { await coordinator.SpawnAgentsForRunAsync(appToken); }
             catch (Exception ex)
             {
                 coordinator.FailRunAsync($"Agent spawn failed: {ex.Message}").GetAwaiter().GetResult();
             }
-        }, ct);
+        }, appToken);
         return Results.Ok(new { run, message = $"Feature run started for {featureId}" });
     }
     catch (InvalidOperationException ex)
@@ -560,13 +563,14 @@ runsApi.MapPost("/stop", async (RunCoordinator coordinator, CancellationToken ct
     return Results.Ok(new { message = "Run paused" });
 });
 
-runsApi.MapPost("/resume", async (RunCoordinator coordinator, AgentSpawnManager spawnManager, CancellationToken ct) =>
+runsApi.MapPost("/resume", async (RunCoordinator coordinator, AgentSpawnManager spawnManager, IHostApplicationLifetime lifetime, CancellationToken ct) =>
 {
     try
     {
         var run = await coordinator.ResumeAsync(ct);
         // Spawn agents in background (same path as startup)
-        _ = Task.Run(async () => await coordinator.SpawnAgentsForRunAsync(ct), ct);
+        var appToken = lifetime.ApplicationStopping;
+        _ = Task.Run(async () => await coordinator.SpawnAgentsForRunAsync(appToken), appToken);
         return Results.Ok(new { run, message = "Run resumed" });
     }
     catch (InvalidOperationException ex)
