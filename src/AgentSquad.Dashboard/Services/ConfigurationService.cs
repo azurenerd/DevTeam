@@ -82,13 +82,11 @@ public sealed class ConfigurationService : IConfigurationService
     /// <inheritdoc/>
     public AgentSquadConfig RefreshFromDisk()
     {
-        // Clear the in-memory cache so we fall through to IOptionsMonitor
+        // Clear the in-memory save cache so GetCurrentConfig falls through
+        // to IOptionsMonitor, which picks up file changes via reloadOnChange: true.
+        // We intentionally avoid configRoot.Reload() here — it synchronously
+        // re-binds every IOptionsMonitor<T> consumer and degrades with repeated calls.
         _lastSavedConfig = null;
-
-        // Force the configuration root to reload from disk
-        if (_rootConfiguration is IConfigurationRoot configRoot)
-            configRoot.Reload();
-
         return _config.CurrentValue;
     }
 
