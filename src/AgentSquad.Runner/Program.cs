@@ -163,6 +163,7 @@ builder.Services.AddSingleton<IDashboardDataService>(sp => sp.GetRequiredService
 builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataService>());
 builder.Services.AddSingleton<ConfigurationService>();
 builder.Services.AddSingleton<IConfigurationService>(sp => sp.GetRequiredService<ConfigurationService>());
+builder.Services.AddSingleton<DevelopSettingsService>();
 builder.Services.AddSingleton<DirectorCliService>();
 builder.Services.AddSingleton(new DashboardMode(IsStandalone: false));
 builder.Services.AddSingleton<IStrategiesDataService, InProcessStrategiesDataService>();
@@ -640,6 +641,49 @@ featuresApi.MapDelete("/{id}", async (string id, AgentStateStore stateStore, Can
     return Results.Ok(new { message = $"Feature '{id}' deleted" });
 });
 
+// ── Develop Wizard API ──
+var developApi = app.MapGroup("/api/develop").WithTags("Develop");
+
+developApi.MapGet("/settings", async (DevelopSettingsService svc, CancellationToken ct) =>
+    Results.Ok(await svc.LoadAsync(ct)));
+
+developApi.MapPost("/settings", async (DevelopSettings settings, DevelopSettingsService svc, CancellationToken ct) =>
+{
+    await svc.SaveAsync(settings, ct);
+    return Results.Ok();
+});
+
+developApi.MapPost("/validate", async (DevelopSettingsService svc, CancellationToken ct) =>
+{
+    var settings = await svc.LoadAsync(ct);
+    var isValid = !string.IsNullOrWhiteSpace(settings.Description);
+    return Results.Ok(new { valid = isValid, message = isValid ? "Settings valid" : "Description is required" });
+});
+
+developApi.MapPost("/repo/create", async (HttpContext ctx, IRepositoryManagementService repoSvc, CancellationToken ct) =>
+{
+    var body = await ctx.Request.ReadFromJsonAsync<RepoCreateRequest>(ct);
+    if (body is null || string.IsNullOrWhiteSpace(body.Name))
+        return Results.BadRequest("Repository name is required");
+    var result = await repoSvc.CreateRepositoryAsync(body.Name, isPrivate: true, ct);
+    return result.Success ? Results.Ok(result) : Results.BadRequest(result);
+});
+
+developApi.MapPost("/start", async (DevelopSettingsService settingsSvc, CancellationToken ct) =>
+{
+    var settings = await settingsSvc.LoadAsync(ct);
+    if (string.IsNullOrWhiteSpace(settings.Description))
+        return Results.BadRequest(new { error = "Description is required to start" });
+    return Results.Ok(new { started = true, description = settings.Description });
+});
+
+developApi.MapGet("/work-items/search", async (string q, IWorkItemSearchService searchSvc, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(q)) return Results.Ok(Array.Empty<WorkItemSearchResult>());
+    var results = await searchSvc.SearchAsync(q, maxResults: 15, ct);
+    return Results.Ok(results);
+});
+
 // SignalR hub for real-time dashboard updates
 app.MapHub<AgentHub>("/agenthub");
 
@@ -655,3 +699,4 @@ record ChatRequest(string Message);
 record ValidatePatRequest(string? Token, string? RepoFullName);
 record CleanupExecuteRequest(string? Caveats);
 record PromptSaveRequest(string? Content);
+record RepoCreateRequest(string Name);

@@ -692,6 +692,9 @@ public sealed class ConfigurationService : IConfigurationService
             _dashboard.ResetCaches();
 
             // Delete SQLite DB files (checkpoint/state persistence)
+            // NOTE: develop-settings.json is user-specific and must survive resets.
+            // The glob patterns below (agentsquad_*.db*, sme-definitions*) are intentionally
+            // narrow so develop-settings.json is never matched.
             try
             {
                 var runnerDir = Path.GetDirectoryName(_appSettingsPath) ?? ".";

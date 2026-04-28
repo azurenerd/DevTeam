@@ -72,6 +72,8 @@ Get-Process -Name "dotnet" -ErrorAction SilentlyContinue |
 Write-Host "      Killed $killed process(es)" -ForegroundColor Green
 
 # ── Step 2: Delete SQLite checkpoint DBs ──
+# NOTE: develop-settings.json is user-specific and must survive resets.
+# The filter "agentsquad_*.db*" is intentionally narrow to avoid touching it.
 Write-Host "[2/8] Deleting SQLite checkpoint DBs..." -ForegroundColor Yellow
 $dbCount = 0
 $resolvedRunnerDir = Resolve-Path $RunnerDir -ErrorAction SilentlyContinue

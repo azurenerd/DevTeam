@@ -119,6 +119,28 @@ public static class DevPlatformServiceExtensions
             };
         });
 
+        services.AddSingleton<IRepositoryManagementService>(sp =>
+        {
+            var config = sp.GetRequiredService<IOptions<DevPlatformConfig>>().Value;
+            return config.Platform switch
+            {
+                DevPlatformType.GitHub => ActivatorUtilities.CreateInstance<GitHubRepositoryManagementAdapter>(sp),
+                DevPlatformType.AzureDevOps => CreateAdoService<AdoRepositoryManagementService>(sp),
+                _ => throw new ArgumentOutOfRangeException(nameof(config.Platform))
+            };
+        });
+
+        services.AddSingleton<IWorkItemSearchService>(sp =>
+        {
+            var config = sp.GetRequiredService<IOptions<DevPlatformConfig>>().Value;
+            return config.Platform switch
+            {
+                DevPlatformType.GitHub => ActivatorUtilities.CreateInstance<GitHubWorkItemSearchAdapter>(sp),
+                DevPlatformType.AzureDevOps => CreateAdoService<AdoWorkItemSearchService>(sp),
+                _ => throw new ArgumentOutOfRangeException(nameof(config.Platform))
+            };
+        });
+
         // Cross-cutting services that use capability interfaces
         services.AddSingleton<MergeCloseoutService>();
 

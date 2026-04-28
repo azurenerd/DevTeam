@@ -183,6 +183,8 @@ if (-not $SkipLocal) {
 }
 
 # ── Phase 4: Delete checkpoint DB ────────────────────
+# NOTE: develop-settings.json is user-specific and must survive resets.
+# The filter "agentsquad_*.db*" is intentionally narrow to avoid touching it.
 Write-Host "`n▶ Phase 4/5: Deleting checkpoint database..." -ForegroundColor Yellow
 $runnerDir = Join-Path (Join-Path (Join-Path $PSScriptRoot "..") "src") "AgentSquad.Runner"
 $dbFiles = Get-ChildItem -Path $runnerDir -Filter "agentsquad_*.db*" -ErrorAction SilentlyContinue
