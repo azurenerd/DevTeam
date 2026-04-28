@@ -1,4 +1,5 @@
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
@@ -25,6 +26,12 @@ public sealed record AgentSnapshot
     public string ActiveModel { get; init; } = "";
     public DateTime LastStatusChange { get; set; } = DateTime.UtcNow;
     public int ErrorCount { get; init; }
+
+    /// <summary>Current task tracker step name (e.g., "Generate PM Spec", "Review PR #5").</summary>
+    public string? CurrentStepName { get; init; }
+
+    /// <summary>Current task tracker step description for tooltip.</summary>
+    public string? CurrentStepDescription { get; init; }
 
     /// <summary>For SME/custom agents, the specialty name (e.g., "Blazor UI Developer").</summary>
     public string? Specialty { get; init; }
@@ -112,6 +119,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly IGitHubService _github;
     private readonly IPlatformHostContext _platformHost;
     private readonly RateLimitManager _rateLimitManager;
+    private readonly IAgentTaskTracker? _taskTracker;
     private readonly ILogger<DashboardDataService> _logger;
 
     private readonly Dictionary<string, AgentSnapshot> _agentCache = new();
@@ -145,7 +153,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         IGitHubService github,
         IPlatformHostContext platformHost,
         RateLimitManager rateLimitManager,
-        ILogger<DashboardDataService> logger)
+        ILogger<DashboardDataService> logger,
+        IAgentTaskTracker? taskTracker = null)
     {
         _registry = registry;
         _healthMonitor = healthMonitor;
@@ -159,6 +168,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _platformHost = platformHost;
         _rateLimitManager = rateLimitManager;
         _logger = logger;
+        _taskTracker = taskTracker;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -518,13 +528,17 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                     ? DateTime.UtcNow
                     : cached.LastStatusChange;
 
+                var currentStep = _taskTracker?.GetCurrentStep(e.Agent.Id);
+
                 _agentCache[e.Agent.Id] = cached with
                 {
                     Status = e.NewStatus,
                     StatusReason = e.Reason,
                     LastStatusChange = statusChangeTime,
                     AssignedPullRequest = e.Agent.AssignedPullRequest,
-                    ActiveModel = _modelRegistry.GetEffectiveModel(e.Agent.Id)
+                    ActiveModel = _modelRegistry.GetEffectiveModel(e.Agent.Id),
+                    CurrentStepName = currentStep?.Name,
+                    CurrentStepDescription = currentStep?.Description
                 };
             }
         }
@@ -557,11 +571,44 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         {
             _lastHealthSnapshot = _healthMonitor.GetSnapshot();
             RefreshUsageStats();
+            RefreshTaskSteps();
             await _hubContext.Clients.All.SendAsync("HealthUpdate", _lastHealthSnapshot, ct);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Failed to push health snapshot");
+        }
+    }
+
+    /// <summary>
+    /// Periodically refresh current task step info in the cache so the dashboard
+    /// shows up-to-date step names even between agent status change events.
+    /// </summary>
+    private void RefreshTaskSteps()
+    {
+        if (_taskTracker is null) return;
+
+        lock (_cacheLock)
+        {
+            var changed = false;
+            foreach (var (agentId, snapshot) in _agentCache.ToList())
+            {
+                var step = _taskTracker.GetCurrentStep(agentId);
+                var stepName = step?.Name;
+                var stepDesc = step?.Description;
+
+                if (snapshot.CurrentStepName != stepName || snapshot.CurrentStepDescription != stepDesc)
+                {
+                    _agentCache[agentId] = snapshot with
+                    {
+                        CurrentStepName = stepName,
+                        CurrentStepDescription = stepDesc
+                    };
+                    changed = true;
+                }
+            }
+
+            if (changed) NotifyStateChanged();
         }
     }
 
@@ -815,6 +862,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     {
         var usage = _modelRegistry.UsageTracker.GetStats(agent.Identity.Id);
         var diag = agent.CurrentDiagnostic;
+        var currentStep = _taskTracker?.GetCurrentStep(agent.Identity.Id);
         return new()
         {
             Id = agent.Identity.Id,
@@ -832,6 +880,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             ActiveModel = _modelRegistry.GetEffectiveModel(agent.Identity.Id),
             LastStatusChange = DateTime.UtcNow,
             ErrorCount = agent.RecentErrors.Count,
+            CurrentStepName = currentStep?.Name,
+            CurrentStepDescription = currentStep?.Description,
             DiagnosticSummary = diag?.Summary,
             DiagnosticJustification = diag?.Justification,
             DiagnosticCompliant = diag?.IsCompliant ?? true,

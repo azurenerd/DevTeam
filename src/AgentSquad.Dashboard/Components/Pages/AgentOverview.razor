@@ -282,14 +282,38 @@ else
                         </div>
                     }
 
-                    @* Diagnostic justification *@
-                    @if (!string.IsNullOrEmpty(agent.DiagnosticSummary))
+                    @* Current step from task tracker (replaces redundant diagnostic "Why") *@
+                    @{
+                        var currentStep = agent.CurrentStepName ?? _taskTracker?.GetCurrentStep(agent.Id)?.Name;
+                        var stepDescription = agent.CurrentStepDescription ?? _taskTracker?.GetCurrentStep(agent.Id)?.Description;
+                        var timeInState = DateTime.UtcNow - agent.LastStatusChange;
+                        var timeLabel = timeInState.TotalMinutes < 1 ? "just now"
+                            : timeInState.TotalMinutes < 60 ? $"{(int)timeInState.TotalMinutes}m ago"
+                            : $"{(int)timeInState.TotalHours}h {(int)(timeInState.TotalMinutes % 60)}m ago";
+                    }
+                    @if (currentStep is not null)
+                    {
+                        <div class="agent-detail diagnostic-row" title="@stepDescription">
+                            <span class="detail-label">⚡ Step</span>
+                            <span class="detail-value diagnostic-value">
+                                @TruncateDiagnostic(currentStep) <span class="time-ago">(@timeLabel)</span>
+                            </span>
+                        </div>
+                    }
+                    else if (!agent.DiagnosticCompliant && !string.IsNullOrEmpty(agent.DiagnosticComplianceIssue))
                     {
                         <div class="agent-detail diagnostic-row" title="@agent.DiagnosticJustification">
-                            <span class="detail-label">@(agent.DiagnosticCompliant ? "✅" : "⚠️") Why</span>
-                            <span class="detail-value diagnostic-value @(agent.DiagnosticCompliant ? "" : "non-compliant-text")">
-                                @TruncateDiagnostic(agent.DiagnosticSummary)
+                            <span class="detail-label">⚠️ Issue</span>
+                            <span class="detail-value diagnostic-value non-compliant-text">
+                                @TruncateDiagnostic(agent.DiagnosticComplianceIssue)
                             </span>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="agent-detail diagnostic-row">
+                            <span class="detail-label">🕐 Since</span>
+                            <span class="detail-value diagnostic-value">@timeLabel</span>
                         </div>
                     }
 
@@ -506,6 +530,7 @@ else
     private string? _teamComposition;
     private string _teamCompSummary = "";
     private bool _teamCompExpanded;
+    private System.Threading.Timer? _refreshTimer;
 
     protected override void OnInitialized()
     {
@@ -514,6 +539,16 @@ else
         RefreshData();
         _availableModels = DataService.GetAvailableModels();
         DataService.OnChange += OnDataChanged;
+
+        // Periodic refresh every 15s to keep "time ago" labels and task steps current
+        _refreshTimer = new System.Threading.Timer(_ =>
+        {
+            _ = InvokeAsync(() =>
+            {
+                RefreshData();
+                StateHasChanged();
+            });
+        }, null, TimeSpan.FromSeconds(15), TimeSpan.FromSeconds(15));
 
         // Set up HTTP client for run control API
         var factory = ServiceProvider.GetService<IHttpClientFactory>();
@@ -846,6 +881,7 @@ else
     public void Dispose()
     {
         DataService.OnChange -= OnDataChanged;
+        _refreshTimer?.Dispose();
     }
 
     // ── Project Control Methods ──────────────────────────────────────

@@ -2274,6 +2274,12 @@ main {
     cursor: help;
 }
 
+.time-ago {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    font-style: italic;
+}
+
 .non-compliant-text {
     color: var(--accent-amber) !important;
 }
