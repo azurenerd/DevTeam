@@ -167,6 +167,77 @@ public sealed class CandidateStateStore : IDisposable
         OnChange?.Invoke(snapshot);
     }
 
+    public void RecordInitialScored(CandidateInitialScoredEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var existingCandidate = task.Candidates.TryGetValue(e.StrategyId, out var c)
+            ? c
+            : new CandidateSnapshot { StrategyId = e.StrategyId, State = CandidateState.Evaluated };
+
+        var updated = existingCandidate with
+        {
+            State = CandidateState.InitialScored,
+            InitialAcScore = e.AcScore,
+            InitialDesignScore = e.DesignScore,
+            InitialReadabilityScore = e.ReadabilityScore,
+            InitialVisualsScore = e.VisualsScore,
+            JudgeFeedback = e.Feedback,
+            InitialScreenshotBase64 = e.ScreenshotBase64 ?? existingCandidate.ScreenshotBase64,
+        };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, existing) => existing with { Candidates = existing.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
+    public void RecordRevisionStarted(CandidateRevisionStartedEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var existingCandidate = task.Candidates.TryGetValue(e.StrategyId, out var c)
+            ? c
+            : new CandidateSnapshot { StrategyId = e.StrategyId, State = CandidateState.InitialScored };
+
+        var updated = existingCandidate with
+        {
+            State = CandidateState.Revising,
+        };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, existing) => existing with { Candidates = existing.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
+    public void RecordRevisionCompleted(CandidateRevisionCompletedEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var existingCandidate = task.Candidates.TryGetValue(e.StrategyId, out var c)
+            ? c
+            : new CandidateSnapshot { StrategyId = e.StrategyId, State = CandidateState.Revising };
+
+        var updated = existingCandidate with
+        {
+            // Stay in Revising state — will transition to Scored when final judge runs
+            RevisionElapsedSec = e.RevisionElapsedSec,
+            TokensUsed = (existingCandidate.TokensUsed ?? 0) + (e.TokensUsed ?? 0),
+        };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, existing) => existing with { Candidates = existing.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
     public void RecordDetail(CandidateDetailEvent e)
     {
         var key = (e.RunId, e.TaskId);
@@ -301,6 +372,14 @@ public sealed class CandidateStateStore : IDisposable
                     ExecutionSummaryJson = c.ExecutionSummary is not null
                         ? JsonSerializer.Serialize(c.ExecutionSummary, _jsonOpts) : null,
                     ScreenshotBase64 = c.ScreenshotBase64,
+                    InitialAcScore = c.InitialAcScore,
+                    InitialDesignScore = c.InitialDesignScore,
+                    InitialReadabilityScore = c.InitialReadabilityScore,
+                    InitialVisualsScore = c.InitialVisualsScore,
+                    JudgeFeedback = c.JudgeFeedback,
+                    InitialScreenshotBase64 = c.InitialScreenshotBase64,
+                    RevisionElapsedSec = c.RevisionElapsedSec,
+                    RevisionSkippedReason = c.RevisionSkippedReason,
                     ActivityLog = c.ActivityLog.Select(a => new StrategyActivityLogEntry(
                         a.Timestamp, a.Category, a.Message,
                         a.Metadata is { Count: > 0 } ? JsonSerializer.Serialize(a.Metadata, _jsonOpts) : null
@@ -345,6 +424,14 @@ public sealed class CandidateStateStore : IDisposable
                             ExecutionSummary = c.ExecutionSummaryJson is not null
                                 ? JsonSerializer.Deserialize<CandidateExecutionSummary>(c.ExecutionSummaryJson, _jsonOpts) : null,
                             ScreenshotBase64 = c.ScreenshotBase64,
+                            InitialAcScore = c.InitialAcScore,
+                            InitialDesignScore = c.InitialDesignScore,
+                            InitialReadabilityScore = c.InitialReadabilityScore,
+                            InitialVisualsScore = c.InitialVisualsScore,
+                            JudgeFeedback = c.JudgeFeedback,
+                            InitialScreenshotBase64 = c.InitialScreenshotBase64,
+                            RevisionElapsedSec = c.RevisionElapsedSec,
+                            RevisionSkippedReason = c.RevisionSkippedReason,
                             ActivityLog = c.ActivityLog.Count > 0
                                 ? c.ActivityLog.Select(a => new ActivityEntry(
                                     a.Timestamp, a.Category, a.Message, null)).ToImmutableList()
@@ -407,6 +494,10 @@ public enum CandidateState
     Completed,
     /// <summary>Post-evaluation: build gates ran, screenshot captured, but LLM judge may not have scored.</summary>
     Evaluated,
+    /// <summary>Initial judge scores received; awaiting revision round.</summary>
+    InitialScored,
+    /// <summary>Revision attempt in progress.</summary>
+    Revising,
     Scored,
     Winner,
 }
@@ -428,6 +519,25 @@ public sealed record CandidateSnapshot
     public int? VisualsScore { get; init; }
     /// <summary>Base64-encoded PNG screenshot captured after build gate passed (null if not available).</summary>
     public string? ScreenshotBase64 { get; init; }
+    // ── Revision round fields (all nullable for backward compat) ──
+    /// <summary>Initial acceptance criteria score from first judge round. Null when revision round is disabled.</summary>
+    public int? InitialAcScore { get; init; }
+    /// <summary>Initial design score from first judge round.</summary>
+    public int? InitialDesignScore { get; init; }
+    /// <summary>Initial readability score from first judge round.</summary>
+    public int? InitialReadabilityScore { get; init; }
+    /// <summary>Initial visual quality score from first judge round.</summary>
+    public int? InitialVisualsScore { get; init; }
+    /// <summary>Judge feedback for revision (empty when all scores >= 8 or revision disabled).</summary>
+    public string? JudgeFeedback { get; init; }
+    /// <summary>Rubber-duck adversarial feedback for revision.</summary>
+    public string? RubberDuckFeedback { get; init; }
+    /// <summary>Screenshot from the initial round (before revision).</summary>
+    public string? InitialScreenshotBase64 { get; init; }
+    /// <summary>Wall-clock seconds for the revision attempt. Null when no revision ran.</summary>
+    public double? RevisionElapsedSec { get; init; }
+    /// <summary>Why revision was skipped (e.g., "sole-survivor", "disabled", "all-scores-high"). Null when revision ran.</summary>
+    public string? RevisionSkippedReason { get; init; }
     /// <summary>True if the candidate survived build gates (null if evaluation hasn't run yet).</summary>
     public bool? Survived { get; init; }
     /// <summary>Why the LLM judge was skipped, e.g. "sole-survivor". Null when judge ran normally.</summary>

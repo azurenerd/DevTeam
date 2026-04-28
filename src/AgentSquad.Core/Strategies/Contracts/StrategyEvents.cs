@@ -15,6 +15,9 @@ public static class StrategyEvents
     public const string GateCompleted        = "gate:completed";
     public const string CandidateDetail      = "candidate:detail";
     public const string CandidateActivity    = "candidate:activity";
+    public const string CandidateInitialScored   = "candidate:initial-scored";
+    public const string CandidateRevisionStarted = "candidate:revision-started";
+    public const string CandidateRevisionCompleted = "candidate:revision-completed";
 }
 
 public record CandidateStartedEvent(string RunId, string TaskId, string StrategyId, DateTimeOffset At);
@@ -63,3 +66,27 @@ public record ActivityEntry(
     string Category,
     string Message,
     Dictionary<string, object>? Metadata = null);
+
+/// <summary>
+/// Emitted after the initial judge scoring round, before revision begins.
+/// Carries the initial scores and judge feedback for the candidate.
+/// </summary>
+public record CandidateInitialScoredEvent(
+    string RunId, string TaskId, string StrategyId,
+    int AcScore, int DesignScore, int ReadabilityScore,
+    int? VisualsScore,
+    string? Feedback,
+    string? ScreenshotBase64);
+
+/// <summary>Emitted when a candidate begins its revision attempt using judge feedback.</summary>
+public record CandidateRevisionStartedEvent(
+    string RunId, string TaskId, string StrategyId,
+    DateTimeOffset At);
+
+/// <summary>
+/// Emitted when a candidate's revision attempt completes (success or failure).
+/// </summary>
+public record CandidateRevisionCompletedEvent(
+    string RunId, string TaskId, string StrategyId,
+    bool Succeeded, string? FailureReason,
+    double RevisionElapsedSec, long? TokensUsed);

@@ -70,6 +70,9 @@ public class StrategyFrameworkConfig
     /// <summary>Evaluator configuration: gates, LLM judge, reserved paths.</summary>
     public EvaluatorConfig Evaluator { get; set; } = new();
 
+    /// <summary>Revision round: judge-feedback-fix cycle configuration.</summary>
+    public RevisionRoundConfig RevisionRound { get; set; } = new();
+
     /// <summary>Experiment ndjson output root. Resolved relative to the runner's cwd.</summary>
     public string ExperimentDataDirectory { get; set; } = "experiment-data";
 
@@ -222,4 +225,32 @@ public class AgenticConfig
     /// Max active processes in the Job Object tree. Default 64.
     /// </summary>
     public int JobObjectActiveProcessLimit { get; set; } = 64;
+}
+
+/// <summary>
+/// Configuration for the revision round feature. When enabled, frameworks get one
+/// chance to fix their code based on judge feedback before final scoring.
+/// Flow: Initial Dev → Initial Judge (scores + feedback) → Revision Dev (same worktree) → Final Judge → Winner
+/// </summary>
+public class RevisionRoundConfig
+{
+    /// <summary>
+    /// Master switch. When false (default), the flow is identical to today — zero regression risk.
+    /// When true, surviving candidates receive judge feedback and get one revision attempt.
+    /// </summary>
+    public bool Enabled { get; set; } = false;
+
+    /// <summary>
+    /// Hard wall-clock timeout for each strategy's revision attempt (seconds).
+    /// Should be shorter than the initial timeout since revision is a targeted fix, not a full rebuild.
+    /// Default: 300 seconds (5 minutes).
+    /// </summary>
+    public int MaxRevisionSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Model tier for the rubber-duck adversarial feedback generator.
+    /// Uses a DIFFERENT tier than the judge to get genuine perspective diversity.
+    /// Default: "standard".
+    /// </summary>
+    public string FeedbackModelTier { get; set; } = "standard";
 }

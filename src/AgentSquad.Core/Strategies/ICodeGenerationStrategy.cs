@@ -103,6 +103,12 @@ public record CandidateScore
     /// <summary>Visual quality score from the vision judge. Null when visual scoring is not applicable (non-visual task).</summary>
     public int? VisualsScore { get; init; }
     public string Reasoning { get; init; } = "";
+    /// <summary>
+    /// Actionable improvement feedback from the judge. Distinct from Reasoning (which explains the score).
+    /// Contains specific suggestions per scoring axis for how to improve. Empty when all scores >= 8.
+    /// Used by the revision round to give frameworks a second chance.
+    /// </summary>
+    public string Feedback { get; init; } = "";
 }
 
 /// <summary>Final evaluator verdict for a task: all candidates + the winner pick.</summary>

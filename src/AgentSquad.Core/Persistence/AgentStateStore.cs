@@ -77,6 +77,14 @@ public class StrategyCandidateRecord
     public string? JudgeSkippedReason { get; init; }
     public string? ExecutionSummaryJson { get; init; }
     public string? ScreenshotBase64 { get; init; }
+    public int? InitialAcScore { get; set; }
+    public int? InitialDesignScore { get; set; }
+    public int? InitialReadabilityScore { get; set; }
+    public int? InitialVisualsScore { get; set; }
+    public string? JudgeFeedback { get; set; }
+    public string? InitialScreenshotBase64 { get; set; }
+    public double? RevisionElapsedSec { get; set; }
+    public string? RevisionSkippedReason { get; set; }
     public List<StrategyActivityLogEntry> ActivityLog { get; set; } = new();
 }
 
@@ -267,6 +275,14 @@ public class AgentStateStore : IDisposable
                 judge_skipped_reason TEXT,
                 execution_summary_json TEXT,
                 screenshot_base64  TEXT,
+                initial_ac_score   INTEGER,
+                initial_design_score INTEGER,
+                initial_readability_score INTEGER,
+                initial_visuals_score INTEGER,
+                judge_feedback     TEXT,
+                initial_screenshot_base64 TEXT,
+                revision_elapsed_sec REAL,
+                revision_skipped_reason TEXT,
                 PRIMARY KEY (run_id, task_id, strategy_id)
             );
 
@@ -306,6 +322,14 @@ public class AgentStateStore : IDisposable
             "ALTER TABLE gate_approvals ADD COLUMN run_id TEXT NOT NULL DEFAULT '_global'",
             "ALTER TABLE processed_items ADD COLUMN run_id TEXT NOT NULL DEFAULT '_global'",
             "ALTER TABLE strategy_candidates ADD COLUMN visuals_score INTEGER",
+            "ALTER TABLE strategy_candidates ADD COLUMN initial_ac_score INTEGER",
+            "ALTER TABLE strategy_candidates ADD COLUMN initial_design_score INTEGER",
+            "ALTER TABLE strategy_candidates ADD COLUMN initial_readability_score INTEGER",
+            "ALTER TABLE strategy_candidates ADD COLUMN initial_visuals_score INTEGER",
+            "ALTER TABLE strategy_candidates ADD COLUMN judge_feedback TEXT",
+            "ALTER TABLE strategy_candidates ADD COLUMN initial_screenshot_base64 TEXT",
+            "ALTER TABLE strategy_candidates ADD COLUMN revision_elapsed_sec REAL",
+            "ALTER TABLE strategy_candidates ADD COLUMN revision_skipped_reason TEXT",
         ];
 
         foreach (var sql in migrations)
@@ -1325,12 +1349,18 @@ public class AgentStateStore : IDisposable
                         (run_id, task_id, strategy_id, state, started_at, completed_at,
                          elapsed_sec, succeeded, failure_reason, tokens_used,
                          ac_score, design_score, readability_score, visuals_score, survived,
-                         judge_skipped_reason, execution_summary_json, screenshot_base64)
+                         judge_skipped_reason, execution_summary_json, screenshot_base64,
+                         initial_ac_score, initial_design_score, initial_readability_score,
+                         initial_visuals_score, judge_feedback, initial_screenshot_base64,
+                         revision_elapsed_sec, revision_skipped_reason)
                     VALUES
                         ($run_id, $task_id, $strategy_id, $state, $started_at, $completed_at,
                          $elapsed_sec, $succeeded, $failure_reason, $tokens_used,
                          $ac_score, $design_score, $readability_score, $visuals_score, $survived,
-                         $judge_skipped, $summary_json, $screenshot)
+                         $judge_skipped, $summary_json, $screenshot,
+                         $initial_ac_score, $initial_design_score, $initial_readability_score,
+                         $initial_visuals_score, $judge_feedback, $initial_screenshot,
+                         $revision_elapsed_sec, $revision_skipped_reason)
                     """;
                 cCmd.Parameters.AddWithValue("$run_id", task.RunId);
                 cCmd.Parameters.AddWithValue("$task_id", task.TaskId);
@@ -1350,6 +1380,14 @@ public class AgentStateStore : IDisposable
                 cCmd.Parameters.AddWithValue("$judge_skipped", c.JudgeSkippedReason ?? (object)DBNull.Value);
                 cCmd.Parameters.AddWithValue("$summary_json", c.ExecutionSummaryJson ?? (object)DBNull.Value);
                 cCmd.Parameters.AddWithValue("$screenshot", c.ScreenshotBase64 ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$initial_ac_score", c.InitialAcScore ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$initial_design_score", c.InitialDesignScore ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$initial_readability_score", c.InitialReadabilityScore ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$initial_visuals_score", c.InitialVisualsScore ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$judge_feedback", c.JudgeFeedback ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$initial_screenshot", c.InitialScreenshotBase64 ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$revision_elapsed_sec", c.RevisionElapsedSec ?? (object)DBNull.Value);
+                cCmd.Parameters.AddWithValue("$revision_skipped_reason", c.RevisionSkippedReason ?? (object)DBNull.Value);
                 cCmd.ExecuteNonQuery();
 
                 // Batch-insert activity log entries for this candidate (capped at 50 most recent)
@@ -1429,7 +1467,10 @@ public class AgentStateStore : IDisposable
                 SELECT strategy_id, state, started_at, completed_at, elapsed_sec,
                        succeeded, failure_reason, tokens_used,
                        ac_score, design_score, readability_score, visuals_score, survived,
-                       judge_skipped_reason, execution_summary_json, screenshot_base64
+                       judge_skipped_reason, execution_summary_json, screenshot_base64,
+                       initial_ac_score, initial_design_score, initial_readability_score,
+                       initial_visuals_score, judge_feedback, initial_screenshot_base64,
+                       revision_elapsed_sec, revision_skipped_reason
                 FROM strategy_candidates
                 WHERE run_id = $run_id AND task_id = $task_id
                 """;
@@ -1457,6 +1498,14 @@ public class AgentStateStore : IDisposable
                     JudgeSkippedReason = cReader.IsDBNull(13) ? null : cReader.GetString(13),
                     ExecutionSummaryJson = cReader.IsDBNull(14) ? null : cReader.GetString(14),
                     ScreenshotBase64 = cReader.IsDBNull(15) ? null : cReader.GetString(15),
+                    InitialAcScore = cReader.IsDBNull(16) ? null : cReader.GetInt32(16),
+                    InitialDesignScore = cReader.IsDBNull(17) ? null : cReader.GetInt32(17),
+                    InitialReadabilityScore = cReader.IsDBNull(18) ? null : cReader.GetInt32(18),
+                    InitialVisualsScore = cReader.IsDBNull(19) ? null : cReader.GetInt32(19),
+                    JudgeFeedback = cReader.IsDBNull(20) ? null : cReader.GetString(20),
+                    InitialScreenshotBase64 = cReader.IsDBNull(21) ? null : cReader.GetString(21),
+                    RevisionElapsedSec = cReader.IsDBNull(22) ? null : cReader.GetDouble(22),
+                    RevisionSkippedReason = cReader.IsDBNull(23) ? null : cReader.GetString(23),
                 });
             }
 
