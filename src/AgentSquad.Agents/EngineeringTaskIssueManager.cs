@@ -383,7 +383,7 @@ internal sealed partial class EngineeringTaskIssueManager
         var task = _cache[idx];
         var newLabels = ReplaceStatusLabel(task.Labels, StatusInProgress);
 
-        await _workItems.UpdateAsync(issueNumber, labels: newLabels, ct: ct);
+        await _workItems.UpdateAsync(issueNumber, labels: newLabels, state: "inprogress", ct: ct);
         await _workItems.AddCommentAsync(issueNumber, $"PR #{prNumber} created for this task.", ct);
 
         _cache[idx] = task with { Status = "InProgress", PullRequestNumber = prNumber };

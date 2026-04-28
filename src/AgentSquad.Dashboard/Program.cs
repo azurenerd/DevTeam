@@ -58,6 +58,10 @@ builder.Services.AddSingleton<AgentSquad.Core.Metrics.BuildTestMetrics>();
 // Orchestrator (AgentRegistry, HealthMonitor, DeadlockDetector, WorkflowStateMachine, AgentSpawnManager)
 builder.Services.AddOrchestrator();
 
+// CandidateStateStore — needed by ProjectTimeline page for strategy visualization
+builder.Services.AddSingleton<AgentSquad.Core.Strategies.CandidateStateStore>(sp =>
+    new AgentSquad.Core.Strategies.CandidateStateStore(sp.GetService<AgentStateStore>()));
+
 // Stub IAgentFactory — standalone dashboard doesn't spawn agents
 builder.Services.AddSingleton<IAgentFactory>(new NoOpAgentFactory());
 
