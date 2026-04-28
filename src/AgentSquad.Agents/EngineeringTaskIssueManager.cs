@@ -533,6 +533,10 @@ internal sealed partial class EngineeringTaskIssueManager
 
     internal static EngineeringTask MapIssueToTask(AgentIssue issue)
     {
+        // Normalize body: ADO stores HTML, but parsers expect markdown-style text.
+        // Strip HTML tags so regex patterns like **Parent Issue:** #N work on both platforms.
+        var normalizedBody = NormalizeHtmlBody(issue.Body);
+
         var taskId = ParseTaskId(issue.Title) ?? $"T-{issue.Number}";
         var taskName = ParseTaskName(issue.Title) ?? issue.Title;
         var complexity = ParseComplexityFromLabels(issue.Labels);
@@ -540,17 +544,17 @@ internal sealed partial class EngineeringTaskIssueManager
             ? "Done"
             : ParseStatusFromLabels(issue.Labels);
         var assignedTo = ParseAssignedAgent(issue.Title);
-        var deps = ParseDependencies(issue.Body);
-        var parentIssue = ParseParentIssue(issue.Body);
-        var wave = ParseWave(issue.Body);
-        var depTypes = ParseDependencyTypes(issue.Body);
-        var ownedFiles = ParseOwnedFiles(issue.Body);
+        var deps = ParseDependencies(normalizedBody);
+        var parentIssue = ParseParentIssue(normalizedBody);
+        var wave = ParseWave(normalizedBody);
+        var depTypes = ParseDependencyTypes(normalizedBody);
+        var ownedFiles = ParseOwnedFiles(normalizedBody);
 
         return new EngineeringTask
         {
             Id = taskId,
             Name = taskName,
-            Description = ParseDescription(issue.Body),
+            Description = ParseDescription(normalizedBody),
             Complexity = complexity,
             Status = status,
             AssignedTo = assignedTo,
@@ -742,6 +746,35 @@ internal sealed partial class EngineeringTaskIssueManager
             .Select(f => f.Trim())
             .Where(f => !string.IsNullOrEmpty(f))
             .ToList();
+    }
+
+    // ── HTML → text normalization ──────────────────────────────────────
+    /// <summary>
+    /// Convert HTML body (from ADO) back to markdown-like text so regex parsers work.
+    /// Plain markdown text passes through unchanged.
+    /// </summary>
+    internal static string NormalizeHtmlBody(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return "";
+        // If not HTML, return as-is
+        if (!body.Contains('<')) return body;
+
+        var text = body;
+        // Convert <strong> → **
+        text = Regex.Replace(text, @"<strong>(.*?)</strong>", "**$1**");
+        // Convert <em> → *
+        text = Regex.Replace(text, @"<em>(.*?)</em>", "*$1*");
+        // Convert <h2 ...> → ## 
+        text = Regex.Replace(text, @"<h2[^>]*>(.*?)</h2>", "## $1");
+        // Convert <h3 ...> → ### 
+        text = Regex.Replace(text, @"<h3[^>]*>(.*?)</h3>", "### $1");
+        // Convert <li> items → - prefixed lines
+        text = Regex.Replace(text, @"<li>(.*?)</li>", "- $1");
+        // Strip remaining HTML tags
+        text = Regex.Replace(text, @"<[^>]+>", "");
+        // Collapse multiple blank lines
+        text = Regex.Replace(text, @"\n{3,}", "\n\n");
+        return text.Trim();
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────
