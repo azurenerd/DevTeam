@@ -47,7 +47,8 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
     public async Task<BaselineGenerationOutcome> GenerateAsync(
         string worktreePath, TaskContext task, CancellationToken ct,
         string strategyTag = "baseline-strategy",
-        IProgress<FrameworkActivityEvent>? activitySink = null)
+        IProgress<FrameworkActivityEvent>? activitySink = null,
+        RevisionContext? revision = null)
     {
         if (string.IsNullOrWhiteSpace(worktreePath))
             return Fail("worktree path missing");
@@ -112,6 +113,40 @@ public class BaselineCodeGenerator : IBaselineCodeGenerator
         if (!string.IsNullOrWhiteSpace(task.DesignContext)) contextParts.Add("Design");
         activitySink?.Report(new FrameworkActivityEvent("prompt",
             $"User prompt ready ({userPrompt.Length:N0} chars) — context: {(contextParts.Count > 0 ? string.Join(", ", contextParts) : "task only")}"));
+
+        // When revising, append targeted-fix instructions so the LLM focuses on
+        // judge feedback rather than regenerating from scratch.
+        if (revision is not null)
+        {
+            var sb = new System.Text.StringBuilder(userPrompt);
+            sb.AppendLine();
+            sb.AppendLine("## REVISION ROUND — Targeted Fix");
+            sb.AppendLine("Your initial code already exists in the working directory. Make TARGETED fixes only.");
+            sb.AppendLine();
+            sb.AppendLine("### Judge Scores:");
+            foreach (var (axis, score) in revision.InitialScores)
+                sb.AppendLine($"- {axis}: {score}/10");
+            if (!string.IsNullOrWhiteSpace(revision.JudgeFeedback))
+            {
+                sb.AppendLine();
+                sb.AppendLine("### Feedback:");
+                sb.AppendLine(revision.JudgeFeedback);
+            }
+            if (!string.IsNullOrWhiteSpace(revision.RubberDuckFeedback))
+            {
+                sb.AppendLine();
+                sb.AppendLine("### Second Opinion:");
+                sb.AppendLine(revision.RubberDuckFeedback);
+            }
+            sb.AppendLine();
+            sb.AppendLine("Fix ONLY the issues mentioned. Do not rewrite working code.");
+            sb.AppendLine();
+            userPrompt = sb.ToString();
+
+            activitySink?.Report(new FrameworkActivityEvent("prompt",
+                $"Revision context appended ({revision.InitialScores.Count} axes, " +
+                $"{(string.IsNullOrWhiteSpace(revision.JudgeFeedback) ? "no" : "has")} judge feedback)"));
+        }
 
         var history = new ChatHistory();
         history.AddSystemMessage(systemPrompt);

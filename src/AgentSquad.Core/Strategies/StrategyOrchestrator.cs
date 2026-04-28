@@ -459,6 +459,7 @@ public class StrategyOrchestrator
         FrameworkId = si.StrategyId,
         Timeout = si.Timeout,
         ActivitySink = activitySink,
+        Revision = si.Revision,
     };
 
     private static StrategyExecutionResult FromFrameworkResult(FrameworkExecutionResult fr) => new()

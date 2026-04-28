@@ -289,7 +289,8 @@ public class McpEnhancedStrategyTests : IDisposable
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
             string strategyTag = "baseline-strategy",
-            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null,
+            RevisionContext? revision = null)
         {
             Calls++;
             return _body(AgentCallContext.CurrentInvocationContext);
@@ -304,7 +305,8 @@ public class McpEnhancedStrategyTests : IDisposable
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
             string strategyTag = "baseline-strategy",
-            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null,
+            RevisionContext? revision = null)
         {
             _onTag(strategyTag);
             return Task.FromResult(new BaselineGenerationOutcome { Succeeded = true });

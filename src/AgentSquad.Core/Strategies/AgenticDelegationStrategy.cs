@@ -263,6 +263,37 @@ public class AgenticPromptBuilder
         sb.AppendLine("- If a test suite exists, try to keep it green. If you add new tests, ensure they pass.");
         sb.AppendLine("- Stop when the acceptance criteria are met or when you cannot make forward progress.");
         sb.AppendLine();
+        if (invocation.Revision is { } rev)
+        {
+            sb.AppendLine("## REVISION ROUND — Targeted Fix");
+            sb.AppendLine();
+            sb.AppendLine("This is a REVISION attempt. Your initial code already exists in the working directory.");
+            sb.AppendLine("Do NOT regenerate everything from scratch. Make TARGETED fixes based on the feedback below.");
+            sb.AppendLine();
+            sb.AppendLine("### Initial Judge Scores (0-10):");
+            foreach (var (axis, score) in rev.InitialScores)
+                sb.AppendLine($"- {axis}: {score}/10");
+            sb.AppendLine();
+            if (!string.IsNullOrWhiteSpace(rev.JudgeFeedback))
+            {
+                sb.AppendLine("### Judge Feedback (what to fix):");
+                sb.AppendLine(rev.JudgeFeedback);
+                sb.AppendLine();
+            }
+            if (!string.IsNullOrWhiteSpace(rev.RubberDuckFeedback))
+            {
+                sb.AppendLine("### Independent Critique (second opinion):");
+                sb.AppendLine(rev.RubberDuckFeedback);
+                sb.AppendLine();
+            }
+            sb.AppendLine("### Instructions:");
+            sb.AppendLine("- Read the existing files in the working directory first");
+            sb.AppendLine("- Fix ONLY the specific issues mentioned in the feedback");
+            sb.AppendLine("- Do not refactor or rewrite code that wasn't flagged");
+            sb.AppendLine("- Focus on raising the lowest-scoring axes");
+            sb.AppendLine();
+        }
+
         sb.AppendLine("## Begin");
         sb.AppendLine("Implement this task autonomously. You have --allow-all — use tools freely, but respect the constraints above.");
         return sb.ToString();

@@ -18,6 +18,11 @@ public record FrameworkInvocation
     /// Adapters report significant events (tool calls, decisions, sub-agent spawns) via this sink.
     /// </summary>
     public IProgress<FrameworkActivityEvent>? ActivitySink { get; init; }
+    /// <summary>
+    /// Non-null during revision rounds. Contains judge scores, feedback, and the
+    /// original patch so framework adapters can make targeted fixes instead of regenerating.
+    /// </summary>
+    public Strategies.RevisionContext? Revision { get; init; }
 }
 
 /// <summary>Activity event reported by framework adapters during execution.</summary>

@@ -33,7 +33,7 @@ public class BaselineStrategy : ICodeGenerationStrategy
             try
             {
                 sink?.Report(new Frameworks.FrameworkActivityEvent("init", "Starting single-pass code generation"));
-                var outcome = await _generator.GenerateAsync(invocation.WorktreePath, invocation.Task, ct, "baseline-strategy", sink);
+                var outcome = await _generator.GenerateAsync(invocation.WorktreePath, invocation.Task, ct, "baseline-strategy", sink, invocation.Revision);
                 if (!outcome.Succeeded)
                 {
                     sink?.Report(new Frameworks.FrameworkActivityEvent("error",

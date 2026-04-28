@@ -26,7 +26,8 @@ public interface IBaselineCodeGenerator
     Task<BaselineGenerationOutcome> GenerateAsync(
         string worktreePath, TaskContext task, CancellationToken ct,
         string strategyTag = "baseline-strategy",
-        IProgress<Frameworks.FrameworkActivityEvent>? activitySink = null);
+        IProgress<Frameworks.FrameworkActivityEvent>? activitySink = null,
+        RevisionContext? revision = null);
 }
 
 /// <summary>What the baseline generator returns after a single run.</summary>

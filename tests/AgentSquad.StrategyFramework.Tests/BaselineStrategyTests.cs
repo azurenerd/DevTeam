@@ -129,13 +129,13 @@ public class BaselineStrategyTests : IDisposable
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
             string strategyTag = "baseline-strategy",
-            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null,
+            RevisionContext? revision = null)
         {
             Calls++;
             return Task.FromResult(new BaselineGenerationOutcome
             {
                 Succeeded = _succeed,
-                FilesWritten = _files,
                 TokensUsed = _tokens,
                 FailureReason = _failureReason,
             });
@@ -149,7 +149,8 @@ public class BaselineStrategyTests : IDisposable
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
             string strategyTag = "baseline-strategy",
-            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null) => throw _ex;
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null,
+            RevisionContext? revision = null) => throw _ex;
     }
 
     private sealed class CancellingGenerator : IBaselineCodeGenerator
@@ -157,7 +158,8 @@ public class BaselineStrategyTests : IDisposable
         public Task<BaselineGenerationOutcome> GenerateAsync(
             string worktreePath, TaskContext task, CancellationToken ct,
             string strategyTag = "baseline-strategy",
-            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null)
+            IProgress<AgentSquad.Core.Frameworks.FrameworkActivityEvent>? activitySink = null,
+            RevisionContext? revision = null)
         {
             ct.ThrowIfCancellationRequested();
             return Task.FromResult(new BaselineGenerationOutcome { Succeeded = true });

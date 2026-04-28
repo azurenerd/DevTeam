@@ -118,7 +118,8 @@ public class McpEnhancedStrategy : ICodeGenerationStrategy
             using var _ = AgentCallContext.PushInvocationContext(ctx);
 
             var outcome = await _generator.GenerateAsync(
-                invocation.WorktreePath, invocation.Task, ct, strategyTag: "mcp-enhanced-strategy");
+                invocation.WorktreePath, invocation.Task, ct, strategyTag: "mcp-enhanced-strategy",
+                revision: invocation.Revision);
 
             if (!outcome.Succeeded)
             {
