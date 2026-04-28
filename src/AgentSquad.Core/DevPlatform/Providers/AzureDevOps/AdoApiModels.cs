@@ -77,7 +77,8 @@ internal record AdoWorkItemRelation
 {
     public string Rel { get; init; } = "";
     public string Url { get; init; } = "";
-    public Dictionary<string, string>? Attributes { get; init; }
+    // ADO returns mixed types: isLocked (bool), name (string), etc.
+    public Dictionary<string, object?>? Attributes { get; init; }
 }
 
 internal record AdoWorkItemCreateResult
