@@ -2,6 +2,7 @@ namespace AgentSquad.Integration.Tests.Fakes;
 
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -73,7 +74,7 @@ public sealed class WorkflowTestHarness : IDisposable
         {
             var cfg = sp.GetRequiredService<IOptions<AgentSquadConfig>>().Value;
             return new ProjectFileManager(
-                sp.GetRequiredService<IGitHubService>(),
+                sp.GetRequiredService<IRepositoryContentService>(),
                 sp.GetRequiredService<ILogger<ProjectFileManager>>(),
                 cfg.Project.DefaultBranch);
         });

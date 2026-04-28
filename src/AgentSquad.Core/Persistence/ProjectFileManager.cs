@@ -1,6 +1,6 @@
 using System.Globalization;
 using AgentSquad.Core.Agents;
-using AgentSquad.Core.GitHub;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using Microsoft.Extensions.Logging;
 
 namespace AgentSquad.Core.Persistence;
@@ -10,7 +10,7 @@ namespace AgentSquad.Core.Persistence;
 /// </summary>
 public class ProjectFileManager
 {
-    private readonly IGitHubService _github;
+    private readonly IRepositoryContentService _repoContent;
     private readonly ILogger<ProjectFileManager> _logger;
     private readonly string? _branch;
     private readonly HashSet<string> _warnedMissingAgents = new(StringComparer.OrdinalIgnoreCase);
@@ -23,11 +23,11 @@ public class ProjectFileManager
     private const string TeamCompositionPath = "TeamComposition.md";
 
     public ProjectFileManager(
-        IGitHubService github,
+        IRepositoryContentService repoContent,
         ILogger<ProjectFileManager> logger,
         string? branch = null)
     {
-        _github = github ?? throw new ArgumentNullException(nameof(github));
+        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _branch = branch;
     }
@@ -39,7 +39,7 @@ public class ProjectFileManager
     /// </summary>
     public async Task<string> GetTeamMembersAsync(CancellationToken ct = default)
     {
-        var content = await _github.GetFileContentAsync(TeamMembersPath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(TeamMembersPath, _branch, ct);
         return content ?? CreateEmptyTeamMembersDoc();
     }
 
@@ -65,7 +65,7 @@ public class ProjectFileManager
 
         _logger.LogInformation("Adding team member {Name} ({Role}) to TeamMembers.md", agent.DisplayName, agent.Role);
 
-        await _github.CreateOrUpdateFileAsync(
+        await _repoContent.CreateOrUpdateFileAsync(
             TeamMembersPath, updated,
             $"Add team member: {agent.DisplayName}",
             _branch, ct);
@@ -114,7 +114,7 @@ public class ProjectFileManager
 
         _logger.LogInformation("Updating status for {AgentId} to {Status}", agentId, newStatus);
 
-        await _github.CreateOrUpdateFileAsync(
+        await _repoContent.CreateOrUpdateFileAsync(
             TeamMembersPath,
             string.Join('\n', lines),
             $"Update {agentId} status to {newStatus}",
@@ -157,7 +157,7 @@ public class ProjectFileManager
 
         _logger.LogInformation("Removing team member {AgentId} from TeamMembers.md", agentId);
 
-        await _github.CreateOrUpdateFileAsync(
+        await _repoContent.CreateOrUpdateFileAsync(
             TeamMembersPath,
             string.Join('\n', lines),
             $"Remove team member: {agentId}",
@@ -170,7 +170,7 @@ public class ProjectFileManager
 
     public async Task<string> GetEngineeringPlanAsync(CancellationToken ct = default)
     {
-        var content = await _github.GetFileContentAsync(EngineeringPlanPath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(EngineeringPlanPath, _branch, ct);
         return content ?? "# Engineering Plan\n\n_No engineering plan has been created yet._\n";
     }
 
@@ -179,7 +179,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating EngineeringPlan.md");
-        await _github.CreateOrUpdateFileAsync(EngineeringPlanPath, content, "Update engineering plan", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(EngineeringPlanPath, content, "Update engineering plan", _branch, ct);
     }
 
     #endregion
@@ -188,7 +188,7 @@ public class ProjectFileManager
 
     public async Task<string> GetArchitectureDocAsync(CancellationToken ct = default)
     {
-        var content = await _github.GetFileContentAsync(ArchitecturePath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(ArchitecturePath, _branch, ct);
         return content ?? "# Architecture\n\n_No architecture document has been created yet._\n";
     }
 
@@ -197,7 +197,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating Architecture.md");
-        await _github.CreateOrUpdateFileAsync(ArchitecturePath, content, "Update architecture document", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ArchitecturePath, content, "Update architecture document", _branch, ct);
     }
 
     #endregion
@@ -206,7 +206,7 @@ public class ProjectFileManager
 
     public async Task<string> GetResearchDocAsync(CancellationToken ct = default)
     {
-        var content = await _github.GetFileContentAsync(ResearchPath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(ResearchPath, _branch, ct);
         return content ?? "# Research\n\n_No research has been documented yet._\n";
     }
 
@@ -215,7 +215,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating Research.md");
-        await _github.CreateOrUpdateFileAsync(ResearchPath, content, "Update research document", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResearchPath, content, "Update research document", _branch, ct);
     }
 
     #endregion
@@ -224,7 +224,7 @@ public class ProjectFileManager
 
     public async Task<string> GetPMSpecAsync(CancellationToken ct = default)
     {
-        var content = await _github.GetFileContentAsync(PMSpecPath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(PMSpecPath, _branch, ct);
         return content ?? "# PM Specification\n\n_No PM specification has been created yet._\n";
     }
 
@@ -233,7 +233,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating PMSpec.md");
-        await _github.CreateOrUpdateFileAsync(PMSpecPath, content, "Update PM specification", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(PMSpecPath, content, "Update PM specification", _branch, ct);
     }
 
     #endregion
@@ -246,7 +246,7 @@ public class ProjectFileManager
     /// </summary>
     public async Task<string?> GetTeamCompositionAsync(CancellationToken ct = default)
     {
-        return await _github.GetFileContentAsync(TeamCompositionPath, _branch, ct);
+        return await _repoContent.GetFileContentAsync(TeamCompositionPath, _branch, ct);
     }
 
     public async Task UpdateTeamCompositionAsync(string content, CancellationToken ct = default)
@@ -254,7 +254,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating TeamComposition.md");
-        await _github.CreateOrUpdateFileAsync(TeamCompositionPath, content, "Update team composition", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(TeamCompositionPath, content, "Update team composition", _branch, ct);
     }
 
     #endregion
@@ -267,7 +267,7 @@ public class ProjectFileManager
     public async Task<string?> GetFileAsync(string path, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        return await _github.GetFileContentAsync(path, _branch, ct);
+        return await _repoContent.GetFileContentAsync(path, _branch, ct);
     }
 
     /// <summary>
@@ -280,7 +280,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(commitMessage);
 
         _logger.LogInformation("Saving file {Path}", path);
-        await _github.CreateOrUpdateFileAsync(path, content, commitMessage, _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(path, content, commitMessage, _branch, ct);
     }
 
     #endregion

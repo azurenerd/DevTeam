@@ -1,6 +1,7 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -122,7 +123,7 @@ public class SmeSystemIntegrationTests : IDisposable
         services.AddSingleton(new AgentMemoryStore(testDbPath));
         services.AddSingleton<ProjectFileManager>(sp =>
             new ProjectFileManager(
-                sp.GetRequiredService<IGitHubService>(),
+                sp.GetRequiredService<IRepositoryContentService>(),
                 sp.GetRequiredService<ILogger<ProjectFileManager>>()));
         services.AddSingleton<PullRequestWorkflow>();
         services.AddSingleton<IssueWorkflow>();

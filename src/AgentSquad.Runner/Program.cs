@@ -60,7 +60,7 @@ builder.Services.AddSingleton<ProjectFileManager>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;
     return new ProjectFileManager(
-        sp.GetRequiredService<IGitHubService>(),
+        sp.GetRequiredService<IRepositoryContentService>(),
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectFileManager>>(),
         config.Project.DefaultBranch);
 });
