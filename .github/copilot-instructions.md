@@ -112,7 +112,20 @@ Agents use Semantic Kernel's `ChatHistory` for stateful multi-turn conversations
 
 ### Configuration
 
-All config lives under the `AgentSquad` section in `appsettings.json`, bound via `IOptions<AgentSquadConfig>`. Key sections: `Project` (GitHub repo/PAT), `Models` (provider/tier definitions), `Agents` (per-role tier assignments), `Limits` (scaling caps, timeouts, poll intervals), `Dashboard` (port, SignalR toggle). `appsettings.json` is gitignored — use `appsettings.template.json` as a starting point.
+All config lives under the `AgentSquad` section in `appsettings.json`, bound via `IOptions<AgentSquadConfig>`. Key sections: `Project` (GitHub repo/PAT), `Models` (provider/tier definitions), `Agents` (per-role tier assignments), `Limits` (scaling caps, timeouts, poll intervals), `Dashboard` (port, SignalR toggle). `appsettings.json` is committed — never put secrets in it; use `dotnet user-secrets` instead.
+
+### Workspace Configuration
+
+Agent workspaces default to `.agents/` (relative to project root). `WorkspaceConfig.ResolveRootPath()` resolves relative paths at startup via `PostConfigure<AgentSquadConfig>` in `Program.cs`. The `.agents/` folder is gitignored.
+
+### Restart Recovery
+
+SE agents recover state on restart via:
+1. **`CreateEngineeringPlanAsync`** — restores tasks from ADO/GitHub issues, checks if all done
+2. **`RecoverReadyForReviewPRsAsync`** — cross-references open PRs with past-implementation labels against tasks; marks tasks Done (closes the work item) via linked work items or title matching
+3. **`RecoverOwnInProgressPRAsync`** — reclaims in-progress PRs as `CurrentPrNumber`
+
+Critical invariant: `PullRequestNumber` is NOT persisted in issue metadata. After restart, task↔PR correlation must use linked work items or title matching.
 
 ### Model Tier Strategy
 

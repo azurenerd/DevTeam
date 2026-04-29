@@ -75,6 +75,9 @@
 65. [Never Use IGitHubService Directly for Agent Work Artifacts](#65-never-use-igithubservice-directly-for-agent-work-artifacts)
 66. [DI Dual-Registration Pattern — Runner and StandaloneServiceRegistration Must Stay in Sync](#66-di-dual-registration-pattern--runner-and-standaloneserviceregistration-must-stay-in-sync)
 67. [Task/Step Tracking Hierarchy — Tasks Are Groups, Steps Are Atomic](#67-taskstep-tracking-hierarchy--tasks-are-groups-steps-are-atomic)
+68. [Concurrent Label Writes Cause Silent Overwrites — Always Re-Fetch Before Write](#68-concurrent-label-writes-cause-silent-overwrites--always-re-fetch-before-write)
+69. [Recovery Must Cross-Reference PRs and Tasks — In-Memory State Is Not Durable](#69-recovery-must-cross-reference-prs-and-tasks--in-memory-state-is-not-durable)
+70. [TE Must Guard Against PRs With Zero Changed Files](#70-te-must-guard-against-prs-with-zero-changed-files)
 
 ---
 
@@ -1509,3 +1512,57 @@ No persistence layer existed for strategy/framework results. The `AgentStateStor
 - `BeginStep(name)` / `CompleteStep(name)` — leaf-level tracking with timing
 - `RegisterTaskDisplayName(taskId, displayName)` — dynamic registration for PR-specific or work-item-specific task names
 - Dynamic patterns: task IDs starting with `te-pr-` auto-format to "Test PR #N"; `se-task-` to "Engineering Task"
+---
+
+## 68. Concurrent Label Writes Cause Silent Overwrites — Always Re-Fetch Before Write
+
+**Lesson:** When multiple agents concurrently modify PR labels via read-modify-write patterns, later writes silently overwrite earlier labels. The platform API replaces the entire label set, not individual labels.
+
+**What happened:**
+- TE added `tests-added` label to a PR.
+- PM concurrently read the PR labels (before TE's write landed), added `pm-approved`, and wrote back.
+- PM's write replaced the entire label set with its stale copy, dropping `tests-added`.
+- The merge gate required BOTH labels and never triggered — pipeline stalled.
+
+**Fix:**
+- Created `PullRequestServiceExtensions.AddLabelAsync` that re-fetches the current labels *immediately* before writing.
+- All agents now use this safe helper instead of raw label-set operations.
+- The helper is idempotent (no-op if label already present) and handles both GitHub and ADO.
+
+**Rule:** For any shared mutable resource accessed by multiple concurrent agents, always use "fetch-then-mutate" just before the write. Caching the resource state from an earlier read guarantees a stale-data overwrite.
+
+---
+
+## 69. Recovery Must Cross-Reference PRs and Tasks — In-Memory State Is Not Durable
+
+**Lesson:** After a runner restart, in-memory task caches are rebuilt from the platform (ADO/GitHub) issue state. But `PullRequestNumber` is never stored in issue metadata — it only lives in memory. If the runner stops before `MarkDoneAsync` closes the issue, the task appears "Pending" on restart even when its PR is fully approved.
+
+**What happened:**
+- Runner stopped after PR #180 was approved (had `pm-approved`, `tests-added`, `architect-approved` labels).
+- On restart, `LoadTasksAsync` fetched the still-open work item and mapped it to `Status = "Pending"`.
+- SE agent picked up the "Pending" task and re-ran the strategy framework — wasting 15+ minutes of compute on duplicate work.
+
+**Fix:**
+- During `RecoverReadyForReviewPRsAsync`, cross-reference open PRs with past-implementation labels against the task cache.
+- Match via three strategies in priority order: (1) `PullRequestNumber` match (runtime only), (2) linked work items via `GetLinkedWorkItemIdsAsync` (platform-agnostic), (3) exact title match.
+- Call `MarkDoneAsync` to close the work item — subsequent `LoadTasksAsync` calls see it as closed → "Done".
+- Set the recovery flag AFTER success (not before) to allow retry on transient API failures.
+
+**Rule:** Any agent state that depends on in-memory-only fields (like PR↔task linkage) MUST have a recovery path that re-derives the state from durable platform artifacts. Never trust in-memory state to survive a process restart.
+
+---
+
+## 70. TE Must Guard Against PRs With Zero Changed Files
+
+**Lesson:** The Test Engineer should never mark a PR as "tested" if it has zero changed files. This happens when the SE creates a PR but hasn't pushed code yet — the branch exists but contains no diff.
+
+**What happened:**
+- SE created a PR and branch, but hadn't pushed implementation code yet.
+- TE picked up the PR (it had `ready-for-review` label), saw 0 changed files, but still added `tests-added` label.
+- Downstream agents thought the PR was tested and tried to merge an empty PR.
+
+**Fix:**
+- Added a guard in TE's PR processing: if `changedFiles.Count == 0`, skip the PR entirely and do NOT add it to `_testedPRs`.
+- TE will naturally re-encounter the PR on the next loop iteration once SE has pushed code.
+
+**Rule:** When processing work artifacts from other agents, always validate that the artifact is in a meaningful state before acting on it. An empty diff, a PR with no commits, or a work item with no description are all signs the upstream agent hasn't finished yet.

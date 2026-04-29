@@ -39,13 +39,14 @@ AgentSquad is a .NET 8 multi-agent AI system that manages a full software develo
 - **LLM Semantic Skill Matching** — SE leader uses budget-tier LLM calls to semantically match tasks to specialist engineers by capability, not just exact skill-tag strings. Falls back to exact-match if LLM fails
 - **Per-Reviewer Rework Limits** — Rework cycles tracked per (PR, reviewer) pair. Each reviewer (Architect, SE, PM, TE) gets 1 cycle independently, so a PR with 3 reviewers gets up to 3 rounds total
 - **Visual Scaffold Placeholders** — Foundation tasks for web/UI projects create components with colored backgrounds, dashed borders, and bold labels. Playwright screenshots show a clear grid of sections, never blank white
-- **Crash-Resilient Sessions** — CLI session IDs persist to SQLite so agents resume the same Copilot conversation after runner restarts. SE agents recover in-memory state flags (`_allTasksComplete`, `_integrationPrCreated`, `_engineeringSignaled`) from GitHub on restart, preventing duplicate task/PR creation
-- **16-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, features management, agentic frameworks, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, approval management, and a **Develop wizard** for guided project setup. All pages served from the Runner process on port 5050 with direct in-process access to all services
+- **Crash-Resilient Sessions** — CLI session IDs persist to SQLite so agents resume the same Copilot conversation after runner restarts. SE agents recover in-memory state flags (`_allTasksComplete`, `_integrationPrCreated`, `_engineeringSignaled`) from GitHub on restart, preventing duplicate task/PR creation. Past-implementation PRs (with reviewer labels) are correlated to tasks via linked work items and title matching, automatically closing stale work items on recovery
+- **Repository Files Browser** — GitHub-style file tree navigation at `/repository/files` with breadcrumbs, directory listing (folders first), syntax-highlighted content viewer, binary detection, and deep-linking via catch-all route parameters. Works with both GitHub and ADO via `IRepositoryContentService`
+- **16-Page Real-Time Dashboard** — Blazor Server UI with agent overview, project timeline, features management, agentic frameworks, metrics, health monitor, PR/issue browsers, engineering plan graph, team visualization, director CLI terminal, approval management, repository files browser, and a **Develop wizard** for guided project setup. All pages served from the Runner process on port 5050 with direct in-process access to all services
 - **Run-Scoped Task Management** — All GitHub queries (merged PRs, open PRs, open issues) are scoped to the current run via `_runStartedUtc` to prevent stale data from previous runs interfering with task assignment or overlap detection
 - **Decision Impact Classification & Gating** — Agents classify decisions by impact level (XS–XL) using AI. High-impact decisions are gated for human approval before agents proceed. Configurable threshold levels, structured implementation plans for gated decisions, and a rich dashboard UI for reviewing and approving decisions
 - **Agent Task Steps** — Real-time workflow visibility: all 7 agents report step-by-step progress (BeginStep/CompleteStep/RecordSubStep) with per-step timing, LLM call counts, and cost. Dashboard shows live step timelines with progress bars, expected-step templates per role, and rich tooltips with detailed context on mouseover — zero LLM overhead, pure observability
 - **SE Parallelism Enhancements** — Software Engineer validates file overlap across parallel tasks, enforces wave scheduling (W1/W2/W3+) with collision-safe task IDs and cache-merge on API delay to prevent dropped tasks during rate-limit recovery, uses typed dependencies, and logs parallelism metrics. AI-assisted repair of file conflicts ensures engineers can work in parallel without merge conflicts
-- **Strategy Framework (A/B/C/D Code Generation)** — The SE can generate multiple candidate implementations in parallel (baseline, mcp-enhanced, copilot-cli, squad) in isolated git worktrees, score each via an LLM judge on Acceptance Criteria / Design / Readability, and apply the winner to the PR branch. After the build gate passes, `CandidateEvaluator` captures a Playwright screenshot for each strategy candidate and commits them to `.screenshots/pr-{N}-{strategyId}.png` on the PR branch. Screenshots are displayed inline in the expandable candidate detail rows on the Frameworks dashboard page. A `<!-- winner-strategy: {key} -->` HTML comment is appended to the PR body so the dashboard can identify the winning tile. Feature-flagged via `AgentSquad.StrategyFramework.Enabled` (default OFF). Sampling policy + cost budget + optional adaptive selector built in; per-strategy cost attribution in `AgentUsageTracker`; live experiment data in `/api/strategies/*` and the `/strategies` dashboard page. Validated end-to-end against live Copilot CLI in April 2026
+- **Strategy Framework (A/B/C/D Code Generation)** — The SE can generate multiple candidate implementations in parallel (baseline, mcp-enhanced, copilot-cli, squad) in isolated git worktrees, score each via an LLM judge on Acceptance Criteria / Design / Readability, and apply the winner to the PR branch. After the build gate passes, `CandidateEvaluator` captures a Playwright screenshot for each strategy candidate and commits them to `.screenshots/pr-{N}-{strategyId}.png` on the PR branch. Screenshots are displayed inline in the expandable candidate detail rows on the Frameworks dashboard page. A `<!-- winner-strategy: {key} -->` HTML comment is appended to the PR body so the dashboard can identify the winning tile. The T-FINAL integration PR also uses the strategy framework (falls back to legacy single-shot LLM if no winner). Feature-flagged via `AgentSquad.StrategyFramework.Enabled` (default OFF). Includes early screenshot emission per-candidate, evaluation progress events at phase transitions, configurable gate retry for failed strategies, per-task cancellation via `OrchestrationCancellationService`, and a dashboard cancel button. Sampling policy + cost budget + optional adaptive selector built in; per-strategy cost attribution in `AgentUsageTracker`; live experiment data in `/api/strategies/*` and the `/strategies` dashboard page. Validated end-to-end against live Copilot CLI in April 2026
 - **Feature Mode (WIP)** — In addition to greenfield project creation, AgentSquad supports building individual features against existing repositories. Define features via the `/features` dashboard page with title, description, acceptance criteria, base branch, and optional tech stack overrides. Each run (project or feature) is wrapped in an `ActiveRun` with a unique `RunId` — all workflow state, gates, issues, and PRs are scoped per-run. `RunCoordinator` enforces single-active-run semantics. `WorkflowProfile` abstraction provides different gate definitions, artifact paths, and agent requirements for each mode. Project Control card on the Overview page provides Start/Stop controls
 - **Phase-Gated Workflow** — State machine enforces linear progression: Initialization → Research → Architecture → Planning → Development → Testing → Review → Finalization
 - **Multi-Platform Support** — Works with GitHub (default) or Azure DevOps. ADO support includes PAT and Azure CLI bearer token auth, Work Items (Task/Bug/User Story), WIQL queries, Git Pushes API, PR threads, and native PR-to-task linking in the Development section. Switch platforms via the dashboard dropdown — no code changes needed. See [docs/AzureDevOpsSetup.md](docs/AzureDevOpsSetup.md)
@@ -564,6 +565,7 @@ The Blazor Server dashboard provides real-time visibility into the agent team wi
 | **Agent Reasoning** | `/reasoning` | View agent decision-making chains, AI conversation history, and step-by-step task progress |
 | **GitHub Feed** | `/github-feed` | Live feed of platform activity across the project |
 | **Repository** | `/repository` | Browse repository file tree and content |
+| **Repository Files** | `/repository/files` | GitHub-style file browser with tree navigation, breadcrumbs, content viewer, binary detection |
 
 ## Project Structure
 
@@ -587,6 +589,10 @@ AgentSquad/
 │   │   ├── GitHub/                     # Legacy GitHubService (direct Octokit access)
 │   │   ├── Messaging/                  # IMessageBus, InProcessMessageBus (Channels)
 │   │   ├── Persistence/                # AgentStateStore, AgentMemoryStore (SQLite)
+│   │   ├── Strategies/                 # StrategyOrchestrator, CandidateEvaluator,
+│   │   │                               #   OrchestrationCancellationService, gate retry
+│   │   ├── Workspace/                  # WorkspaceConfig (.agents/ relative paths),
+│   │   │                               #   PlaywrightRunner, PlaywrightHealthService
 │   │   └── Services/                   # McpServerRegistry, TeamComposer, SmeDefinitions
 │   │
 │   ├── AgentSquad.Agents/              # Concrete agent implementations
@@ -629,10 +635,10 @@ AgentSquad/
 │       └── AgentSquadWorker.cs         # Bootstrap: spawns core agents in phased sequence
 │
 ├── tests/
-│   ├── AgentSquad.Core.Tests/          # ~395 unit tests
+│   ├── AgentSquad.Core.Tests/          # ~459 unit tests
 │   ├── AgentSquad.Agents.Tests/        # ~93 agent behavior tests
 │   ├── AgentSquad.Integration.Tests/   # ~66 integration tests
-│   ├── AgentSquad.StrategyFramework.Tests/ # ~214 strategy framework tests
+│   ├── AgentSquad.StrategyFramework.Tests/ # ~227 strategy framework tests
 │   ├── AgentSquad.Dashboard.Tests/     # ~20 Playwright UI scenario tests (10 GIF + 10 smoke)
 │   ├── AgentSquad.Dashboard.Unit.Tests/ # ~24 dashboard unit tests
 │   ├── AgentSquad.FakeCopilotCli/      # Fake CLI for integration testing
@@ -684,7 +690,7 @@ dotnet build AgentSquad.sln
 ### Test
 
 ```bash
-# Run all 812+ tests
+# Run all 900+ tests
 dotnet test AgentSquad.sln
 
 # Run a specific test project
@@ -747,6 +753,12 @@ The Runner exposes lightweight health endpoints for monitoring and debugging:
 
 ### Recent Changes (2025–2026)
 
+- **Repository Files Browser** — New GitHub-style file browser at `/repository/files` with tree navigation, breadcrumbs, directory listing (folders-first sort), line-numbered content viewer, binary file detection, and truncation for large files. Uses catch-all route parameter for deep-linking. Works on both GitHub and ADO via `IRepositoryContentService`
+- **SE Restart Recovery Fix** — Fixed critical bug where SE agent re-implemented already-approved PRs after restart. Root cause: `LoadTasksAsync` maps open work items to "Pending" even when the PR has past-implementation labels. Fix correlates open PRs to tasks via linked work items (platform-agnostic) and exact title matching, then calls `MarkDoneAsync` to close the work item before the SE picks up the task. Recovery flag now set after success (allows retry on transient failures)
+- **Framework Improvements** — Early screenshot emission per-candidate (as each gate eval completes), evaluation progress events at phase transitions, configurable gate retry for failed strategies (`RunGateRetryAsync`), per-task cancellation via `OrchestrationCancellationService`, and a cancel button in the dashboard with REST API at `/api/strategies/cancel`
+- **T-FINAL Strategy Framework Integration** — The final integration PR now uses the strategy framework (multi-candidate eval) first, falling back to legacy single-shot LLM on failure or no winner. "No winner" ≠ "no fixes needed" (per rubber-duck validation)
+- **Agents Folder Relocation** — Workspace root changed from hardcoded `C:\Agents` to relative `.agents/` in project root. `WorkspaceConfig.ResolveRootPath()` converts relative paths at startup. Removed all hardcoded `C:\Agents` fallbacks. `.agents/` added to .gitignore
+- **Pipeline Stall Fixes** — TE timing bug: skip PRs with 0 changed files (SE hadn't pushed yet). PM label race condition: `AddLabelAsync` re-fetches fresh labels before writing to avoid concurrent overwrites
 - **Develop Wizard** — New multi-step guided setup at `/develop`: project description → platform/auth configuration (GitHub or ADO) → work item selection → review & launch. Replaces manual `appsettings.json` editing as the primary onboarding flow. Project settings moved from Configuration page to Develop wizard
 - **Platform Abstraction Layer** — Agents now use `IPullRequestService`, `IWorkItemService`, `IPlatformInfoService` and 4 other capability interfaces instead of direct `IGitHubService`. Supports GitHub and Azure DevOps interchangeably. Platform selection via dashboard dropdown or config — no agent code changes needed
 - **Agent Card Task/Step Display** — Overview cards show "Task" (parent task name from task tracker groups) and "⚡ Step" (specific activity). Falls back to StatusReason for monitoring/waiting states. Expanded `WellKnownTaskNames` covering PM, PE, TE, and SE lifecycle phases
