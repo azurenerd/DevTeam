@@ -4909,143 +4909,20 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
             var techStack = Config.Project.TechStack;
 
-            // Build a task summary from issues instead of engineering plan file
+            // Build a task summary from issues for context
             var taskSummary = string.Join("\n", _taskManager.Tasks.Select(t =>
                 $"- [{t.Id}] {t.Name} ({t.Complexity}, {t.Status})"));
 
-            var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
-            var chat = kernel.GetRequiredService<IChatCompletionService>();
-
-            var history = CreateChatHistory();
-            var intSys = PromptService is not null
-                ? await PromptService.RenderAsync("software-engineer/integration-review-system",
-                    new Dictionary<string, string> { ["tech_stack"] = techStack }, ct)
-                : null;
-            history.AddSystemMessage(intSys ??
-                "You are a Software Engineer performing final integration review. " +
-                $"The project uses {techStack}. " +
-                "All individual task PRs have been merged to main. Your job is to:\n" +
-                "1. Review the architecture and PM spec for any missing wiring, imports, or configuration\n" +
-                "2. Identify integration gaps (broken cross-module references, missing route registration, missing DI wiring)\n" +
-                "3. Generate any integration fix files needed\n\n" +
-                "Output each file using: FILE: path/to/file.ext\n```language\n<content>\n```\n\n" +
-                "If no integration fixes are needed, output ONLY the text: NO_INTEGRATION_FIXES_NEEDED");
-
-            var intUser = PromptService is not null
-                ? await PromptService.RenderAsync("software-engineer/integration-review-user",
-                    new Dictionary<string, string>
-                    {
-                        ["pm_spec"] = pmSpecDoc,
-                        ["architecture"] = architectureDoc,
-                        ["task_summary"] = taskSummary
-                    }, ct)
-                : null;
-            history.AddUserMessage(intUser ??
-                $"## PM Specification\n{pmSpecDoc}\n\n" +
-                $"## Architecture\n{architectureDoc}\n\n" +
-                $"## Completed Tasks\n{taskSummary}\n\n" +
-                "Review the merged work against these documents. " +
-                "Generate any missing integration files (config, wiring, startup registration, etc.).");
-
-            var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
-            _taskTracker.RecordLlmCall(integrationStepId);
-            var integrationContent = response.Content?.Trim() ?? "";
-
-            var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(integrationContent);
-
-            if (codeFiles.Count == 0 ||
-                integrationContent.Contains("NO_INTEGRATION_FIXES_NEEDED", StringComparison.OrdinalIgnoreCase))
+            // Try strategy framework first (gives dashboard visibility + multi-candidate eval)
+            if (await TryCreateIntegrationPRViaStrategyAsync(
+                    pmSpecDoc, architectureDoc, techStack, taskSummary, integrationStepId, ct))
             {
-                Logger.LogInformation("No integration fixes needed — all tasks cleanly integrated");
-                LogActivity("task", "✅ No integration fixes needed — signaling completion");
-                _integrationPrCreated = true;
-                _taskTracker.CompleteStep(integrationStepId);
-
-                // Close the integration issue — validation passed with no fixes needed
-                await CloseIntegrationIssueAsync("✅ No integration fixes needed — all tasks cleanly integrated.", ct);
-
-                // Signal completion directly
-                await SignalEngineeringCompleteAsync(ct);
                 return;
             }
 
-            // Create integration branch and PR
-            var branchName = await PrWorkflow.CreateTaskBranchAsync(
-                Identity.DisplayName, "final-integration", ct);
-
-            var prBody = $"## Final Integration PR\n\n" +
-                $"All {_taskManager.TotalCount} engineering tasks have been completed and merged.\n" +
-                $"This PR addresses integration gaps identified during final review.\n\n" +
-                $"### Files Changed\n" +
-                string.Join("\n", codeFiles.Select(f => $"- `{f.Path}`"));
-
-            var pr = await PrWorkflow.CreateTaskPullRequestAsync(
-                Identity.DisplayName,
-                "Final Integration",
-                prBody,
-                "High",
-                "Architecture.md",
-                "",
-                branchName,
-                ct);
-
-            if (Workspace is not null && BuildRunnerSvc is not null)
-            {
-                var committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles,
-                    "Integration fixes: wiring, config, and cross-module references",
-                    1, 1, "Final Integration", chat, ct);
-                if (!committed)
-                {
-                    Logger.LogWarning("SE integration PR #{PrNumber} blocked by build errors", pr.Number);
-                    await ReviewService.AddCommentAsync(pr.Number,
-                        "❌ **Build Blocked:** Integration fixes could not produce a buildable commit.", ct);
-                }
-            }
-            else
-            {
-                await PrWorkflow.CommitCodeFilesToPRAsync(
-                    pr.Number, codeFiles, "Integration fixes: wiring, config, and cross-module references", ct);
-            }
-
-            CurrentPrNumber = pr.Number;
-            Identity.AssignedPullRequest = pr.Number.ToString();
-            _integrationPrCreated = true;
-
-            // Sync and mark ready for review
-            await SyncBranchWithMainAsync(pr.Number, ct);
-            await MarkReadyForReviewWithScreenshotAsync(pr, ct);
-
-            // Integration PRs run tests locally via CommitViaLocalWorkspaceAsync.
-            // Add tests-added label so MergeTestedPRsAsync can merge after PM approval
-            // (the TE won't pick up integration PRs since it already marked coverage complete).
-            var integrationLabels = pr.Labels
-                .Append(PullRequestWorkflow.Labels.TestsAdded)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            await PrService.UpdateAsync(pr.Number, labels: integrationLabels, ct: ct);
-            Logger.LogInformation("Added tests-added label to integration PR #{PrNumber} (tests ran locally)", pr.Number);
-
-            await MessageBus.PublishAsync(new ReviewRequestMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "ReviewRequest",
-                PrNumber = pr.Number,
-                PrTitle = pr.Title,
-                ReviewType = "Integration"
-            }, ct);
-
-            Logger.LogInformation("Created integration PR #{PrNumber} with {FileCount} fixes",
-                pr.Number, codeFiles.Count);
-            LogActivity("task", $"📦 Created integration PR #{pr.Number} with {codeFiles.Count} fixes");
-
-            // Close the integration issue — PR has been created with the fixes
-            await CloseIntegrationIssueAsync(
-                $"Integration PR #{pr.Number} created with {codeFiles.Count} fixes.", ct);
-
-            await RememberAsync(MemoryType.Action,
-                $"Created integration PR #{pr.Number} with {codeFiles.Count} integration fixes", ct: ct);
-            _taskTracker.CompleteStep(integrationStepId);
+            // Fallback: legacy single-shot LLM integration review
+            await CreateIntegrationPRLegacyAsync(
+                pmSpecDoc, architectureDoc, techStack, taskSummary, integrationStepId, ct);
         }
         catch (Exception ex)
         {
@@ -5056,6 +4933,378 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             _integrationPrCreated = true;
             await SignalEngineeringCompleteAsync(ct);
         }
+    }
+
+    /// <summary>
+    /// Attempts to run T-FINAL integration through the strategy framework for dashboard visibility
+    /// and multi-candidate evaluation. Returns true if it handled the integration (whether fixes
+    /// were needed or not). Returns false to signal caller should fall back to legacy path.
+    /// </summary>
+    private async Task<bool> TryCreateIntegrationPRViaStrategyAsync(
+        string pmSpecDoc, string architectureDoc, string techStack, string taskSummary,
+        string integrationStepId, CancellationToken ct)
+    {
+        if (_strategyOrchestrator is null || _winnerApply is null || _strategyConfig is null || Workspace is null)
+            return false;
+
+        var cfg = _strategyConfig.CurrentValue;
+        if (!cfg.Enabled || cfg.EnabledStrategies.Count == 0)
+            return false;
+
+        // Build rich task description that tells strategies about the integration goal
+        var integrationDescription =
+            $"All individual task PRs have been merged to the target branch. " +
+            $"Review the architecture and PM spec for any missing wiring, imports, or configuration. " +
+            $"Identify integration gaps: broken cross-module references, missing route registration, missing DI wiring, " +
+            $"missing startup/config files, or any other cross-cutting concerns.\n\n" +
+            $"If everything integrates cleanly, produce NO code changes.\n\n" +
+            $"## Completed Tasks\n{taskSummary}\n\n" +
+            $"## Architecture Summary\n{(architectureDoc.Length > 3000 ? architectureDoc[..3000] + "\n...(truncated)" : architectureDoc)}";
+
+        // Create branch BEFORE orchestration — WinnerApplyService needs it to exist
+        var branchName = await PrWorkflow.CreateTaskBranchAsync(
+            Identity.DisplayName, "final-integration", ct);
+
+        string localHead;
+        try
+        {
+            localHead = (await Workspace.GetHeadShaAsync("HEAD", ct)).Trim();
+        }
+        catch
+        {
+            localHead = "HEAD";
+        }
+
+        var runId = StateStore.LastBootUtc != DateTime.MinValue
+            ? StateStore.LastBootUtc.ToString("yyyyMMddTHHmmssZ")
+            : "run-" + DateTime.UtcNow.ToString("yyyyMMddTHHmmssZ");
+
+        var taskCtx = new TaskContext
+        {
+            TaskId = IntegrationTaskId,
+            TaskTitle = "Final Integration",
+            TaskDescription = integrationDescription,
+            PrBranch = branchName,
+            BaseSha = localHead,
+            RunId = runId,
+            AgentRepoPath = Workspace.RepoPath,
+            Complexity = 3, // Medium-high: cross-module wiring
+            IsWebTask = false,
+            PmSpec = pmSpecDoc,
+            Architecture = architectureDoc,
+            TechStack = techStack,
+            IssueContext = "",
+            DesignContext = "",
+        };
+
+        UpdateStatus(AgentStatus.Working, "Strategy candidates: Final Integration");
+
+        // Register with the task-step bridge for Frameworks dashboard visibility
+        var enabledCount = cfg.EnabledStrategies.Distinct(StringComparer.OrdinalIgnoreCase).Count();
+        var containerStepId = _strategyStepBridge?.RegisterTask(taskCtx.RunId, IntegrationTaskId, Identity.Id, enabledCount);
+
+        var outcome = await _strategyOrchestrator.RunCandidatesAsync(taskCtx, ct);
+
+        // No winner → fall back to legacy (don't assume "no fixes needed")
+        if (!outcome.HasWinner)
+        {
+            _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
+                succeeded: false, winnerStrategy: null);
+            Logger.LogInformation(
+                "Strategy framework: no winner for T-FINAL ({Reason}); falling back to legacy path",
+                outcome.Evaluation.TieBreakReason ?? "no candidates succeeded");
+            return false;
+        }
+
+        var winner = outcome.Evaluation.Winner!;
+
+        // Empty patch or stub-only → genuine "no integration fixes needed"
+        if (string.IsNullOrEmpty(winner.Patch) || IsStubMarkerOnlyPatch(winner.Patch))
+        {
+            _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
+                succeeded: true, winnerStrategy: winner.StrategyId);
+            Logger.LogInformation(
+                "Strategy framework: winner {Strategy} produced no meaningful changes for T-FINAL — no integration fixes needed",
+                winner.StrategyId);
+            LogActivity("task", "✅ No integration fixes needed (strategy framework confirmed) — signaling completion");
+            _integrationPrCreated = true;
+            _taskTracker.CompleteStep(integrationStepId);
+            await CloseIntegrationIssueAsync("✅ No integration fixes needed — strategy framework confirmed all tasks cleanly integrated.", ct);
+            await SignalEngineeringCompleteAsync(ct);
+            return true;
+        }
+
+        // Apply the winning patch
+        var apply = await _winnerApply.ApplyAsync(Workspace.RepoPath, branchName, localHead, winner.Patch, ct);
+        if (!apply.Applied)
+        {
+            _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId, succeeded: false);
+            Logger.LogWarning(
+                "Strategy framework: winner {Strategy} apply failed for T-FINAL: {Reason}; falling back",
+                winner.StrategyId, apply.FailureReason);
+            return false;
+        }
+
+        // Build-verify before committing
+        var wsConfig = Config.Workspace;
+        var build = await BuildRunnerSvc!.BuildAsync(
+            Workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
+        if (!build.Success)
+        {
+            _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId, succeeded: false);
+            Logger.LogWarning("Strategy framework: T-FINAL winner {Strategy} build failed; reverting and falling back",
+                winner.StrategyId);
+            await Workspace.RevertUncommittedChangesAsync(ct);
+            return false;
+        }
+
+        // Commit with strategy trailers
+        var trailers = new Dictionary<string, string>
+        {
+            [StrategyTrailers.StrategyKey] = SanitizeTrailerValue(winner.StrategyId),
+            [StrategyTrailers.RunIdKey] = SanitizeTrailerValue(runId),
+        };
+        var tieBreak = outcome.Evaluation.TieBreakReason;
+        if (!string.IsNullOrWhiteSpace(tieBreak))
+            trailers[StrategyTrailers.TieBreakKey] = SanitizeTrailerValue(tieBreak);
+
+        var subject = "Integration fixes: wiring, config, and cross-module references";
+        var commitBody = $"Generated by strategy '{winner.StrategyId}' (run {runId}).";
+        var fullMessage = StrategyTrailers.Append($"{subject}\n\n{commitBody}\n", trailers);
+        await Workspace.CommitAsync(fullMessage, ct);
+
+        // Create PR
+        var prBody = $"## Final Integration PR\n\n" +
+            $"All {_taskManager.TotalCount} engineering tasks have been completed and merged.\n" +
+            $"This PR addresses integration gaps identified during final review.\n\n" +
+            $"Strategy: `{winner.StrategyId}` | Run: `{runId}`\n\n" +
+            $"<!-- winner-strategy: {winner.StrategyId} -->";
+
+        var pr = await PrWorkflow.CreateTaskPullRequestAsync(
+            Identity.DisplayName,
+            "Final Integration",
+            prBody,
+            "High",
+            "Architecture.md",
+            "",
+            branchName,
+            ct);
+
+        // Write candidate screenshots before push
+        var screenshotsWritten = false;
+        foreach (var cand in outcome.Evaluation.Candidates)
+        {
+            try
+            {
+                if (cand.ScreenshotBytes is null || cand.ScreenshotBytes.Length == 0) continue;
+                var screenshotRelPath = $".screenshots/pr-{pr.Number}-{cand.StrategyId}.png";
+                var screenshotFullPath = Path.Combine(Workspace.RepoPath, screenshotRelPath);
+                Directory.CreateDirectory(Path.GetDirectoryName(screenshotFullPath)!);
+                await File.WriteAllBytesAsync(screenshotFullPath, cand.ScreenshotBytes, ct);
+                screenshotsWritten = true;
+            }
+            catch (Exception screenshotEx)
+            {
+                Logger.LogWarning(screenshotEx, "Failed to write {Strategy} screenshot for integration PR", cand.StrategyId);
+            }
+        }
+
+        if (screenshotsWritten)
+        {
+            try
+            {
+                await RunGitCommandAsync(Workspace.RepoPath, "add -A .screenshots", ct);
+                await Workspace.CommitAsync($"📸 Strategy preview screenshots for PR #{pr.Number}", ct);
+            }
+            catch (Exception commitEx)
+            {
+                Logger.LogWarning(commitEx, "Failed to commit screenshot files for integration PR #{PrNumber}", pr.Number);
+            }
+        }
+
+        // Push
+        try
+        {
+            await Workspace.PushAsync(branchName, ct);
+        }
+        catch (Exception pushEx)
+        {
+            Logger.LogError(pushEx, "Strategy framework: T-FINAL committed but push failed — commit preserved locally");
+        }
+
+        CurrentPrNumber = pr.Number;
+        Identity.AssignedPullRequest = pr.Number.ToString();
+        _integrationPrCreated = true;
+
+        // Mark ready for review
+        await SyncBranchWithMainAsync(pr.Number, ct);
+        await MarkReadyForReviewWithScreenshotAsync(pr, ct);
+
+        // Add tests-added label (tests ran during build-verify)
+        var integrationLabels = pr.Labels
+            .Append(PullRequestWorkflow.Labels.TestsAdded)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        await PrService.UpdateAsync(pr.Number, labels: integrationLabels, ct: ct);
+        Logger.LogInformation("Added tests-added label to integration PR #{PrNumber} (tests ran locally)", pr.Number);
+
+        await MessageBus.PublishAsync(new ReviewRequestMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = "*",
+            MessageType = "ReviewRequest",
+            PrNumber = pr.Number,
+            PrTitle = pr.Title,
+            ReviewType = "Integration"
+        }, ct);
+
+        Logger.LogInformation("Created integration PR #{PrNumber} via strategy {Strategy}",
+            pr.Number, winner.StrategyId);
+        LogActivity("task", $"📦 Created integration PR #{pr.Number} via strategy '{winner.StrategyId}'");
+
+        await CloseIntegrationIssueAsync(
+            $"Integration PR #{pr.Number} created via strategy '{winner.StrategyId}'.", ct);
+        await RememberAsync(MemoryType.Action,
+            $"Created integration PR #{pr.Number} via strategy '{winner.StrategyId}'", ct: ct);
+
+        _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
+            succeeded: true, winnerStrategy: winner.StrategyId);
+        _taskTracker.CompleteStep(integrationStepId);
+        return true;
+    }
+
+    /// <summary>
+    /// Legacy single-shot LLM integration review (fallback when strategy framework unavailable or fails).
+    /// </summary>
+    private async Task CreateIntegrationPRLegacyAsync(
+        string pmSpecDoc, string architectureDoc, string techStack, string taskSummary,
+        string integrationStepId, CancellationToken ct)
+    {
+        var kernel = Models.GetKernel(Identity.ModelTier, Identity.Id);
+        var chat = kernel.GetRequiredService<IChatCompletionService>();
+
+        var history = CreateChatHistory();
+        var intSys = PromptService is not null
+            ? await PromptService.RenderAsync("software-engineer/integration-review-system",
+                new Dictionary<string, string> { ["tech_stack"] = techStack }, ct)
+            : null;
+        history.AddSystemMessage(intSys ??
+            "You are a Software Engineer performing final integration review. " +
+            $"The project uses {techStack}. " +
+            "All individual task PRs have been merged to main. Your job is to:\n" +
+            "1. Review the architecture and PM spec for any missing wiring, imports, or configuration\n" +
+            "2. Identify integration gaps (broken cross-module references, missing route registration, missing DI wiring)\n" +
+            "3. Generate any integration fix files needed\n\n" +
+            "Output each file using: FILE: path/to/file.ext\n```language\n<content>\n```\n\n" +
+            "If no integration fixes are needed, output ONLY the text: NO_INTEGRATION_FIXES_NEEDED");
+
+        var intUser = PromptService is not null
+            ? await PromptService.RenderAsync("software-engineer/integration-review-user",
+                new Dictionary<string, string>
+                {
+                    ["pm_spec"] = pmSpecDoc,
+                    ["architecture"] = architectureDoc,
+                    ["task_summary"] = taskSummary
+                }, ct)
+            : null;
+        history.AddUserMessage(intUser ??
+            $"## PM Specification\n{pmSpecDoc}\n\n" +
+            $"## Architecture\n{architectureDoc}\n\n" +
+            $"## Completed Tasks\n{taskSummary}\n\n" +
+            "Review the merged work against these documents. " +
+            "Generate any missing integration files (config, wiring, startup registration, etc.).");
+
+        var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
+        _taskTracker.RecordLlmCall(integrationStepId);
+        var integrationContent = response.Content?.Trim() ?? "";
+
+        var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(integrationContent);
+
+        if (codeFiles.Count == 0 ||
+            integrationContent.Contains("NO_INTEGRATION_FIXES_NEEDED", StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.LogInformation("No integration fixes needed — all tasks cleanly integrated");
+            LogActivity("task", "✅ No integration fixes needed — signaling completion");
+            _integrationPrCreated = true;
+            _taskTracker.CompleteStep(integrationStepId);
+            await CloseIntegrationIssueAsync("✅ No integration fixes needed — all tasks cleanly integrated.", ct);
+            await SignalEngineeringCompleteAsync(ct);
+            return;
+        }
+
+        // Create integration branch and PR
+        var branchName = await PrWorkflow.CreateTaskBranchAsync(
+            Identity.DisplayName, "final-integration", ct);
+
+        var prBody = $"## Final Integration PR\n\n" +
+            $"All {_taskManager.TotalCount} engineering tasks have been completed and merged.\n" +
+            $"This PR addresses integration gaps identified during final review.\n\n" +
+            $"### Files Changed\n" +
+            string.Join("\n", codeFiles.Select(f => $"- `{f.Path}`"));
+
+        var pr = await PrWorkflow.CreateTaskPullRequestAsync(
+            Identity.DisplayName,
+            "Final Integration",
+            prBody,
+            "High",
+            "Architecture.md",
+            "",
+            branchName,
+            ct);
+
+        if (Workspace is not null && BuildRunnerSvc is not null)
+        {
+            var committed = await CommitViaLocalWorkspaceAsync(pr, codeFiles,
+                "Integration fixes: wiring, config, and cross-module references",
+                1, 1, "Final Integration", chat, ct);
+            if (!committed)
+            {
+                Logger.LogWarning("SE integration PR #{PrNumber} blocked by build errors", pr.Number);
+                await ReviewService.AddCommentAsync(pr.Number,
+                    "❌ **Build Blocked:** Integration fixes could not produce a buildable commit.", ct);
+            }
+        }
+        else
+        {
+            await PrWorkflow.CommitCodeFilesToPRAsync(
+                pr.Number, codeFiles, "Integration fixes: wiring, config, and cross-module references", ct);
+        }
+
+        CurrentPrNumber = pr.Number;
+        Identity.AssignedPullRequest = pr.Number.ToString();
+        _integrationPrCreated = true;
+
+        // Sync and mark ready for review
+        await SyncBranchWithMainAsync(pr.Number, ct);
+        await MarkReadyForReviewWithScreenshotAsync(pr, ct);
+
+        // Add tests-added label
+        var integrationLabels = pr.Labels
+            .Append(PullRequestWorkflow.Labels.TestsAdded)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        await PrService.UpdateAsync(pr.Number, labels: integrationLabels, ct: ct);
+        Logger.LogInformation("Added tests-added label to integration PR #{PrNumber} (tests ran locally)", pr.Number);
+
+        await MessageBus.PublishAsync(new ReviewRequestMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = "*",
+            MessageType = "ReviewRequest",
+            PrNumber = pr.Number,
+            PrTitle = pr.Title,
+            ReviewType = "Integration"
+        }, ct);
+
+        Logger.LogInformation("Created integration PR #{PrNumber} with {FileCount} fixes",
+            pr.Number, codeFiles.Count);
+        LogActivity("task", $"📦 Created integration PR #{pr.Number} with {codeFiles.Count} fixes");
+
+        await CloseIntegrationIssueAsync(
+            $"Integration PR #{pr.Number} created with {codeFiles.Count} fixes.", ct);
+        await RememberAsync(MemoryType.Action,
+            $"Created integration PR #{pr.Number} with {codeFiles.Count} integration fixes", ct: ct);
+        _taskTracker.CompleteStep(integrationStepId);
     }
 
     private async Task CloseIntegrationIssueAsync(string comment, CancellationToken ct)
