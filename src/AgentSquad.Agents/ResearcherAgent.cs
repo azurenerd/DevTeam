@@ -998,7 +998,7 @@ public class ResearcherAgent : AgentBase
                 if (type.StartsWith("html"))
                 {
                     // Read HTML files to extract design details
-                    var content = await _repoContent.GetFileContentAsync(path, ct: ct);
+                    var content = await _repoContent.GetFileContentAsync(path, EffectiveBranch, ct);
                     if (!string.IsNullOrWhiteSpace(content))
                     {
                         // Extract key CSS patterns and layout structure
@@ -1091,7 +1091,7 @@ public class ResearcherAgent : AgentBase
 
             try
             {
-                var htmlContent = await _repoContent.GetFileContentAsync(htmlPath, ct: ct);
+                var htmlContent = await _repoContent.GetFileContentAsync(htmlPath, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
                 var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
@@ -1106,7 +1106,7 @@ public class ResearcherAgent : AgentBase
                 var imageUrl = await _repoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {stem}.png (rendered from {htmlPath})",
-                    "main", ct);
+                    EffectiveBranch, ct);
 
                 if (!string.IsNullOrWhiteSpace(imageUrl))
                 {
@@ -1151,7 +1151,7 @@ public class ResearcherAgent : AgentBase
         {
             try
             {
-                var htmlContent = await _repoContent.GetFileContentAsync(path, ct: ct);
+                var htmlContent = await _repoContent.GetFileContentAsync(path, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
                 var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
@@ -1164,7 +1164,7 @@ public class ResearcherAgent : AgentBase
                 var imageUrl = await _repoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {fileName}.png (rendered from {path})",
-                    "main", ct);
+                    EffectiveBranch, ct);
 
                 if (!string.IsNullOrWhiteSpace(imageUrl))
                 {

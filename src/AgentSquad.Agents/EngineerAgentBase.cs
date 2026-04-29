@@ -2423,7 +2423,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             foreach (var file in designFiles)
             {
-                var content = await RepoContent.GetFileContentAsync(file, ct: ct);
+                var content = await RepoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### `{file}`");

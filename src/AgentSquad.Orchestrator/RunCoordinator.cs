@@ -22,6 +22,7 @@ public class RunCoordinator
     private readonly ProjectFileManager _fileManager;
     private readonly RunBranchProvider _branchProvider;
     private readonly IBranchService _branchService;
+    private readonly DevelopSettingsService _developSettingsService;
     private readonly ILogger<RunCoordinator> _logger;
     private readonly AgentSquadConfig _config;
 
@@ -40,6 +41,7 @@ public class RunCoordinator
         ProjectFileManager fileManager,
         RunBranchProvider branchProvider,
         IBranchService branchService,
+        DevelopSettingsService developSettingsService,
         ILogger<RunCoordinator> logger,
         IOptions<AgentSquadConfig> config)
     {
@@ -51,6 +53,7 @@ public class RunCoordinator
         _fileManager = fileManager ?? throw new ArgumentNullException(nameof(fileManager));
         _branchProvider = branchProvider ?? throw new ArgumentNullException(nameof(branchProvider));
         _branchService = branchService ?? throw new ArgumentNullException(nameof(branchService));
+        _developSettingsService = developSettingsService ?? throw new ArgumentNullException(nameof(developSettingsService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
@@ -141,6 +144,13 @@ public class RunCoordinator
                 if (_activeRun is { Status: RunStatus.Running or RunStatus.NotStarted or RunStatus.Paused })
                     throw new InvalidOperationException($"Cannot start a project — run {_activeRun.RunId} is already {_activeRun.Status}");
             }
+
+        // Load wizard settings and merge into runtime config before reading any config values.
+        // The Develop wizard saves to develop-settings.json but doesn't mutate the in-memory config.
+        var developSettings = await _developSettingsService.LoadAsync(ct);
+        _developSettingsService.MergeIntoConfig(_config, developSettings);
+        _logger.LogInformation("Merged develop settings into config (WorkingBranch={Branch})",
+            _config.Project.WorkingBranch ?? "(none)");
 
         var run = new ActiveRun
         {

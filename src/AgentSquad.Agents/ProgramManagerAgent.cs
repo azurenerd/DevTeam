@@ -567,7 +567,7 @@ public class ProgramManagerAgent : AgentBase
             IReadOnlyList<string> repoTree;
             try
             {
-                repoTree = await _repoContent.GetRepositoryTreeAsync(null, ct);
+                repoTree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             }
             catch
             {
@@ -3704,7 +3704,7 @@ public class ProgramManagerAgent : AgentBase
             // Include HTML source for detailed CSS/layout reference
             foreach (var file in htmlDesignFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, ct: ct);
+                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design Source: `{file}`");

@@ -4440,12 +4440,12 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             var sb = new System.Text.StringBuilder();
             foreach (var file in designFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, ct: ct);
+                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design File: `{file}`");
                 sb.AppendLine("```html");
-                sb.AppendLine(content.Length > 5000 ? content[..5000] + "\n<!-- truncated -->" : content);
+                sb.AppendLine(content.Length > 5000 ? content[..5000]+ "\n<!-- truncated -->" : content);
                 sb.AppendLine("```");
                 sb.AppendLine();
             }

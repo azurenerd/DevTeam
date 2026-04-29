@@ -1727,7 +1727,7 @@ public class ArchitectAgent : AgentBase
             var sb = new System.Text.StringBuilder();
             foreach (var file in htmlDesignFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, ct: ct);
+                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design File: `{file}`");
