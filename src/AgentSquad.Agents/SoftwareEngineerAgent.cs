@@ -3901,7 +3901,6 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     {
         if (_recoveredReviewPRs)
             return;
-        _recoveredReviewPRs = true;
 
         try
         {
@@ -3916,6 +3915,62 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
                 {
                     _pastImplementationPrs.Add(pr.Number);
+
+                    // If PR is past implementation, mark the corresponding task Done in cache.
+                    // Without this, the task manager reports the task as "Pending" after restart
+                    // (because WI in ADO wasn't closed), causing SE to re-run implementation.
+                    // This works for both GitHub and ADO since IsPastImplementation checks labels
+                    // which are platform-agnostic (set via AddLabelAsync on both platforms).
+                    if (PullRequestWorkflow.Labels.IsPastImplementation(pr.Labels))
+                    {
+                        // Strategy 1: Match by PullRequestNumber (set during runtime, not persisted)
+                        var taskForPr = _taskManager.Tasks.FirstOrDefault(t =>
+                            t.PullRequestNumber == pr.Number && t.IssueNumber.HasValue);
+
+                        // Strategy 2: Match by linked work items (platform-agnostic, most reliable)
+                        if (taskForPr is null)
+                        {
+                            try
+                            {
+                                var linkedIds = await PrService.GetLinkedWorkItemIdsAsync(pr.Number, ct);
+                                if (linkedIds.Count > 0)
+                                {
+                                    taskForPr = _taskManager.Tasks.FirstOrDefault(t =>
+                                        t.IssueNumber.HasValue
+                                        && linkedIds.Contains(t.IssueNumber.Value)
+                                        && !EngineeringTaskIssueManager.IsTaskDone(t));
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Logger.LogDebug(ex, "Could not fetch linked work items for PR #{PrNumber} during recovery", pr.Number);
+                            }
+                        }
+
+                        // Strategy 3: Fallback to exact PR title match (needed when links don't exist)
+                        if (taskForPr is null)
+                        {
+                            var expectedPrefix = $"{Identity.DisplayName}:";
+                            if (pr.Title.StartsWith(expectedPrefix, StringComparison.OrdinalIgnoreCase))
+                            {
+                                // Extract task name from PR title: "{DisplayName}: {TaskName}"
+                                var prTaskName = pr.Title[(expectedPrefix.Length)..].Trim();
+                                taskForPr = _taskManager.Tasks.FirstOrDefault(t =>
+                                    t.IssueNumber.HasValue
+                                    && !EngineeringTaskIssueManager.IsTaskDone(t)
+                                    && string.Equals(t.Name, prTaskName, StringComparison.OrdinalIgnoreCase));
+                            }
+                        }
+
+                        if (taskForPr is not null && !EngineeringTaskIssueManager.IsTaskDone(taskForPr))
+                        {
+                            await _taskManager.MarkDoneAsync(taskForPr.IssueNumber!.Value, pr.Number, ct);
+                            Logger.LogInformation(
+                                "State recovery: marked task {TaskId} (issue #{IssueNumber}) Done — PR #{PrNumber} is past implementation (labels: {Labels})",
+                                taskForPr.Id, taskForPr.IssueNumber.Value, pr.Number,
+                                string.Join(", ", pr.Labels));
+                        }
+                    }
                 }
             }
 
@@ -4053,10 +4108,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     pr.Number, pr.Title);
                 UpdateStatus(AgentStatus.Idle, $"PR #{pr.Number} awaiting review");
             }
+
+            _recoveredReviewPRs = true;
         }
         catch (Exception ex)
         {
-            Logger.LogWarning(ex, "Failed to recover ready-for-review PRs");
+            Logger.LogWarning(ex, "Failed to recover ready-for-review PRs (will retry next loop)");
         }
     }
 
