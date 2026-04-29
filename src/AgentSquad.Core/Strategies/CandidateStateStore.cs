@@ -238,6 +238,78 @@ public sealed class CandidateStateStore : IDisposable
         OnChange?.Invoke(snapshot);
     }
 
+    public void RecordProgress(EvaluationProgressEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { CurrentPhase = e.Phase, ProgressDetail = e.Detail },
+            (_, existing) => existing with { CurrentPhase = e.Phase, ProgressDetail = e.Detail });
+        OnChange?.Invoke(snapshot);
+    }
+
+    public void RecordRetryStarted(CandidateRetryStartedEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var existingCandidate = task.Candidates.TryGetValue(e.StrategyId, out var c)
+            ? c
+            : new CandidateSnapshot { StrategyId = e.StrategyId, State = CandidateState.Completed };
+
+        var updated = existingCandidate with
+        {
+            State = CandidateState.Retrying,
+        };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, existing) => existing with { Candidates = existing.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
+    public void RecordRetryCompleted(CandidateRetryCompletedEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryGetValue(key, out var task)) return;
+
+        var existingCandidate = task.Candidates.TryGetValue(e.StrategyId, out var c)
+            ? c
+            : new CandidateSnapshot { StrategyId = e.StrategyId, State = CandidateState.Retrying };
+
+        var updated = existingCandidate with
+        {
+            State = CandidateState.Completed, // Back to completed — will go through evaluation again
+            Succeeded = e.Succeeded,
+            FailureReason = e.Succeeded ? null : e.FailureReason,
+            TokensUsed = (existingCandidate.TokensUsed ?? 0) + (e.TokensUsed ?? 0),
+        };
+
+        var snapshot = _active.AddOrUpdate(
+            key,
+            _ => task with { Candidates = task.Candidates.SetItem(e.StrategyId, updated) },
+            (_, existing) => existing with { Candidates = existing.Candidates.SetItem(e.StrategyId, updated) });
+        OnChange?.Invoke(snapshot);
+    }
+
+    public void RecordCancelled(OrchestrationCancelledEvent e)
+    {
+        var key = (e.RunId, e.TaskId);
+        if (!_active.TryRemove(key, out var task)) return;
+
+        var archived = task with
+        {
+            CompletedAt = e.At,
+            Cancelled = true,
+            TieBreakReason = $"cancelled: {e.Reason}",
+        };
+        PushRecent(archived);
+        OnChange?.Invoke(archived);
+    }
+
     public void RecordDetail(CandidateDetailEvent e)
     {
         var key = (e.RunId, e.TaskId);
@@ -498,6 +570,8 @@ public enum CandidateState
     InitialScored,
     /// <summary>Revision attempt in progress.</summary>
     Revising,
+    /// <summary>Gate-failed candidate retrying from scratch.</summary>
+    Retrying,
     Scored,
     Winner,
 }
@@ -558,4 +632,10 @@ public sealed record TaskSnapshot
     public string? WinnerStrategyId { get; init; }
     public string? TieBreakReason { get; init; }
     public double? EvaluationElapsedSec { get; init; }
+    /// <summary>Current evaluation phase (e.g., "candidates-running", "gates-evaluating", "judging", "retrying-failed").</summary>
+    public string? CurrentPhase { get; init; }
+    /// <summary>Human-readable progress detail string.</summary>
+    public string? ProgressDetail { get; init; }
+    /// <summary>True if this orchestration was cancelled by the user.</summary>
+    public bool Cancelled { get; init; }
 }

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Strategies.Contracts;
 using AgentSquad.Core.Workspace;
 
 namespace AgentSquad.Core.Strategies;
@@ -26,6 +27,7 @@ public class CandidateEvaluator
     private readonly IVisualJudge? _visualJudge;
     private readonly PlaywrightRunner? _screenshotRunner;
     private readonly IOptionsMonitor<AgentSquadConfig>? _appCfg;
+    private readonly IStrategyEventSink _events;
 
     /// <summary>Exposed for the orchestrator's revision round to call the judge directly.</summary>
     public ILlmJudge? Judge => _judge;
@@ -37,7 +39,8 @@ public class CandidateEvaluator
         ILlmJudge? judge = null,
         IVisualJudge? visualJudge = null,
         PlaywrightRunner? screenshotRunner = null,
-        IOptionsMonitor<AgentSquadConfig>? appCfg = null)
+        IOptionsMonitor<AgentSquadConfig>? appCfg = null,
+        IStrategyEventSink? events = null)
     {
         _logger = logger;
         _worktree = worktree;
@@ -46,6 +49,7 @@ public class CandidateEvaluator
         _visualJudge = visualJudge;
         _screenshotRunner = screenshotRunner;
         _appCfg = appCfg;
+        _events = events ?? NullStrategyEventSink.Instance;
     }
 
     public async Task<EvaluationResult> EvaluateAsync(
@@ -61,6 +65,17 @@ public class CandidateEvaluator
         {
             var res = await RunGatesAsync(task, exec, patch, cfg, ct);
             results.Add(res);
+
+            // Early screenshot emission: send CandidateEvaluated immediately per-candidate
+            // so the dashboard can display the screenshot before all candidates finish.
+            var earlyScreenshot = res.ScreenshotBytes is { Length: > 0 }
+                ? Convert.ToBase64String(res.ScreenshotBytes)
+                : null;
+            await _events.EmitAsync(StrategyEvents.CandidateEvaluated, new CandidateEvaluatedEvent(
+                task.RunId, task.TaskId, res.StrategyId,
+                res.Survived, res.FailedGate, res.FailureDetail,
+                earlyScreenshot,
+                null), ct); // judgeSkippedReason not yet known — will be re-emitted with scores later
         }
 
         var survivors = results.Where(r => r.Survived).ToList();

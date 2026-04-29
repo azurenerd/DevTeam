@@ -78,6 +78,27 @@ public sealed class StrategyEventBroadcaster : IStrategyEventSink, IDisposable
                 case StrategyEvents.WinnerSelected when payload is WinnerSelectedEvent w:
                     _store.RecordWinner(w);
                     break;
+                case StrategyEvents.CandidateInitialScored when payload is CandidateInitialScoredEvent isc:
+                    _store.RecordInitialScored(isc);
+                    break;
+                case StrategyEvents.CandidateRevisionStarted when payload is CandidateRevisionStartedEvent rs:
+                    _store.RecordRevisionStarted(rs);
+                    break;
+                case StrategyEvents.CandidateRevisionCompleted when payload is CandidateRevisionCompletedEvent rc:
+                    _store.RecordRevisionCompleted(rc);
+                    break;
+                case StrategyEvents.EvaluationProgress when payload is EvaluationProgressEvent ep:
+                    _store.RecordProgress(ep);
+                    break;
+                case StrategyEvents.CandidateRetryStarted when payload is CandidateRetryStartedEvent rts:
+                    _store.RecordRetryStarted(rts);
+                    break;
+                case StrategyEvents.CandidateRetryCompleted when payload is CandidateRetryCompletedEvent rtc:
+                    _store.RecordRetryCompleted(rtc);
+                    break;
+                case StrategyEvents.OrchestrationCancelled when payload is OrchestrationCancelledEvent oc:
+                    _store.RecordCancelled(oc);
+                    break;
                 default:
                     // Gate events + unknown events passed through to broadcaster but not
                     // persisted in the store.

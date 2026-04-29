@@ -59,9 +59,24 @@
                     <div>
                         <span class="task-id" title="Unique identifier for this engineering task">@task.TaskId</span>
                         <span class="task-run" title="Run identifier — groups all candidates executing for this task">run @task.RunId</span>
+                        @if (task.CurrentPhase is not null)
+                        {
+                            <span class="task-phase" title="Current orchestration phase">@task.CurrentPhase</span>
+                        }
                     </div>
-                    <div class="task-elapsed" title="Time elapsed since task started">@FormatTaskElapsed(task)</div>
+                    <div class="task-actions">
+                        <span class="task-elapsed" title="Time elapsed since task started">@FormatTaskElapsed(task)</span>
+                        <button class="cancel-btn" @onclick="() => CancelTaskAsync(task.RunId, task.TaskId)"
+                                @onclick:stopPropagation="true"
+                                title="Cancel this orchestration — stops all candidates immediately">
+                            ✕ Cancel
+                        </button>
+                    </div>
                 </div>
+                @if (task.ProgressDetail is not null)
+                {
+                    <div class="task-progress-detail" title="Current progress status">@task.ProgressDetail</div>
+                }
                 <div class="candidate-grid">
                     @foreach (var candidate in task.Candidates.Values.OrderBy(c => c.StrategyId.Equals("baseline", StringComparison.OrdinalIgnoreCase) ? 1 : 0).ThenBy(c => c.StrategyId))
                     {
@@ -918,6 +933,13 @@
     .activity-modal-close { background: none; border: none; color: #fff; font-size: 1.2rem; cursor: pointer; opacity: .7; padding: .2rem .5rem; }
     .activity-modal-close:hover { opacity: 1; }
     .activity-modal-body { padding: 1rem; font-size: .9em; line-height: 1.55; white-space: pre-wrap; word-break: break-word; }
+
+    /* Cancel button and progress */
+    .task-actions { display: flex; align-items: center; gap: .75rem; }
+    .cancel-btn { background: rgba(255,107,107,.12); border: 1px solid rgba(255,107,107,.3); color: #ff6b6b; padding: .25rem .6rem; border-radius: 4px; font-size: .78em; cursor: pointer; font-weight: 500; transition: all .15s; }
+    .cancel-btn:hover { background: rgba(255,107,107,.25); border-color: #ff6b6b; }
+    .task-phase { font-size: .75em; padding: .15rem .45rem; background: rgba(77,171,247,.12); color: #4dabf7; border-radius: 3px; margin-left: .5rem; font-weight: 500; }
+    .task-progress-detail { font-size: .82em; opacity: .7; margin-bottom: .5rem; padding: .25rem .5rem; background: rgba(255,255,255,.03); border-radius: 3px; }
 </style>
 
 @code {
@@ -956,6 +978,19 @@
     {
         if (!_expandedActiveCandidates.Remove(key))
             _expandedActiveCandidates.Add(key);
+    }
+
+    private async Task CancelTaskAsync(string runId, string taskId)
+    {
+        try
+        {
+            await StrategiesData.CancelOrchestrationAsync(runId, taskId);
+            await RefreshAsync();
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to cancel orchestration {RunId}/{TaskId}", runId, taskId);
+        }
     }
 
     private void SetTab(string key, string tab)

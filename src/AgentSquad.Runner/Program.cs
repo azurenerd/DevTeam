@@ -542,6 +542,17 @@ strategiesApi.MapGet("/cost", (AgentSquad.Core.AI.AgentUsageTracker usage) =>
         byStrategy = usage.GetAllStrategyStats(),
     }));
 
+// Cancel a running framework orchestration task.
+strategiesApi.MapPost("/cancel/{runId}/{taskId}", (
+    string runId, string taskId,
+    AgentSquad.Core.Strategies.IOrchestrationCancellationService cancelService) =>
+{
+    var cancelled = cancelService.RequestCancellation(runId, taskId);
+    return cancelled
+        ? Results.Ok(new { cancelled = true, runId, taskId })
+        : Results.NotFound(new { cancelled = false, message = "Orchestration not found or already completed" });
+});
+
 // ── Run management REST API (for project/feature lifecycle) ──
 var runsApi = app.MapGroup("/api/runs").WithTags("Runs");
 

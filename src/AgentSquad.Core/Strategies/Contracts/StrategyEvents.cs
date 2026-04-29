@@ -18,6 +18,10 @@ public static class StrategyEvents
     public const string CandidateInitialScored   = "candidate:initial-scored";
     public const string CandidateRevisionStarted = "candidate:revision-started";
     public const string CandidateRevisionCompleted = "candidate:revision-completed";
+    public const string EvaluationProgress   = "evaluation:progress";
+    public const string CandidateRetryStarted    = "candidate:retry-started";
+    public const string CandidateRetryCompleted  = "candidate:retry-completed";
+    public const string OrchestrationCancelled   = "orchestration:cancelled";
 }
 
 public record CandidateStartedEvent(string RunId, string TaskId, string StrategyId, DateTimeOffset At);
@@ -90,3 +94,32 @@ public record CandidateRevisionCompletedEvent(
     string RunId, string TaskId, string StrategyId,
     bool Succeeded, string? FailureReason,
     double RevisionElapsedSec, long? TokensUsed);
+
+/// <summary>
+/// Emitted at phase transitions during orchestration so the dashboard can show
+/// what step the evaluation is at (e.g., "2/3 candidates complete", "Judging...").
+/// </summary>
+public record EvaluationProgressEvent(
+    string RunId, string TaskId,
+    string Phase,
+    int CompletedCandidates,
+    int TotalCandidates,
+    string? Detail);
+
+/// <summary>Emitted when a gate-failed candidate begins a retry attempt.</summary>
+public record CandidateRetryStartedEvent(
+    string RunId, string TaskId, string StrategyId,
+    string FailedGate,
+    DateTimeOffset At);
+
+/// <summary>Emitted when a gate-failed candidate's retry attempt completes.</summary>
+public record CandidateRetryCompletedEvent(
+    string RunId, string TaskId, string StrategyId,
+    bool Succeeded, string? FailureReason,
+    double RetryElapsedSec, long? TokensUsed);
+
+/// <summary>Emitted when a user cancels an orchestration from the dashboard.</summary>
+public record OrchestrationCancelledEvent(
+    string RunId, string TaskId,
+    string Reason,
+    DateTimeOffset At);

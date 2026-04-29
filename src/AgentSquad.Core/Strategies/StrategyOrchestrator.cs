@@ -30,6 +30,7 @@ public class StrategyOrchestrator
     private readonly RunBudgetTracker? _budget;
     private readonly AgentUsageTracker? _usage;
     private readonly RevisionFeedbackGenerator? _revisionFeedback;
+    private readonly IOrchestrationCancellationService? _cancellation;
 
     public StrategyOrchestrator(
         ILogger<StrategyOrchestrator> logger,
@@ -44,7 +45,8 @@ public class StrategyOrchestrator
         RunBudgetTracker? budget = null,
         AgentUsageTracker? usage = null,
         IEnumerable<IAgenticFrameworkAdapter>? adapters = null,
-        RevisionFeedbackGenerator? revisionFeedback = null)
+        RevisionFeedbackGenerator? revisionFeedback = null,
+        IOrchestrationCancellationService? cancellation = null)
     {
         _logger = logger;
         _worktree = worktree;
@@ -66,6 +68,7 @@ public class StrategyOrchestrator
         _budget = budget;
         _usage = usage;
         _revisionFeedback = revisionFeedback;
+        _cancellation = cancellation;
     }
 
     /// <summary>All known framework/strategy IDs (built-in + external adapters).</summary>
@@ -126,9 +129,35 @@ public class StrategyOrchestrator
         _logger.LogInformation("Orchestrating {Count} strategies for task {Task}: {Strategies}",
             enabled.Count, task.TaskId, string.Join(",", enabled));
 
+        // Register a linked CTS so dashboard can cancel this orchestration.
+        using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _cancellation?.Register(task.RunId, task.TaskId, linkedCts);
+        try
+        {
+
+        // Emit progress: starting candidates
+        await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+            task.RunId, task.TaskId, "candidates-running", 0, enabled.Count,
+            $"Running {enabled.Count} candidates…"), linkedCts.Token);
+
         // Launch each strategy in its own worktree, bounded by the global gate.
         var runTasks = enabled.Select(id => RunOneAsync(task, id, cfg, ct)).ToList();
         var outputs = await Task.WhenAll(runTasks);
+
+        // Emit progress: candidates complete, starting evaluation
+        var succeededCount = outputs.Count(o => o.exec?.Succeeded == true);
+        await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+            task.RunId, task.TaskId, "gates-evaluating", enabled.Count, enabled.Count,
+            $"{succeededCount}/{enabled.Count} succeeded — evaluating gates…"), ct);
+
+        // ── Gate Retry: re-run gate-failed candidates from scratch ──
+        var retryCfg = cfg.GateRetry;
+        if (retryCfg.Enabled && retryCfg.MaxRetries > 0)
+        {
+            var retryOutputs = await RunGateRetryAsync(task, outputs, enabled, cfg, ct);
+            if (retryOutputs is not null)
+                outputs = retryOutputs;
+        }
 
         // Evaluate survivors.
         var evalInput = outputs
@@ -141,12 +170,18 @@ public class StrategyOrchestrator
 
         if (revCfg.Enabled && evalInput.Count > 1)
         {
+            await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+                task.RunId, task.TaskId, "revision-round", evalInput.Count, enabled.Count,
+                "Revision round: judge scoring with feedback…"), ct);
             // ── Revision Round: gates-only → judge with feedback → revise → final judge ──
             evalResult = await RunWithRevisionAsync(task, evalInput, outputs, enabled, cfg, ct);
         }
         else
         {
             // ── Standard path (unchanged) ──
+            await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+                task.RunId, task.TaskId, "judging", evalInput.Count(e => e.Item1.Succeeded), enabled.Count,
+                "Evaluating gates and scoring…"), ct);
             evalResult = await _evaluator.EvaluateAsync(task, evalInput, ct);
         }
 
@@ -199,10 +234,19 @@ public class StrategyOrchestrator
 
         if (evalResult.Winner is not null)
         {
+            await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+                task.RunId, task.TaskId, "winner-selected", enabled.Count, enabled.Count,
+                $"Winner: {evalResult.Winner.StrategyId}"), ct);
             await _events.EmitAsync(StrategyEvents.WinnerSelected, new WinnerSelectedEvent(
                 task.RunId, task.TaskId, evalResult.Winner.StrategyId,
                 evalResult.TieBreakReason ?? "",
                 evalResult.EvaluationElapsed.TotalSeconds), ct);
+        }
+        else
+        {
+            await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+                task.RunId, task.TaskId, "no-winner", enabled.Count, enabled.Count,
+                "No candidate survived evaluation"), ct);
         }
 
         // Write experiment record.
@@ -238,6 +282,20 @@ public class StrategyOrchestrator
         LogOrchestrationSummary(task.TaskId, runSw, evalResult);
 
         return new OrchestrationOutcome(task, evalResult);
+
+        } // end try (cancellation registration)
+        catch (OperationCanceledException) when (linkedCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            // Cancelled by dashboard, not by parent token
+            _logger.LogInformation("Orchestration cancelled by user for task {Task}", task.TaskId);
+            await _events.EmitAsync(StrategyEvents.OrchestrationCancelled, new OrchestrationCancelledEvent(
+                task.RunId, task.TaskId, "user-requested", DateTimeOffset.UtcNow), CancellationToken.None);
+            return OrchestrationOutcome.Empty(task);
+        }
+        finally
+        {
+            _cancellation?.Unregister(task.RunId, task.TaskId);
+        }
     }
 
     // ── Revision Round ──
@@ -562,6 +620,110 @@ public class StrategyOrchestrator
         {
             if (handle is not null) await handle.DisposeAsync();
         }
+    }
+
+    // ── Gate Retry: re-run failed candidates from scratch ──
+
+    /// <summary>
+    /// Identifies candidates that failed gates with retryable failure modes and re-executes
+    /// them from scratch. Returns updated outputs array if any retries succeeded, null if
+    /// no retries were attempted or all retries also failed.
+    /// </summary>
+    private async Task<(StrategyExecutionResult? exec, string patch)[]?> RunGateRetryAsync(
+        TaskContext task,
+        (StrategyExecutionResult? exec, string patch)[] outputs,
+        List<string> enabled,
+        StrategyFrameworkConfig cfg,
+        CancellationToken ct)
+    {
+        var retryCfg = cfg.GateRetry;
+
+        // Find candidates that failed with retryable gates
+        var failedCandidates = outputs
+            .Where(o => o.exec is not null && !o.exec.Succeeded)
+            .Where(o =>
+            {
+                if (retryCfg.RetryableGates.Count == 0) return true; // Empty = retry all
+                // Match failure reason against retryable gates
+                var reason = o.exec!.FailureReason ?? "";
+                return retryCfg.RetryableGates.Any(g =>
+                    reason.Contains(g, StringComparison.OrdinalIgnoreCase));
+            })
+            .ToList();
+
+        if (failedCandidates.Count == 0)
+            return null;
+
+        // Only retry if at least one candidate succeeded (proving the task is feasible)
+        var anySucceeded = outputs.Any(o => o.exec?.Succeeded == true);
+        if (!anySucceeded)
+        {
+            _logger.LogDebug("Gate retry skipped: no candidates succeeded for task {Task}", task.TaskId);
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Gate retry: {Count} candidates failed with retryable gates for task {Task} — retrying",
+            failedCandidates.Count, task.TaskId);
+
+        await _events.EmitAsync(StrategyEvents.EvaluationProgress, new EvaluationProgressEvent(
+            task.RunId, task.TaskId, "retrying-failed", failedCandidates.Count, enabled.Count,
+            $"Retrying {failedCandidates.Count} gate-failed candidate(s)…"), ct);
+
+        var retryTasks = new List<(int outputIndex, Task<(StrategyExecutionResult? exec, string patch)> retryTask)>();
+
+        foreach (var failed in failedCandidates)
+        {
+            var strategyId = failed.exec!.StrategyId;
+            var outputIndex = Array.FindIndex(outputs, o =>
+                o.exec?.StrategyId.Equals(strategyId, StringComparison.OrdinalIgnoreCase) == true);
+            if (outputIndex < 0) continue;
+
+            var failedGate = failed.exec.FailureReason?.Split(':')[0] ?? "unknown";
+            await _events.EmitAsync(StrategyEvents.CandidateRetryStarted, new CandidateRetryStartedEvent(
+                task.RunId, task.TaskId, strategyId, failedGate, DateTimeOffset.UtcNow), ct);
+
+            // Re-run from scratch using RunOneAsync — use original cfg (timeout per strategy already set)
+            retryTasks.Add((outputIndex, RunOneAsync(task, strategyId, cfg, ct)));
+        }
+
+        var retryResults = await Task.WhenAll(retryTasks.Select(t => t.retryTask));
+
+        // Emit retry-completed events and merge results
+        var anyRetrySucceeded = false;
+        var updatedOutputs = outputs.ToArray(); // Copy
+
+        for (int i = 0; i < retryTasks.Count; i++)
+        {
+            var (outputIndex, _) = retryTasks[i];
+            var retryResult = retryResults[i];
+            var strategyId = failedCandidates[i].exec!.StrategyId;
+
+            await _events.EmitAsync(StrategyEvents.CandidateRetryCompleted, new CandidateRetryCompletedEvent(
+                task.RunId, task.TaskId, strategyId,
+                retryResult.exec?.Succeeded ?? false,
+                retryResult.exec?.FailureReason,
+                retryResult.exec?.Elapsed.TotalSeconds ?? 0,
+                retryResult.exec?.TokensUsed), ct);
+
+            if (retryResult.exec?.Succeeded == true)
+            {
+                // Replace original failed output with successful retry
+                updatedOutputs[outputIndex] = retryResult;
+                anyRetrySucceeded = true;
+                _logger.LogInformation(
+                    "Gate retry succeeded for {Strategy} task {Task}",
+                    strategyId, task.TaskId);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Gate retry also failed for {Strategy} task {Task}: {Reason}",
+                    strategyId, task.TaskId, retryResult.exec?.FailureReason ?? "unknown");
+            }
+        }
+
+        return anyRetrySucceeded ? updatedOutputs : null;
     }
 
     private void LogOrchestrationSummary(string taskId, Stopwatch runSw, EvaluationResult evalResult)

@@ -8,13 +8,16 @@ public sealed class InProcessStrategiesDataService : IStrategiesDataService
 {
     private readonly CandidateStateStore _store;
     private readonly IOptionsMonitor<StrategyFrameworkConfig> _cfg;
+    private readonly IOrchestrationCancellationService? _cancellation;
 
     public InProcessStrategiesDataService(
         CandidateStateStore store,
-        IOptionsMonitor<StrategyFrameworkConfig> cfg)
+        IOptionsMonitor<StrategyFrameworkConfig> cfg,
+        IOrchestrationCancellationService? cancellation = null)
     {
         _store = store;
         _cfg = cfg;
+        _cancellation = cancellation;
     }
 
     public Task<IReadOnlyList<TaskSnapshot>> GetActiveTasksAsync(CancellationToken ct = default)
@@ -28,4 +31,7 @@ public sealed class InProcessStrategiesDataService : IStrategiesDataService
         var c = _cfg.CurrentValue;
         return Task.FromResult(new EnabledStrategiesInfo(c.Enabled, c.EnabledStrategies.ToList()));
     }
+
+    public Task<bool> CancelOrchestrationAsync(string runId, string taskId, CancellationToken ct = default)
+        => Task.FromResult(_cancellation?.RequestCancellation(runId, taskId) ?? false);
 }

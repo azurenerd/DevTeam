@@ -81,6 +81,9 @@ public static class StrategyFrameworkServiceCollectionExtensions
         services.AddSingleton<CandidateStateStore>(sp =>
             new CandidateStateStore(sp.GetService<AgentStateStore>()));
 
+        // Orchestration cancellation service: allows dashboard to cancel running tasks.
+        services.AddSingleton<IOrchestrationCancellationService, OrchestrationCancellationService>();
+
         return services;
     }
 

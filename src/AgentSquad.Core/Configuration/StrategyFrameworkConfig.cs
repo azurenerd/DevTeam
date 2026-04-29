@@ -73,6 +73,9 @@ public class StrategyFrameworkConfig
     /// <summary>Revision round: judge-feedback-fix cycle configuration.</summary>
     public RevisionRoundConfig RevisionRound { get; set; } = new();
 
+    /// <summary>Gate retry: gives gate-failed candidates a second attempt from scratch.</summary>
+    public GateRetryConfig GateRetry { get; set; } = new();
+
     /// <summary>Experiment ndjson output root. Resolved relative to the runner's cwd.</summary>
     public string ExperimentDataDirectory { get; set; } = "experiment-data";
 
@@ -253,4 +256,35 @@ public class RevisionRoundConfig
     /// Default: "standard".
     /// </summary>
     public string FeedbackModelTier { get; set; } = "standard";
+}
+
+/// <summary>
+/// Gate retry: when a candidate fails a build gate, re-execute the strategy from
+/// scratch with a shorter timeout. This helps transient failures (timeouts, process
+/// crashes) recover without requiring manual intervention.
+/// </summary>
+public class GateRetryConfig
+{
+    /// <summary>
+    /// Master switch. When true (default), gate-failed candidates get one retry attempt.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of retries per candidate. Default: 1.
+    /// </summary>
+    public int MaxRetries { get; set; } = 1;
+
+    /// <summary>
+    /// Timeout for each retry attempt (seconds). Should be shorter than the original timeout
+    /// since we know the task is achievable (other candidates may have succeeded). Default: 600s.
+    /// </summary>
+    public int RetryTimeoutSeconds { get; set; } = 600;
+
+    /// <summary>
+    /// Only retry candidates that failed with these gate IDs. Empty = retry all gate failures.
+    /// Useful to exclude "gate1-output" (empty patch = strategy produced nothing) while
+    /// allowing "gate2-build" retries (build may succeed on second attempt).
+    /// </summary>
+    public List<string> RetryableGates { get; set; } = new() { "strategy-failed", "gate2-build" };
 }

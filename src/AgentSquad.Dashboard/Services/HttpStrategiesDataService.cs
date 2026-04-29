@@ -55,4 +55,18 @@ public sealed class HttpStrategiesDataService : IStrategiesDataService
             return new EnabledStrategiesInfo(false, []);
         }
     }
+
+    public async Task<bool> CancelOrchestrationAsync(string runId, string taskId, CancellationToken ct = default)
+    {
+        try
+        {
+            var response = await _http.PostAsync($"/api/strategies/cancel/{runId}/{taskId}", null, ct).ConfigureAwait(false);
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "POST /api/strategies/cancel failed");
+            return false;
+        }
+    }
 }
