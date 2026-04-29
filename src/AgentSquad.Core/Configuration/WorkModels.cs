@@ -99,6 +99,12 @@ public record ActiveRun
 
     /// <summary>When the run completed, failed, or was cancelled.</summary>
     public DateTime? CompletedAt { get; init; }
+
+    /// <summary>
+    /// Persisted artifact base path (e.g., "AgentDocs/101") so recovery uses the same
+    /// scoped folder even if config changes between crash and restart.
+    /// </summary>
+    public string? ArtifactBasePath { get; init; }
 }
 
 /// <summary>

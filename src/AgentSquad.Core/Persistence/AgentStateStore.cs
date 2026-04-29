@@ -227,7 +227,8 @@ public class AgentStateStore : IDisposable
                 target_branch TEXT,
                 created_at   DATETIME NOT NULL DEFAULT (datetime('now')),
                 started_at   DATETIME,
-                completed_at DATETIME
+                completed_at DATETIME,
+                artifact_base_path TEXT
             );
 
             CREATE TABLE IF NOT EXISTS features (
@@ -330,6 +331,7 @@ public class AgentStateStore : IDisposable
             "ALTER TABLE strategy_candidates ADD COLUMN initial_screenshot_base64 TEXT",
             "ALTER TABLE strategy_candidates ADD COLUMN revision_elapsed_sec REAL",
             "ALTER TABLE strategy_candidates ADD COLUMN revision_skipped_reason TEXT",
+            "ALTER TABLE active_runs ADD COLUMN artifact_base_path TEXT",
         ];
 
         foreach (var sql in migrations)
@@ -1079,12 +1081,13 @@ public class AgentStateStore : IDisposable
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            INSERT INTO active_runs (run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at)
-                VALUES (@runId, @mode, @featureId, @status, @repo, @baseBranch, @targetBranch, @createdAt, @startedAt, @completedAt)
+            INSERT INTO active_runs (run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at, artifact_base_path)
+                VALUES (@runId, @mode, @featureId, @status, @repo, @baseBranch, @targetBranch, @createdAt, @startedAt, @completedAt, @artifactBasePath)
             ON CONFLICT(run_id) DO UPDATE SET
                 status = excluded.status,
                 started_at = excluded.started_at,
-                completed_at = excluded.completed_at;
+                completed_at = excluded.completed_at,
+                artifact_base_path = COALESCE(excluded.artifact_base_path, active_runs.artifact_base_path);
             """;
         cmd.Parameters.AddWithValue("@runId", run.RunId);
         cmd.Parameters.AddWithValue("@mode", run.Mode.ToString());
@@ -1096,6 +1099,7 @@ public class AgentStateStore : IDisposable
         cmd.Parameters.AddWithValue("@createdAt", run.CreatedAt);
         cmd.Parameters.AddWithValue("@startedAt", (object?)run.StartedAt ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@completedAt", (object?)run.CompletedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@artifactBasePath", (object?)run.ArtifactBasePath ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -1104,7 +1108,7 @@ public class AgentStateStore : IDisposable
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at, artifact_base_path
             FROM active_runs
             WHERE status IN ('Running', 'Paused', 'NotStarted')
             ORDER BY created_at DESC
@@ -1118,7 +1122,7 @@ public class AgentStateStore : IDisposable
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at, artifact_base_path
             FROM active_runs WHERE run_id = @runId;
             """;
         cmd.Parameters.AddWithValue("@runId", runId);
@@ -1130,7 +1134,7 @@ public class AgentStateStore : IDisposable
     {
         await using var cmd = _connection.CreateCommand();
         cmd.CommandText = """
-            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at
+            SELECT run_id, mode, feature_id, status, repo, base_branch, target_branch, created_at, started_at, completed_at, artifact_base_path
             FROM active_runs
             ORDER BY created_at DESC
             LIMIT @limit;
@@ -1184,7 +1188,8 @@ public class AgentStateStore : IDisposable
         TargetBranch = reader.IsDBNull(6) ? null : reader.GetString(6),
         CreatedAt = reader.GetDateTime(7),
         StartedAt = reader.IsDBNull(8) ? null : reader.GetDateTime(8),
-        CompletedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9)
+        CompletedAt = reader.IsDBNull(9) ? null : reader.GetDateTime(9),
+        ArtifactBasePath = reader.IsDBNull(10) ? null : reader.GetString(10)
     };
 
     // ── Features ─────────────────────────────────────────────────────

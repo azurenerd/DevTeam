@@ -104,8 +104,9 @@ public class RunCoordinator
             _activeProfile = CreateProfile(savedRun);
         }
 
-        // Sync the file manager's artifact path with the recovered profile
-        _fileManager.ArtifactBasePath = _activeProfile!.ArtifactBasePath;
+        // Use the persisted artifact path if available; otherwise fall back to profile reconstruction
+        var artifactPath = savedRun.ArtifactBasePath ?? _activeProfile!.ArtifactBasePath;
+        _fileManager.ArtifactBasePath = artifactPath;
 
         _logger.LogInformation(
             "Recovered {Mode} run {RunId} in status {Status} (workflow recovered: {WfRecovered}, docs path: {DocsPath})",
@@ -146,6 +147,9 @@ public class RunCoordinator
             _config.Limits.SinglePRMode,
             _config.Project.DocsFolderPath,
             runScope);
+
+        // Persist the artifact path with the run so recovery doesn't depend on config
+        run = run with { ArtifactBasePath = profile.ArtifactBasePath };
 
         // Clear any stale state from a previous run and set the new run ID
         await _stateStore.ClearAllCheckpointsAsync(ct);
@@ -209,6 +213,9 @@ public class RunCoordinator
             };
 
             var profile = new FeatureWorkflowProfile(feature, runId);
+
+            // Persist the artifact path with the run so recovery doesn't depend on config
+            run = run with { ArtifactBasePath = profile.ArtifactBasePath };
 
             // Clear any stale state from a previous run and set the new run ID
             await _stateStore.ClearAllCheckpointsAsync(ct);

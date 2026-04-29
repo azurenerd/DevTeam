@@ -45,7 +45,7 @@ public class ProjectFileManager
         string.IsNullOrEmpty(ArtifactBasePath) ? fileName : $"{ArtifactBasePath}/{fileName}";
 
     /// <summary>
-    /// Read a file from the scoped path; if not found, fall back to repo root (legacy repos).
+    /// Read a file from the scoped path. Returns null if not found (no root fallback when scoped).
     /// </summary>
     private async Task<string?> GetFileWithFallbackAsync(string fileName, CancellationToken ct)
     {
@@ -55,9 +55,9 @@ public class ProjectFileManager
         if (content is not null || string.IsNullOrEmpty(ArtifactBasePath))
             return content;
 
-        // Fallback: try bare filename at repo root for repos created before AgentDocs/ was introduced
-        _logger.LogDebug("File not found at {ScopedPath}, falling back to root {FileName}", scopedPath, fileName);
-        return await _repoContent.GetFileContentAsync(fileName, _branch, ct);
+        // Scoped path set but file not found — don't fall back to root (stale cross-run data risk)
+        _logger.LogDebug("File not found at scoped path {ScopedPath} (no root fallback)", scopedPath);
+        return null;
     }
 
     #region TeamMembers.md

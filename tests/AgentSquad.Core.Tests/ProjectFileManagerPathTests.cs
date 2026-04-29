@@ -33,19 +33,24 @@ public class ProjectFileManagerPathTests
     }
 
     [Fact]
-    public async Task GetPMSpecAsync_WithArtifactBasePath_FallsBackToRoot()
+    public async Task GetPMSpecAsync_WithArtifactBasePath_DoesNotFallBackToRoot()
     {
         _manager.ArtifactBasePath = "AgentDocs/101";
         _repoContent
             .Setup(r => r.GetFileContentAsync("AgentDocs/101/PMSpec.md", "main", It.IsAny<CancellationToken>()))
             .ReturnsAsync((string?)null);
+        // Root file exists but should NOT be read when scoped
         _repoContent
             .Setup(r => r.GetFileContentAsync("PMSpec.md", "main", It.IsAny<CancellationToken>()))
             .ReturnsAsync("# Legacy PM Spec");
 
         var result = await _manager.GetPMSpecAsync();
 
-        Assert.Equal("# Legacy PM Spec", result);
+        // Should get placeholder, not the root file content
+        Assert.Contains("No PM specification", result);
+        _repoContent.Verify(
+            r => r.GetFileContentAsync("PMSpec.md", "main", It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
     [Fact]
@@ -90,7 +95,7 @@ public class ProjectFileManagerPathTests
     }
 
     [Fact]
-    public async Task GetResearchDocAsync_WithArtifactBasePath_FallsBackToRoot()
+    public async Task GetResearchDocAsync_WithArtifactBasePath_DoesNotFallBackToRoot()
     {
         _manager.ArtifactBasePath = "AgentDocs/999";
         _repoContent
@@ -102,7 +107,8 @@ public class ProjectFileManagerPathTests
 
         var result = await _manager.GetResearchDocAsync();
 
-        Assert.Equal("# Root Research", result);
+        // Should get placeholder, not the root file content
+        Assert.Contains("No research", result);
     }
 }
 

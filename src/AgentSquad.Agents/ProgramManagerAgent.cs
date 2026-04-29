@@ -607,10 +607,9 @@ public class ProgramManagerAgent : AgentBase
                     else
                     {
                         var content = await File.ReadAllTextAsync(localPath, ct);
-                        await _repoContent.CreateOrUpdateFileAsync(
+                        await _projectFiles.SaveFileAsync(
                             fileName, content,
-                            $"Add design input: {fileName}",
-                            null, ct);
+                            $"Add design input: {fileName}", ct);
                     }
 
                     Logger.LogInformation("Added design input {FileName} to repository from {Path}", fileName, localPath);
