@@ -45,8 +45,17 @@ public sealed class AdoBranchService : AdoHttpClientBase, IBranchService
             }
         };
 
-        await PostAsync<object>(createUrl, payload, ct);
-        _logger.LogInformation("Created ADO branch {Branch} from {Source}", branchName, fromBranch);
+        try
+        {
+            await PostAsync<object>(createUrl, payload, ct);
+            _logger.LogInformation("Created ADO branch {Branch} from {Source}", branchName, fromBranch);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Conflict
+            || ex.Message.Contains("409"))
+        {
+            // Branch was created concurrently (TOCTOU race) — treat as success
+            _logger.LogInformation("ADO branch {Branch} already exists (concurrent creation), reusing", branchName);
+        }
     }
 
     public async Task<bool> ExistsAsync(string branchName, CancellationToken ct = default)
