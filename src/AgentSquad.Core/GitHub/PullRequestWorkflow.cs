@@ -1671,7 +1671,8 @@ public partial class PullRequestWorkflow
             if (comment.CreatedAt <= lastReviewTime)
                 break;
 
-            if (comment.Body.Contains("has marked this PR as ready for review", StringComparison.OrdinalIgnoreCase))
+            if (comment.Body.Contains("has marked this PR as ready for review", StringComparison.OrdinalIgnoreCase)
+                || comment.Body.Contains("] Rework", StringComparison.OrdinalIgnoreCase))
             {
                 reworkHappenedSince = true;
                 break;
