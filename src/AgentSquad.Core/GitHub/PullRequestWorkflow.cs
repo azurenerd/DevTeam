@@ -625,8 +625,9 @@ public partial class PullRequestWorkflow
         var issueRef = closesIssueNumber.HasValue
             ? $"\n\nCloses #{closesIssueNumber.Value}"
             : "";
+        // Link to target branch (ActiveBranch), not the PR source branch which gets deleted after merge
         var docLink = _hostContext is not null
-            ? $"[{documentPath}]({_hostContext.GetFileWebUrl(documentPath, branchName)})"
+            ? $"[{documentPath}]({_hostContext.GetFileWebUrl(documentPath, ActiveBranch)})"
             : documentPath;
         var prBody = $"""
             ## Document: {docLink}
