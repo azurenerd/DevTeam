@@ -33,24 +33,21 @@ public class ProjectFileManagerPathTests
     }
 
     [Fact]
-    public async Task GetPMSpecAsync_WithArtifactBasePath_DoesNotFallBackToRoot()
+    public async Task GetPMSpecAsync_WithArtifactBasePath_FallsBackToRoot()
     {
         _manager.ArtifactBasePath = "AgentDocs/101";
         _repoContent
             .Setup(r => r.GetFileContentAsync("AgentDocs/101/PMSpec.md", "main", It.IsAny<CancellationToken>()))
             .ReturnsAsync((string?)null);
-        // Root file exists but should NOT be read when scoped
+        // Root file exists — should be found via fallback
         _repoContent
             .Setup(r => r.GetFileContentAsync("PMSpec.md", "main", It.IsAny<CancellationToken>()))
             .ReturnsAsync("# Legacy PM Spec");
 
         var result = await _manager.GetPMSpecAsync();
 
-        // Should get placeholder, not the root file content
-        Assert.Contains("No PM specification", result);
-        _repoContent.Verify(
-            r => r.GetFileContentAsync("PMSpec.md", "main", It.IsAny<CancellationToken>()),
-            Times.Never);
+        // Should find the root file via fallback (mini-reset resume scenario)
+        Assert.Equal("# Legacy PM Spec", result);
     }
 
     [Fact]
@@ -95,7 +92,7 @@ public class ProjectFileManagerPathTests
     }
 
     [Fact]
-    public async Task GetResearchDocAsync_WithArtifactBasePath_DoesNotFallBackToRoot()
+    public async Task GetResearchDocAsync_WithArtifactBasePath_FallsBackToRoot()
     {
         _manager.ArtifactBasePath = "AgentDocs/999";
         _repoContent
@@ -107,7 +104,20 @@ public class ProjectFileManagerPathTests
 
         var result = await _manager.GetResearchDocAsync();
 
-        // Should get placeholder, not the root file content
+        // Should find root file via fallback (mini-reset resume scenario)
+        Assert.Equal("# Root Research", result);
+    }
+
+    [Fact]
+    public async Task GetResearchDocAsync_WithArtifactBasePath_NothingAnywhere_ReturnsPlaceholder()
+    {
+        _manager.ArtifactBasePath = "AgentDocs/999";
+        _repoContent
+            .Setup(r => r.GetFileContentAsync(It.IsAny<string>(), "main", It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string?)null);
+
+        var result = await _manager.GetResearchDocAsync();
+
         Assert.Contains("No research", result);
     }
 }

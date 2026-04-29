@@ -604,15 +604,14 @@ public class ProgramManagerAgent : AgentBase
                     if (isBinary)
                     {
                         var bytes = await File.ReadAllBytesAsync(localPath, ct);
-                        await _repoContent.CommitBinaryFileAsync(
+                        await _projectFiles.SaveScopedBinaryFileAsync(
                             fileName, bytes,
-                            $"Add design input: {fileName}",
-                            EffectiveBranch, ct);
+                            $"Add design input: {fileName}", ct);
                     }
                     else
                     {
                         var content = await File.ReadAllTextAsync(localPath, ct);
-                        await _projectFiles.SaveFileAsync(
+                        await _projectFiles.SaveScopedFileAsync(
                             fileName, content,
                             $"Add design input: {fileName}", ct);
                     }

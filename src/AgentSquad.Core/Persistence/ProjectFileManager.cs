@@ -55,7 +55,8 @@ public class ProjectFileManager
         string.IsNullOrEmpty(ArtifactBasePath) ? fileName : $"{ArtifactBasePath}/{fileName}";
 
     /// <summary>
-    /// Read a file from the scoped path. Returns null if not found (no root fallback when scoped).
+    /// Read a file from the scoped path. Falls back to repo root when scoped path yields nothing,
+    /// supporting mini-reset resume where prior-run docs live at root or under a different scope.
     /// </summary>
     private async Task<string?> GetFileWithFallbackAsync(string fileName, CancellationToken ct)
     {
@@ -65,9 +66,9 @@ public class ProjectFileManager
         if (content is not null || string.IsNullOrEmpty(ArtifactBasePath))
             return content;
 
-        // Scoped path set but file not found — don't fall back to root (stale cross-run data risk)
-        _logger.LogDebug("File not found at scoped path {ScopedPath} (no root fallback)", scopedPath);
-        return null;
+        // Scoped path empty — fall back to repo root (prior run may have placed docs there)
+        _logger.LogDebug("File not found at scoped path {ScopedPath}, falling back to root /{FileName}", scopedPath, fileName);
+        return await _repoContent.GetFileContentAsync(fileName, ActiveBranch, ct);
     }
 
     #region TeamMembers.md
@@ -319,6 +320,33 @@ public class ProjectFileManager
 
         _logger.LogInformation("Saving file {Path}", path);
         await _repoContent.CreateOrUpdateFileAsync(path, content, commitMessage, ActiveBranch, ct);
+    }
+
+    /// <summary>
+    /// Save a file to the scoped artifact path (ArtifactBasePath/{fileName}).
+    /// Use for design inputs and other files that belong with the run's documents.
+    /// </summary>
+    public async Task SaveScopedFileAsync(string fileName, string content, string commitMessage, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        ArgumentException.ThrowIfNullOrWhiteSpace(content);
+
+        var scopedPath = ResolvePath(fileName);
+        _logger.LogInformation("Saving scoped file {Path}", scopedPath);
+        await _repoContent.CreateOrUpdateFileAsync(scopedPath, content, commitMessage, ActiveBranch, ct);
+    }
+
+    /// <summary>
+    /// Save a binary file to the scoped artifact path (ArtifactBasePath/{fileName}).
+    /// </summary>
+    public async Task SaveScopedBinaryFileAsync(string fileName, byte[] data, string commitMessage, CancellationToken ct = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        ArgumentNullException.ThrowIfNull(data);
+
+        var scopedPath = ResolvePath(fileName);
+        _logger.LogInformation("Saving scoped binary file {Path}", scopedPath);
+        await _repoContent.CommitBinaryFileAsync(scopedPath, data, commitMessage, ActiveBranch, ct);
     }
 
     #endregion
