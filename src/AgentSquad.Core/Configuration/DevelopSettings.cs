@@ -22,6 +22,12 @@ public class DevelopSettings
 
     /// <summary>When true, PM creates 1 issue with doc links instead of N user stories.</summary>
     public bool SingleIssueMode { get; set; } = false;
+
+    /// <summary>
+    /// Optional working branch name. When set, all agent work targets this branch
+    /// instead of the default branch. Leave empty to work directly on the default branch.
+    /// </summary>
+    public string? WorkingBranch { get; set; }
 }
 
 public class GitHubRepoSettings

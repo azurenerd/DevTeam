@@ -269,6 +269,17 @@ else
                         <input type="text" class="config-input" style="max-width:200px;"
                                @bind="CurrentDefaultBranch" @bind:event="oninput" />
                     </div>
+
+                    <!-- Working Branch (optional) -->
+                    <div class="config-field" style="margin-top:0.5rem;">
+                        <label>Working Branch <span style="color:var(--text-secondary);font-size:0.75rem;">(optional)</span></label>
+                        <input type="text" class="config-input" style="max-width:300px;"
+                               placeholder="Leave empty to work on default branch"
+                               @bind="_settings.WorkingBranch" @bind:event="oninput" />
+                        <div style="font-size:0.7rem;color:var(--text-secondary);margin-top:0.25rem;">
+                            All agent work targets this branch. A human merges to default branch when ready.
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -562,6 +573,13 @@ else
                                 <span class="wizard-summary-label">Branch</span>
                                 <span class="wizard-summary-value">@CurrentDefaultBranch</span>
                             </div>
+                            @if (!string.IsNullOrWhiteSpace(_settings.WorkingBranch))
+                            {
+                                <div class="wizard-summary-row">
+                                    <span class="wizard-summary-label">Working Branch</span>
+                                    <span class="wizard-summary-value">🌿 @_settings.WorkingBranch</span>
+                                </div>
+                            }
                             <div class="wizard-summary-row">
                                 <span class="wizard-summary-label">Auth</span>
                                 <span class="wizard-summary-value">

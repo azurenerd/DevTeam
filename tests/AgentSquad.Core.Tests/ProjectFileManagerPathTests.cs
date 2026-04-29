@@ -16,7 +16,7 @@ public class ProjectFileManagerPathTests
         _manager = new ProjectFileManager(
             _repoContent.Object,
             NullLogger<ProjectFileManager>.Instance,
-            "main");
+            branch: "main");
     }
 
     [Fact]

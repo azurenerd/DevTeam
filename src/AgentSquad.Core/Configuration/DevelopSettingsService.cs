@@ -129,6 +129,9 @@ public sealed class DevelopSettingsService : IDisposable
 
         config.Limits.SingleIssueMode = settings.SingleIssueMode;
 
+        // Working branch
+        config.Project.WorkingBranch = string.IsNullOrWhiteSpace(settings.WorkingBranch) ? null : settings.WorkingBranch;
+
         // Platform-specific repo settings
         if (string.Equals(settings.Platform, "GitHub", StringComparison.OrdinalIgnoreCase))
         {
@@ -220,6 +223,7 @@ public sealed class DevelopSettingsService : IDisposable
         settings.ParentWorkItemId = config.Project.ParentWorkItemId;
         settings.DocsFolderPath = config.Project.DocsFolderPath;
         settings.SingleIssueMode = config.Limits.SingleIssueMode;
+        settings.WorkingBranch = config.Project.WorkingBranch;
 
         return settings;
     }

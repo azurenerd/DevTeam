@@ -33,6 +33,7 @@ public class ResearcherAgent : AgentBase
     private readonly IAgentReasoningLog _reasoningLog;
     private readonly IPromptTemplateService _promptService;
     private readonly IAgentTaskTracker _taskTracker;
+    private readonly IRunBranchProvider? _branchProvider;
 
     private readonly Queue<ResearchDirective> _researchQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
@@ -57,7 +58,8 @@ public class ResearcherAgent : AgentBase
         IRepositoryContentService repoContent,
         IReviewService reviewService,
         RoleContextProvider? roleContextProvider = null,
-        PlaywrightRunner? playwrightRunner = null)
+        PlaywrightRunner? playwrightRunner = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -75,7 +77,10 @@ public class ResearcherAgent : AgentBase
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
         _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
         _playwrightRunner = playwrightRunner;
+        _branchProvider = branchProvider;
     }
+
+    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
@@ -943,7 +948,7 @@ public class ResearcherAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
+            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 ".html", ".htm"
@@ -1054,7 +1059,7 @@ public class ResearcherAgent : AgentBase
         if (_playwrightRunner is null) return;
 
         IReadOnlyList<string> tree;
-        try { tree = await _repoContent.GetRepositoryTreeAsync("main", ct); }
+        try { tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct); }
         catch (Exception ex) { Logger.LogDebug(ex, "Could not read repo tree for design screenshot check"); return; }
 
         var htmlDesignFiles = tree

@@ -42,6 +42,7 @@ public abstract class EngineerAgentBase : AgentBase
     private readonly IGateCheckService _gateCheck;
     protected readonly DecisionGateService? DecisionGate;
     protected readonly IAgentTaskTracker _taskTracker;
+    protected readonly IRunBranchProvider? BranchProvider;
 
     protected readonly HashSet<int> ProcessedIssueIds = new();
     protected readonly ConcurrentQueue<ReworkItem> ReworkQueue = new();
@@ -100,7 +101,8 @@ public abstract class EngineerAgentBase : AgentBase
         IWorkItemService? workItemService = null,
         IRepositoryContentService? repoContent = null,
         IReviewService? reviewService = null,
-        IBranchService? branchService = null)
+        IBranchService? branchService = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -123,7 +125,10 @@ public abstract class EngineerAgentBase : AgentBase
         RepoContent = repoContent!;
         ReviewService = reviewService!;
         BranchService = branchService!;
+        BranchProvider = branchProvider;
     }
+
+    protected string EffectiveBranch => BranchProvider?.EffectiveBranch ?? Config.Project.DefaultBranch;
 
     #region Lifecycle
 
@@ -157,7 +162,7 @@ public abstract class EngineerAgentBase : AgentBase
                     Config.Workspace,
                     Identity.Id,
                     repoUrl,
-                    Config.Project.DefaultBranch,
+                    EffectiveBranch,
                     Logger);
                 await Workspace.InitializeAsync(ct);
                 Logger.LogInformation("{Role} {Name} initialized local workspace at {Path}",
@@ -2342,7 +2347,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         try
         {
-            var tree = await RepoContent.GetRepositoryTreeAsync("main", ct);
+            var tree = await RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             bool IsDesignHtml(string f)
             {
                 var ext = Path.GetExtension(f).ToLowerInvariant();
@@ -2483,7 +2488,7 @@ public abstract class EngineerAgentBase : AgentBase
         {
             if (_repoTreeCache is null || DateTime.UtcNow >= _repoTreeCacheExpiry)
             {
-                _repoTreeCache = await RepoContent.GetRepositoryTreeAsync("main", ct);
+                _repoTreeCache = await RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
                 _repoTreeCacheExpiry = DateTime.UtcNow.AddMinutes(5);
             }
 
@@ -2547,7 +2552,7 @@ public abstract class EngineerAgentBase : AgentBase
                     var content = !string.IsNullOrEmpty(prBranch)
                         ? await RepoContent.GetFileContentAsync(file, prBranch, ct)
                         : null;
-                    content ??= await RepoContent.GetFileContentAsync(file, "main", ct);
+                    content ??= await RepoContent.GetFileContentAsync(file, EffectiveBranch, ct);
 
                     if (!string.IsNullOrWhiteSpace(content))
                     {

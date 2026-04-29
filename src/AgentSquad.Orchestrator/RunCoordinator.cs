@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -19,6 +20,8 @@ public class RunCoordinator
     private readonly AgentStateStore _stateStore;
     private readonly IGateCheckService _gateCheck;
     private readonly ProjectFileManager _fileManager;
+    private readonly RunBranchProvider _branchProvider;
+    private readonly IBranchService _branchService;
     private readonly ILogger<RunCoordinator> _logger;
     private readonly AgentSquadConfig _config;
 
@@ -35,6 +38,8 @@ public class RunCoordinator
         AgentStateStore stateStore,
         IGateCheckService gateCheck,
         ProjectFileManager fileManager,
+        RunBranchProvider branchProvider,
+        IBranchService branchService,
         ILogger<RunCoordinator> logger,
         IOptions<AgentSquadConfig> config)
     {
@@ -44,6 +49,8 @@ public class RunCoordinator
         _stateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
         _fileManager = fileManager ?? throw new ArgumentNullException(nameof(fileManager));
+        _branchProvider = branchProvider ?? throw new ArgumentNullException(nameof(branchProvider));
+        _branchService = branchService ?? throw new ArgumentNullException(nameof(branchService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
@@ -108,9 +115,13 @@ public class RunCoordinator
         var artifactPath = savedRun.ArtifactBasePath ?? _activeProfile!.ArtifactBasePath;
         _fileManager.ArtifactBasePath = artifactPath;
 
+        // Restore the effective branch for the run (working branch if set, else default)
+        _branchProvider.SetForRun(savedRun.TargetBranch);
+
         _logger.LogInformation(
-            "Recovered {Mode} run {RunId} in status {Status} (workflow recovered: {WfRecovered}, docs path: {DocsPath})",
-            savedRun.Mode, savedRun.RunId, savedRun.Status, workflowRecovered, _activeProfile.ArtifactBasePath);
+            "Recovered {Mode} run {RunId} in status {Status} (workflow recovered: {WfRecovered}, docs path: {DocsPath}, branch: {Branch})",
+            savedRun.Mode, savedRun.RunId, savedRun.Status, workflowRecovered,
+            _activeProfile.ArtifactBasePath, _branchProvider.EffectiveBranch);
 
         return savedRun.Status == RunStatus.Running
             ? RecoveryResult.ResumeImmediately
@@ -141,6 +152,20 @@ public class RunCoordinator
             StartedAt = DateTime.UtcNow
         };
 
+        // Working branch: if configured, create from default branch and set as target
+        var workingBranch = string.IsNullOrWhiteSpace(_config.Project.WorkingBranch)
+            ? null : _config.Project.WorkingBranch;
+        if (workingBranch is not null)
+        {
+            if (!await _branchService.ExistsAsync(workingBranch, ct))
+            {
+                await _branchService.CreateAsync(workingBranch, _config.Project.DefaultBranch, ct);
+                _logger.LogInformation("Created working branch {Branch} from {DefaultBranch}",
+                    workingBranch, _config.Project.DefaultBranch);
+            }
+            run = run with { TargetBranch = workingBranch };
+        }
+
         // Run scope: use ParentWorkItemId if set, otherwise first 8 chars of RunId
         var runScope = _config.Project.ParentWorkItemId?.ToString() ?? run.RunId[..8];
         var profile = new ProjectWorkflowProfile(
@@ -167,8 +192,11 @@ public class RunCoordinator
         // Set the artifact base path so all agent doc reads/writes go to the scoped folder
         _fileManager.ArtifactBasePath = profile.ArtifactBasePath;
 
-        _logger.LogInformation("Started Project run {RunId} for {Repo} (docs path: {DocsPath})",
-            run.RunId, run.Repo, profile.ArtifactBasePath);
+        // Set the effective branch for the run (working branch if set, else default)
+        _branchProvider.SetForRun(run.TargetBranch);
+
+        _logger.LogInformation("Started Project run {RunId} for {Repo} (docs path: {DocsPath}, branch: {Branch})",
+            run.RunId, run.Repo, profile.ArtifactBasePath, _branchProvider.EffectiveBranch);
         return run;
         }
         finally
@@ -234,8 +262,11 @@ public class RunCoordinator
             // Feature runs use their own artifact path
             _fileManager.ArtifactBasePath = profile.ArtifactBasePath;
 
-            _logger.LogInformation("Started Feature run {RunId} for feature '{Title}' ({FeatureId}), docs path: {DocsPath}",
-                run.RunId, feature.Title, featureId, profile.ArtifactBasePath);
+            // Set the effective branch for the feature run
+            _branchProvider.SetForRun(run.TargetBranch);
+
+            _logger.LogInformation("Started Feature run {RunId} for feature '{Title}' ({FeatureId}), docs path: {DocsPath}, branch: {Branch}",
+                run.RunId, feature.Title, featureId, profile.ArtifactBasePath, _branchProvider.EffectiveBranch);
             return run;
         }
         finally
@@ -380,6 +411,7 @@ public class RunCoordinator
             _activeRun = run with { Status = RunStatus.Completed, CompletedAt = DateTime.UtcNow };
         }
 
+        _branchProvider.Reset();
         _logger.LogInformation("Run {RunId} completed", run.RunId);
     }
 
@@ -403,6 +435,7 @@ public class RunCoordinator
             _activeRun = run with { Status = RunStatus.Failed, CompletedAt = DateTime.UtcNow };
         }
 
+        _branchProvider.Reset();
         _logger.LogWarning("Run {RunId} failed: {Reason}", run.RunId, reason);
     }
 
@@ -425,6 +458,7 @@ public class RunCoordinator
             _activeProfile = null;
         }
 
+        _branchProvider.Reset();
         _runCts?.Cancel();
         _runCts?.Dispose();
         _runCts = null;

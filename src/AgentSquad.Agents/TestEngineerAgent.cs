@@ -70,6 +70,7 @@ public class TestEngineerAgent : AgentBase
     private readonly IPromptTemplateService? _promptService;
     private readonly DecisionGateService? _decisionGate;
     private readonly IAgentTaskTracker _taskTracker;
+    private readonly IRunBranchProvider? _branchProvider;
 
     private LocalWorkspace? _workspace;
     private bool _pendingWorkspaceCleanup;
@@ -124,7 +125,8 @@ public class TestEngineerAgent : AgentBase
         AgentStateStore? stateStore = null,
         IPromptTemplateService? promptService = null,
         DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null)
+        IAgentTaskTracker? taskTracker = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -146,7 +148,10 @@ public class TestEngineerAgent : AgentBase
         _promptService = promptService;
         _decisionGate = decisionGate;
         _taskTracker = taskTracker!;
+        _branchProvider = branchProvider;
     }
+
+    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
@@ -165,7 +170,7 @@ public class TestEngineerAgent : AgentBase
                     _config.Workspace,
                     Identity.Id,
                     repoUrl,
-                    _config.Project.DefaultBranch,
+                    EffectiveBranch,
                     Logger);
                 await _workspace.InitializeAsync(ct);
                 Logger.LogInformation("TestEngineer initialized local workspace at {Path}", _workspace.RepoPath);
@@ -2009,7 +2014,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var content = await _repoContent.GetFileContentAsync(filePath, _config.Project.DefaultBranch, ct);
+                var content = await _repoContent.GetFileContentAsync(filePath, EffectiveBranch, ct);
                 if (!string.IsNullOrWhiteSpace(content))
                     sourceFiles[filePath] = content;
             }
@@ -3294,7 +3299,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         var existingTests = new Dictionary<string, string>();
         try
         {
-            var repoTree = await _repoContent.GetRepositoryTreeAsync(_config.Project.DefaultBranch, ct);
+            var repoTree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
 
             // Build a set of source file names (without extension) to match against test files
             var sourceNames = sourceFilePaths
@@ -3330,7 +3335,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             {
                 try
                 {
-                    var content = await _repoContent.GetFileContentAsync(testPath, _config.Project.DefaultBranch, ct);
+                    var content = await _repoContent.GetFileContentAsync(testPath, EffectiveBranch, ct);
                     if (!string.IsNullOrWhiteSpace(content))
                         existingTests[testPath] = content;
                 }
@@ -4066,7 +4071,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             prTitle,
             prBody,
             branchName,
-            _config.Project.DefaultBranch,
+            EffectiveBranch,
             labels,
             ct);
 
@@ -4418,7 +4423,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
+            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designFiles = tree
                 .Where(f =>
                 {

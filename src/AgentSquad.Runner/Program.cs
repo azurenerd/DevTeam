@@ -56,17 +56,31 @@ var repoSlug = builder.Configuration["AgentSquad:Project:GitHubRepo"]?.Replace('
 var dbPath = $"agentsquad_{repoSlug}.db";
 builder.Services.AddSingleton(new AgentStateStore(dbPath));
 builder.Services.AddSingleton(new AgentMemoryStore(dbPath));
+
+// Run branch provider — centralized "effective branch" for the current run
+builder.Services.AddSingleton<RunBranchProvider>(sp =>
+{
+    var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;
+    return new RunBranchProvider(config.Project.DefaultBranch);
+});
+builder.Services.AddSingleton<IRunBranchProvider>(sp => sp.GetRequiredService<RunBranchProvider>());
+
 builder.Services.AddSingleton<ProjectFileManager>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;
     return new ProjectFileManager(
         sp.GetRequiredService<IRepositoryContentService>(),
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ProjectFileManager>>(),
+        sp.GetRequiredService<IRunBranchProvider>(),
         config.Project.DefaultBranch);
 });
 
 // GitHub workflows
-builder.Services.AddSingleton<ConflictDetector>();
+builder.Services.AddSingleton<ConflictDetector>(sp =>
+    new ConflictDetector(
+        sp.GetRequiredService<IRepositoryContentService>(),
+        sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<ConflictDetector>>(),
+        sp.GetRequiredService<IRunBranchProvider>()));
 builder.Services.AddSingleton<PullRequestWorkflow>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;
@@ -76,6 +90,7 @@ builder.Services.AddSingleton<PullRequestWorkflow>(sp =>
         sp.GetRequiredService<IReviewService>(),
         sp.GetRequiredService<IBranchService>(),
         sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<PullRequestWorkflow>>(),
+        sp.GetRequiredService<IRunBranchProvider>(),
         config.Project.DefaultBranch,
         sp.GetRequiredService<ConflictDetector>());
 });

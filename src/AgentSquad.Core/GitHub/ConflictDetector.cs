@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
 using Microsoft.Extensions.Logging;
 
@@ -13,27 +14,35 @@ public class ConflictDetector
 {
     private readonly IRepositoryContentService _repoContent;
     private readonly ILogger<ConflictDetector> _logger;
+    private readonly IRunBranchProvider? _branchProvider;
 
-    // Cache the main branch tree to avoid repeated API calls within a session
+    // Cache the branch tree to avoid repeated API calls within a session
     private IReadOnlyList<string>? _cachedTree;
+    private string? _cachedBranch;
     private DateTime _cacheExpiry = DateTime.MinValue;
     private static readonly TimeSpan CacheTtl = TimeSpan.FromMinutes(5);
 
-    public ConflictDetector(IRepositoryContentService repoContent, ILogger<ConflictDetector> logger)
+    public ConflictDetector(
+        IRepositoryContentService repoContent,
+        ILogger<ConflictDetector> logger,
+        IRunBranchProvider? branchProvider = null)
     {
         _repoContent = repoContent;
         _logger = logger;
+        _branchProvider = branchProvider;
     }
 
     /// <summary>
-    /// Gets the repository file tree from main, with 5-minute caching.
+    /// Gets the repository file tree from the effective branch, with 5-minute caching.
     /// </summary>
     public async Task<IReadOnlyList<string>> GetRepoTreeAsync(CancellationToken ct = default)
     {
-        if (_cachedTree is not null && DateTime.UtcNow < _cacheExpiry)
+        var branch = _branchProvider?.EffectiveBranch ?? "main";
+        if (_cachedTree is not null && DateTime.UtcNow < _cacheExpiry && _cachedBranch == branch)
             return _cachedTree;
 
-        _cachedTree = await _repoContent.GetRepositoryTreeAsync("main", ct);
+        _cachedTree = await _repoContent.GetRepositoryTreeAsync(branch, ct);
+        _cachedBranch = branch;
         _cacheExpiry = DateTime.UtcNow + CacheTtl;
         return _cachedTree;
     }

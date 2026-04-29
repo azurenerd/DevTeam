@@ -76,7 +76,7 @@ public sealed class WorkflowTestHarness : IDisposable
             return new ProjectFileManager(
                 sp.GetRequiredService<IRepositoryContentService>(),
                 sp.GetRequiredService<ILogger<ProjectFileManager>>(),
-                cfg.Project.DefaultBranch);
+                branch: cfg.Project.DefaultBranch);
         });
 
         // Orchestrator components

@@ -38,6 +38,7 @@ public class ArchitectAgent : AgentBase
     private readonly IPromptTemplateService _promptService;
     private readonly DecisionGateService? _decisionGate;
     private readonly IAgentTaskTracker _taskTracker;
+    private readonly IRunBranchProvider? _branchProvider;
 
     private readonly Queue<ArchitectureDirective>_taskQueue = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
@@ -67,7 +68,8 @@ public class ArchitectAgent : AgentBase
         IRepositoryContentService repoContent,
         IReviewService reviewService,
         RoleContextProvider? roleContextProvider = null,
-        DecisionGateService? decisionGate = null)
+        DecisionGateService? decisionGate = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -86,7 +88,10 @@ public class ArchitectAgent : AgentBase
         _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
         _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
         _decisionGate = decisionGate;
+        _branchProvider = branchProvider;
     }
+
+    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
@@ -1702,7 +1707,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
+            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
             var htmlDesignFiles = tree

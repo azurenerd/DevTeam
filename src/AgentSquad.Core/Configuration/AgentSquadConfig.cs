@@ -97,6 +97,14 @@ public class ProjectConfig
     /// Default: "AgentDocs".
     /// </summary>
     public string DocsFolderPath { get; set; } = "AgentDocs";
+
+    /// <summary>
+    /// Optional working branch. When set, all agent work (PRs, file commits, doc saves)
+    /// targets this branch instead of <see cref="DefaultBranch"/>. A human merges to
+    /// the default branch when the run is complete. When empty/null, agents work
+    /// directly on the default branch (current behavior).
+    /// </summary>
+    public string? WorkingBranch { get; set; }
 }
 
 public class ModelConfig

@@ -46,6 +46,7 @@ public class ProgramManagerAgent : AgentBase
     private readonly AgentTeamComposer? _teamComposer;
     private readonly SMEAgentDefinitionService? _definitionService;
     private readonly IAgentTaskTracker _taskTracker;
+    private readonly IRunBranchProvider? _branchProvider;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
@@ -92,7 +93,8 @@ public class ProgramManagerAgent : AgentBase
         IWorkItemService? workItemService = null,
         IRepositoryContentService? repoContent = null,
         IReviewService? reviewService = null,
-        IPlatformHostContext? platformHost = null)
+        IPlatformHostContext? platformHost = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, logger, memoryStore, roleContextProvider)
     {
         _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
@@ -117,7 +119,10 @@ public class ProgramManagerAgent : AgentBase
         _definitionService = definitionService;
         _decisionGate = decisionGate;
         _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
+        _branchProvider = branchProvider;
     }
+
+    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
@@ -602,7 +607,7 @@ public class ProgramManagerAgent : AgentBase
                         await _repoContent.CommitBinaryFileAsync(
                             fileName, bytes,
                             $"Add design input: {fileName}",
-                            _config.Project.DefaultBranch, ct);
+                            EffectiveBranch, ct);
                     }
                     else
                     {
@@ -1722,7 +1727,7 @@ public class ProgramManagerAgent : AgentBase
                 var mergedPrSummary = "";
                 try
                 {
-                    repoTree = (await _repoContent.GetRepositoryTreeAsync("main", ct)).ToList();
+                    repoTree = (await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct)).ToList();
                     var mergedPRs = await _prService.ListMergedAsync(ct);
                     var relevantMerged = mergedPRs
                         .Where(p => p.HeadBranch.StartsWith("agent/", StringComparison.OrdinalIgnoreCase))
@@ -3651,8 +3656,8 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
-            var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
+            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var designKeywords= new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
             var htmlDesignFiles = tree
                 .Where(f =>
@@ -3687,8 +3692,8 @@ public class ProgramManagerAgent : AgentBase
                 foreach (var screenshot in designScreenshots)
                 {
                     var fileName = Path.GetFileNameWithoutExtension(screenshot);
-                    var imageUrl = _platformHost?.GetRawFileUrl(screenshot, "main")
-                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/main/{screenshot}";
+                    var imageUrl = _platformHost?.GetRawFileUrl(screenshot, EffectiveBranch)
+                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{screenshot}";
                     sb.AppendLine($"### {fileName}");
                     sb.AppendLine();
                     sb.AppendLine($"![{fileName} design reference]({imageUrl})");
@@ -3791,8 +3796,8 @@ public class ProgramManagerAgent : AgentBase
         var results = new List<PullRequestWorkflow.ScreenshotImage>();
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync("main", ct);
-            var designPngs = tree
+            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var designPngs= tree
                 .Where(f => f.StartsWith("docs/design-screenshots/", StringComparison.OrdinalIgnoreCase) &&
                             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
                 .Take(3) // cap at 3 references to keep token usage sane
@@ -3817,8 +3822,8 @@ public class ProgramManagerAgent : AgentBase
                     try
                     {
                         using var http2 = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                        var htmlUrl = _platformHost?.GetRawFileUrl(designHtmlFiles[0], "main")
-                            ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/main/{designHtmlFiles[0]}";
+                        var htmlUrl = _platformHost?.GetRawFileUrl(designHtmlFiles[0], EffectiveBranch)
+                            ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{designHtmlFiles[0]}";
                         var htmlContent = await http2.GetStringAsync(htmlUrl, ct);
                         // Extract key structural elements (cap at 2000 chars to avoid token bloat)
                         var summary = ExtractDesignHtmlSummary(htmlContent, designHtmlFiles[0]);
@@ -3839,8 +3844,8 @@ public class ProgramManagerAgent : AgentBase
             {
                 try
                 {
-                    var url = _platformHost?.GetRawFileUrl(path, "main")
-                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/main/{path}";
+                    var url = _platformHost?.GetRawFileUrl(path, EffectiveBranch)
+                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{path}";
                     var resp = await http.GetAsync(url, ct);
                     if (!resp.IsSuccessStatusCode) continue;
                     var bytes = await resp.Content.ReadAsByteArrayAsync(ct);

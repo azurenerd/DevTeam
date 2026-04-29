@@ -1,5 +1,6 @@
 using System.Globalization;
 using AgentSquad.Core.Agents;
+using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
 using Microsoft.Extensions.Logging;
 
@@ -14,6 +15,7 @@ public class ProjectFileManager
 {
     private readonly IRepositoryContentService _repoContent;
     private readonly ILogger<ProjectFileManager> _logger;
+    private readonly IRunBranchProvider? _branchProvider;
     private readonly string? _branch;
     private readonly HashSet<string> _warnedMissingAgents = new(StringComparer.OrdinalIgnoreCase);
 
@@ -30,13 +32,21 @@ public class ProjectFileManager
     /// </summary>
     public string ArtifactBasePath { get; set; } = "";
 
+    /// <summary>
+    /// The branch to read/write files on. Uses the run's effective branch (working branch
+    /// if set, else default branch) via the provider, falling back to the constructor value.
+    /// </summary>
+    private string? ActiveBranch => _branchProvider?.EffectiveBranch ?? _branch;
+
     public ProjectFileManager(
         IRepositoryContentService repoContent,
         ILogger<ProjectFileManager> logger,
+        IRunBranchProvider? branchProvider = null,
         string? branch = null)
     {
         _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _branchProvider = branchProvider;
         _branch = branch;
     }
 
@@ -50,7 +60,7 @@ public class ProjectFileManager
     private async Task<string?> GetFileWithFallbackAsync(string fileName, CancellationToken ct)
     {
         var scopedPath = ResolvePath(fileName);
-        var content = await _repoContent.GetFileContentAsync(scopedPath, _branch, ct);
+        var content = await _repoContent.GetFileContentAsync(scopedPath, ActiveBranch, ct);
 
         if (content is not null || string.IsNullOrEmpty(ArtifactBasePath))
             return content;
@@ -96,7 +106,7 @@ public class ProjectFileManager
         await _repoContent.CreateOrUpdateFileAsync(
             ResolvePath(TeamMembersFile), updated,
             $"Add team member: {agent.DisplayName}",
-            _branch, ct);
+            ActiveBranch, ct);
     }
 
     /// <summary>
@@ -146,7 +156,7 @@ public class ProjectFileManager
             ResolvePath(TeamMembersFile),
             string.Join('\n', lines),
             $"Update {agentId} status to {newStatus}",
-            _branch, ct);
+            ActiveBranch, ct);
     }
 
     /// <summary>
@@ -189,7 +199,7 @@ public class ProjectFileManager
             ResolvePath(TeamMembersFile),
             string.Join('\n', lines),
             $"Remove team member: {agentId}",
-            _branch, ct);
+            ActiveBranch, ct);
     }
 
     #endregion
@@ -207,7 +217,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating EngineeringPlan.md at {Path}", ResolvePath(EngineeringPlanFile));
-        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(EngineeringPlanFile), content, "Update engineering plan", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(EngineeringPlanFile), content, "Update engineering plan", ActiveBranch, ct);
     }
 
     #endregion
@@ -225,7 +235,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating Architecture.md at {Path}", ResolvePath(ArchitectureFile));
-        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(ArchitectureFile), content, "Update architecture document", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(ArchitectureFile), content, "Update architecture document", ActiveBranch, ct);
     }
 
     #endregion
@@ -243,7 +253,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating Research.md at {Path}", ResolvePath(ResearchFile));
-        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(ResearchFile), content, "Update research document", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(ResearchFile), content, "Update research document", ActiveBranch, ct);
     }
 
     #endregion
@@ -261,7 +271,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating PMSpec.md at {Path}", ResolvePath(PMSpecFile));
-        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(PMSpecFile), content, "Update PM specification", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(PMSpecFile), content, "Update PM specification", ActiveBranch, ct);
     }
 
     #endregion
@@ -282,7 +292,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(content);
 
         _logger.LogInformation("Updating TeamComposition.md at {Path}", ResolvePath(TeamCompositionFile));
-        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(TeamCompositionFile), content, "Update team composition", _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(ResolvePath(TeamCompositionFile), content, "Update team composition", ActiveBranch, ct);
     }
 
     #endregion
@@ -295,7 +305,7 @@ public class ProjectFileManager
     public async Task<string?> GetFileAsync(string path, CancellationToken ct = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        return await _repoContent.GetFileContentAsync(path, _branch, ct);
+        return await _repoContent.GetFileContentAsync(path, ActiveBranch, ct);
     }
 
     /// <summary>
@@ -308,7 +318,7 @@ public class ProjectFileManager
         ArgumentException.ThrowIfNullOrWhiteSpace(commitMessage);
 
         _logger.LogInformation("Saving file {Path}", path);
-        await _repoContent.CreateOrUpdateFileAsync(path, content, commitMessage, _branch, ct);
+        await _repoContent.CreateOrUpdateFileAsync(path, content, commitMessage, ActiveBranch, ct);
     }
 
     #endregion

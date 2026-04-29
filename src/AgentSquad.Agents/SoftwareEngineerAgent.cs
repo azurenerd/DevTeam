@@ -168,11 +168,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         IRepositoryContentService? repoContent = null,
         IReviewService? reviewService = null,
         IBranchService? branchService = null,
-        IDocumentReferenceResolver? docResolver = null)
+        IDocumentReferenceResolver? docResolver = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, messageBus, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
-               prService, workItemService, repoContent, reviewService, branchService)
+               prService, workItemService, repoContent, reviewService, branchService, branchProvider)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
         _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
@@ -727,7 +728,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             try
             {
                 var issue = enhancementIssues[0];
-                var resolveContext = new DocumentResolutionContext(Config.Project.DefaultBranch);
+                var resolveContext = new DocumentResolutionContext(EffectiveBranch);
                 var resolvedDocs = await _docResolver.ResolveReferencesAsync(issue.Body ?? "", resolveContext, ct);
 
                 if (resolvedDocs.Count > 0)

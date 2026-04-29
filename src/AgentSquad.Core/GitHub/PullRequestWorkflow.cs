@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using AgentSquad.Core.AI;
+using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub.Models;
@@ -35,7 +36,14 @@ public partial class PullRequestWorkflow
     private readonly IReviewService _reviewService;
     private readonly IBranchService _branchService;
     private readonly ILogger<PullRequestWorkflow> _logger;
+    private readonly IRunBranchProvider? _branchProvider;
     private readonly string _defaultBranch;
+
+    /// <summary>
+    /// The branch that PRs target and agent branches are created from.
+    /// Uses the run's effective branch (working branch if set, else default).
+    /// </summary>
+    private string ActiveBranch => _branchProvider?.EffectiveBranch ?? _defaultBranch;
 
     public static class Labels
     {
@@ -87,6 +95,7 @@ public partial class PullRequestWorkflow
         IReviewService reviewService,
         IBranchService branchService,
         ILogger<PullRequestWorkflow> logger,
+        IRunBranchProvider? branchProvider = null,
         string defaultBranch = "main",
         ConflictDetector? conflictDetector = null)
     {
@@ -95,6 +104,7 @@ public partial class PullRequestWorkflow
         _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
         _branchService = branchService ?? throw new ArgumentNullException(nameof(branchService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _branchProvider = branchProvider;
         _defaultBranch = defaultBranch;
         _conflictDetector = conflictDetector;
     }
@@ -107,7 +117,7 @@ public partial class PullRequestWorkflow
     {
         try
         {
-            var allFiles = await _repoContent.GetRepositoryTreeAsync(_defaultBranch, ct);
+            var allFiles = await _repoContent.GetRepositoryTreeAsync(ActiveBranch, ct);
             var staleFiles = allFiles
                 .Where(f => f.StartsWith(".agentsquad/", StringComparison.OrdinalIgnoreCase))
                 .ToList();
@@ -119,13 +129,13 @@ public partial class PullRequestWorkflow
             }
 
             _logger.LogInformation("Cleaning up {Count} stale .agentsquad task files from {Branch}",
-                staleFiles.Count, _defaultBranch);
+                staleFiles.Count, ActiveBranch);
 
             foreach (var file in staleFiles)
             {
                 try
                 {
-                    await _repoContent.DeleteFileAsync(file, $"Cleanup stale task lock: {file}", _defaultBranch, ct);
+                    await _repoContent.DeleteFileAsync(file, $"Cleanup stale task lock: {file}", ActiveBranch, ct);
                     _logger.LogDebug("Deleted stale task file: {File}", file);
                 }
                 catch (Exception ex)
@@ -256,7 +266,7 @@ public partial class PullRequestWorkflow
         try
         {
             pr = (await _prService.CreateAsync(
-                prTitle, body, branchName, _defaultBranch, [.. labels], ct)).ToAgentPR();
+                prTitle, body, branchName, ActiveBranch, [.. labels], ct)).ToAgentPR();
         }
         catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
         {
@@ -309,7 +319,7 @@ public partial class PullRequestWorkflow
         try
         {
             pr = (await _prService.CreateAsync(
-                title, body, branchName, _defaultBranch, [.. prLabels], ct)).ToAgentPR();
+                title, body, branchName, ActiveBranch, [.. prLabels], ct)).ToAgentPR();
         }
         catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
         {
@@ -533,7 +543,7 @@ public partial class PullRequestWorkflow
         var normalizedTaskSlug = Slugify(taskSlug);
         var branchName = $"agent/{agentSlug}/{normalizedTaskSlug}";
 
-        _logger.LogInformation("Creating task branch {Branch} from {DefaultBranch}", branchName, _defaultBranch);
+        _logger.LogInformation("Creating task branch {Branch} from {DefaultBranch}", branchName, ActiveBranch);
 
         if (await _branchService.ExistsAsync(branchName, ct))
         {
@@ -541,7 +551,7 @@ public partial class PullRequestWorkflow
             return branchName;
         }
 
-        await _branchService.CreateAsync(branchName, _defaultBranch, ct);
+        await _branchService.CreateAsync(branchName, ActiveBranch, ct);
         return branchName;
     }
 
@@ -622,7 +632,7 @@ public partial class PullRequestWorkflow
         try
         {
             pr = (await _prService.CreateAsync(
-                fullPrTitle, prBody, branchName, _defaultBranch,
+                fullPrTitle, prBody, branchName, ActiveBranch,
                 [Labels.InProgress], ct)).ToAgentPR();
         }
         catch (PlatformConflictException ex) when (ex.Kind == PlatformConflictKind.AlreadyExists)
