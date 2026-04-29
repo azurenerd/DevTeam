@@ -197,16 +197,17 @@ public class AdoHttpClientBase : IDisposable
                     }
                 }
 
-                // Apply auth header
+                // Apply auth header — use provider's AuthScheme for reliable dispatch
                 var token = await _authProvider.GetTokenAsync(ct);
-                if (_config.AuthMethod == DevPlatformAuthMethod.Pat)
+                if (_authProvider.AuthScheme == "Bearer")
                 {
-                    var encoded = Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}"));
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
                 }
                 else
                 {
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+                    // PAT: Basic auth with base64(":token")
+                    var encoded = Convert.ToBase64String(Encoding.ASCII.GetBytes($":{token}"));
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
                 }
 
                 Interlocked.Increment(ref _totalCalls);

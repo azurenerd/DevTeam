@@ -69,8 +69,16 @@ public class AzureDevOpsConfig
     public string Pat { get; set; } = "";
 
     /// <summary>
+    /// Pre-supplied bearer token for ADO. Used when AuthMethod = AzureCliBearer.
+    /// When set, this token is used directly instead of calling az CLI.
+    /// Store via user secrets: dotnet user-secrets set "AgentSquad:DevPlatform:AzureDevOps:BearerToken" "token"
+    /// Bearer tokens expire (~1 hour) — use for testing or short-lived runs.
+    /// </summary>
+    public string BearerToken { get; set; } = "";
+
+    /// <summary>
     /// Azure AD tenant ID for bearer token auth (e.g., "72f988bf-86f1-41af-91ab-2d7cd011db47").
-    /// Used when AuthMethod = AzureCliBearer.
+    /// Used when AuthMethod = AzureCliBearer and no BearerToken is pre-supplied.
     /// </summary>
     public string TenantId { get; set; } = "";
 

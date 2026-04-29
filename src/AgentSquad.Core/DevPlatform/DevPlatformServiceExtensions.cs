@@ -33,8 +33,10 @@ public static class DevPlatformServiceExtensions
                 DevPlatformType.AzureDevOps => config.AuthMethod switch
                 {
                     DevPlatformAuthMethod.Pat => new PatAuthProvider(config.AzureDevOps?.Pat ?? ""),
-                    DevPlatformAuthMethod.AzureCliBearer => ActivatorUtilities.CreateInstance<AzureCliBearerProvider>(
-                        sp, config.AzureDevOps?.TenantId ?? (object)""),
+                    DevPlatformAuthMethod.AzureCliBearer => !string.IsNullOrWhiteSpace(config.AzureDevOps?.BearerToken)
+                        ? new StaticBearerAuthProvider(config.AzureDevOps.BearerToken)
+                        : ActivatorUtilities.CreateInstance<AzureCliBearerProvider>(
+                            sp, config.AzureDevOps?.TenantId ?? (object)""),
                     _ => new PatAuthProvider(config.AzureDevOps?.Pat ?? "")
                 },
                 _ => new PatAuthProvider("")

@@ -152,7 +152,16 @@ public sealed class DevelopSettingsService : IDisposable
                 config.DevPlatform.AzureDevOps.DefaultBranch = settings.AzureDevOps.DefaultBranch;
         }
 
-        _logger.LogDebug("Merged develop settings into config (platform={Platform})", settings.Platform);
+        // Map auth method
+        config.DevPlatform.AuthMethod = settings.AuthMethod switch
+        {
+            "AzureCliBearer" => DevPlatformAuthMethod.AzureCliBearer,
+            "ServicePrincipal" => DevPlatformAuthMethod.ServicePrincipal,
+            _ => DevPlatformAuthMethod.Pat
+        };
+
+        _logger.LogDebug("Merged develop settings into config (platform={Platform}, auth={AuthMethod})",
+            settings.Platform, settings.AuthMethod);
     }
 
     /// <summary>

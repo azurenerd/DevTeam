@@ -3,6 +3,7 @@
 @using AgentSquad.Core.DevPlatform.Capabilities
 @using System.Timers
 @using AgentSquad.Core.DevPlatform.Config
+@using System.Net.Http.Json
 @using AgentSquad.Dashboard.Services
 @inject DevelopSettingsService SettingsService
 @inject IWorkItemSearchService WorkItemSearch
@@ -249,62 +250,147 @@ else
                     <span class="config-card-title">Authentication</span>
                 </div>
                 <div class="config-card-body">
-                    <div class="config-field">
-                        <label>Personal Access Token (PAT)</label>
-                        @if (_hasUserSecretsPat && !_overridePat)
-                        {
-                            <div class="config-pat-result config-pat-success" style="margin-bottom:0.5rem;">
-                                ✓ PAT configured via User Secrets
-                            </div>
-                            <p class="config-hint">
-                                Your PAT is securely stored in .NET User Secrets and will be used automatically.
-                                <button class="config-btn-inline" style="margin-left:0.5rem;" @onclick="() => _overridePat = true" type="button">
-                                    Use a different PAT
-                                </button>
-                            </p>
-                        }
-                        else
-                        {
-                            <div class="config-pat-row">
-                                <div class="config-secret-field" style="flex:1;">
-                                    <input type="@(_showPat ? "text" : "password")" class="config-input"
-                                           placeholder="Paste your PAT here…"
-                                           @bind="_patInput" @bind:event="oninput" />
-                                    <button class="config-secret-toggle" @onclick="() => _showPat = !_showPat" type="button">
-                                        @(_showPat ? "🙈" : "👁️")
-                                    </button>
+                    <!-- Auth Method Toggle -->
+                    <div class="config-field" style="margin-bottom:1rem;">
+                        <label>Auth Method</label>
+                        <div class="auth-method-toggle">
+                            <button type="button"
+                                    class="auth-method-btn @(_settings.AuthMethod == "Pat" ? "auth-method-active" : "")"
+                                    @onclick="() => SwitchAuthMethod("Pat")">
+                                🔑 PAT
+                            </button>
+                            <button type="button"
+                                    class="auth-method-btn @(_settings.AuthMethod == "AzureCliBearer" ? "auth-method-active" : "")"
+                                    @onclick="() => SwitchAuthMethod("AzureCliBearer")">
+                                🎫 Bearer Token
+                            </button>
+                        </div>
+                    </div>
+
+                    @if (_settings.AuthMethod == "Pat")
+                    {
+                        <!-- PAT Input -->
+                        <div class="config-field">
+                            <label>Personal Access Token (PAT)</label>
+                            @if (_hasUserSecretsPat && !_overridePat)
+                            {
+                                <div class="config-pat-result config-pat-success" style="margin-bottom:0.5rem;">
+                                    ✓ PAT configured via User Secrets
                                 </div>
-                                <button class="config-validate-btn @(_patVerified == true ? "config-validate-success" : "")"
-                                        @onclick="VerifyPatAsync" disabled="@(_patVerifying || string.IsNullOrWhiteSpace(_patInput))">
-                                    @if (_patVerifying) { <span class="config-spinner-sm"></span> }
-                                    else { <span>Verify</span> }
-                                </button>
-                            </div>
-                            @if (_patVerified == true)
-                            {
-                                <div class="config-pat-result config-pat-success">✓ PAT is valid</div>
-                            }
-                            else if (_patVerified == false)
-                            {
-                                <div class="config-pat-result config-pat-error">✕ @(_patError ?? "PAT validation failed")</div>
-                            }
-                            @if (_overridePat)
-                            {
                                 <p class="config-hint">
-                                    <button class="config-btn-inline" @onclick="() => { _overridePat = false; _patInput = string.Empty; _patVerified = null; }" type="button">
-                                        ← Keep using User Secrets
+                                    Your PAT is securely stored in .NET User Secrets and will be used automatically.
+                                    <button class="config-btn-inline" style="margin-left:0.5rem;" @onclick="() => _overridePat = true" type="button">
+                                        Use a different PAT
                                     </button>
                                 </p>
                             }
                             else
                             {
+                                <div class="config-pat-row">
+                                    <div class="config-secret-field" style="flex:1;">
+                                        <input type="@(_showPat ? "text" : "password")" class="config-input"
+                                               placeholder="Paste your PAT here…"
+                                               @bind="_patInput" @bind:event="oninput" />
+                                        <button class="config-secret-toggle" @onclick="() => _showPat = !_showPat" type="button">
+                                            @(_showPat ? "🙈" : "👁️")
+                                        </button>
+                                    </div>
+                                    <button class="config-validate-btn @(_patVerified == true ? "config-validate-success" : "")"
+                                            @onclick="VerifyPatAsync" disabled="@(_patVerifying || string.IsNullOrWhiteSpace(_patInput))">
+                                        @if (_patVerifying) { <span class="config-spinner-sm"></span> }
+                                        else { <span>Verify</span> }
+                                    </button>
+                                </div>
+                                @if (_patVerified == true)
+                                {
+                                    <div class="config-pat-result config-pat-success">✓ PAT is valid</div>
+                                }
+                                else if (_patVerified == false)
+                                {
+                                    <div class="config-pat-result config-pat-error">✕ @(_patError ?? "PAT validation failed")</div>
+                                }
+                                @if (_overridePat)
+                                {
+                                    <p class="config-hint">
+                                        <button class="config-btn-inline" @onclick="() => { _overridePat = false; _patInput = string.Empty; _patVerified = null; }" type="button">
+                                            ← Keep using User Secrets
+                                        </button>
+                                    </p>
+                                }
+                                else
+                                {
+                                    <p class="config-hint">
+                                        💡 Prefer User Secrets over pasting here:
+                                        <code>dotnet user-secrets set "AgentSquad:DevPlatform:@(_settings.Platform):Pat" "your-pat"</code>
+                                    </p>
+                                }
+                            }
+                        </div>
+                    }
+                    else
+                    {
+                        <!-- Bearer Token Input -->
+                        <div class="config-field">
+                            <label>Bearer Token</label>
+                            @if (_hasUserSecretsBearer && !_overrideBearer)
+                            {
+                                <div class="config-pat-result config-pat-success" style="margin-bottom:0.5rem;">
+                                    ✓ Bearer token configured via User Secrets
+                                </div>
                                 <p class="config-hint">
-                                    💡 Prefer User Secrets over pasting here:
-                                    <code>dotnet user-secrets set "AgentSquad:DevPlatform:@(_settings.Platform):Pat" "your-pat"</code>
+                                    Your bearer token is securely stored in .NET User Secrets and will be used automatically.
+                                    <button class="config-btn-inline" style="margin-left:0.5rem;" @onclick="() => _overrideBearer = true" type="button">
+                                        Use a different token
+                                    </button>
                                 </p>
                             }
-                        }
-                    </div>
+                            else
+                            {
+                                <div class="config-pat-row">
+                                    <div class="config-secret-field" style="flex:1;">
+                                        <input type="@(_showBearer ? "text" : "password")" class="config-input"
+                                               placeholder="Paste your bearer token here…"
+                                               @bind="_bearerInput" @bind:event="oninput" />
+                                        <button class="config-secret-toggle" @onclick="() => _showBearer = !_showBearer" type="button">
+                                            @(_showBearer ? "🙈" : "👁️")
+                                        </button>
+                                    </div>
+                                    <button class="config-validate-btn @(_bearerVerified == true ? "config-validate-success" : "")"
+                                            @onclick="VerifyBearerAsync" disabled="@(_bearerVerifying || string.IsNullOrWhiteSpace(_bearerInput))">
+                                        @if (_bearerVerifying) { <span class="config-spinner-sm"></span> }
+                                        else { <span>Verify</span> }
+                                    </button>
+                                </div>
+                                @if (_bearerVerified == true)
+                                {
+                                    <div class="config-pat-result config-pat-success">✓ Bearer token is valid — authenticated as @_bearerUser</div>
+                                }
+                                else if (_bearerVerified == false)
+                                {
+                                    <div class="config-pat-result config-pat-error">✕ @(_bearerError ?? "Bearer token validation failed")</div>
+                                }
+                                @if (_overrideBearer)
+                                {
+                                    <p class="config-hint">
+                                        <button class="config-btn-inline" @onclick="() => { _overrideBearer = false; _bearerInput = string.Empty; _bearerVerified = null; }" type="button">
+                                            ← Keep using User Secrets
+                                        </button>
+                                    </p>
+                                }
+                                else
+                                {
+                                    <p class="config-hint">
+                                        💡 Prefer User Secrets over pasting here:
+                                        <code>dotnet user-secrets set "AgentSquad:DevPlatform:AzureDevOps:BearerToken" "your-token"</code>
+                                    </p>
+                                }
+                            }
+                            <div class="config-hint" style="margin-top:0.5rem; padding:0.5rem; background:var(--bg-card-alt, #1a1a2e); border-radius:6px;">
+                                ⏱️ Bearer tokens expire in ~1 hour. Get one with:<br/>
+                                <code style="font-size:0.8rem;">az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken -o tsv</code>
+                            </div>
+                        </div>
+                    }
                 </div>
             </div>
         }
@@ -389,9 +475,10 @@ else
                     {
                         <div class="wizard-warning">⚠ Description is empty — agents need to know what to build.</div>
                     }
-                    @if (_patVerified != true && string.IsNullOrWhiteSpace(_patInput) && !_hasUserSecretsPat)
+                    @if (_patVerified != true && string.IsNullOrWhiteSpace(_patInput) && !_hasUserSecretsPat
+                         && _bearerVerified != true && string.IsNullOrWhiteSpace(_bearerInput) && !_hasUserSecretsBearer)
                     {
-                        <div class="wizard-warning">⚠ No PAT configured — agents may not be able to access the repository.</div>
+                        <div class="wizard-warning">⚠ No authentication configured — agents may not be able to access the repository.</div>
                     }
                     @if (!_settings.CreateNewRepo && !_repoCreated && _repoVerified != true)
                     {
@@ -441,10 +528,20 @@ else
                             <div class="wizard-summary-row">
                                 <span class="wizard-summary-label">Auth</span>
                                 <span class="wizard-summary-value">
-                                    @if (_patVerified == true) { <span style="color:var(--accent-green);">✓ PAT verified</span> }
-                                    else if (!string.IsNullOrWhiteSpace(_patInput)) { <span style="color:#f0c674;">PAT entered (not verified)</span> }
-                                    else if (_hasUserSecretsPat) { <span style="color:var(--accent-green);">✓ Configured via User Secrets</span> }
-                                    else { <span style="color:var(--text-secondary);">Not configured</span> }
+                                    @if (_settings.AuthMethod == "AzureCliBearer")
+                                    {
+                                        @if (_bearerVerified == true) { <span style="color:var(--accent-green);">✓ Bearer verified (@_bearerUser)</span> }
+                                        else if (!string.IsNullOrWhiteSpace(_bearerInput)) { <span style="color:#f0c674;">Bearer entered (not verified)</span> }
+                                        else if (_hasUserSecretsBearer) { <span style="color:var(--accent-green);">✓ Bearer via User Secrets</span> }
+                                        else { <span style="color:var(--text-secondary);">Not configured</span> }
+                                    }
+                                    else
+                                    {
+                                        @if (_patVerified == true) { <span style="color:var(--accent-green);">✓ PAT verified</span> }
+                                        else if (!string.IsNullOrWhiteSpace(_patInput)) { <span style="color:#f0c674;">PAT entered (not verified)</span> }
+                                        else if (_hasUserSecretsPat) { <span style="color:var(--accent-green);">✓ Configured via User Secrets</span> }
+                                        else { <span style="color:var(--text-secondary);">Not configured</span> }
+                                    }
                                 </span>
                             </div>
                         </div>
@@ -538,7 +635,7 @@ else
     private bool _loading = true;
     private string? _globalError;
 
-    // Step 2 state
+    // Step 2 state — PAT
     private string _patInput = "";
     private bool _showPat;
     private bool _patVerifying;
@@ -546,6 +643,16 @@ else
     private string? _patError;
     private bool _hasUserSecretsPat;
     private bool _overridePat;
+    // Step 2 state — Bearer Token
+    private string _bearerInput = "";
+    private bool _showBearer;
+    private bool _bearerVerifying;
+    private bool? _bearerVerified;
+    private string? _bearerError;
+    private string? _bearerUser;
+    private bool _hasUserSecretsBearer;
+    private bool _overrideBearer;
+    // Step 2 state — Repo
     private bool _repoVerifying;
     private bool? _repoVerified;
     private string? _repoError;
@@ -590,7 +697,7 @@ else
                 _ = LoadLinkedWorkItemAsync(_settings.ParentWorkItemId.Value);
             }
 
-            // Check if a PAT is already configured via User Secrets / runtime config
+            // Check if a PAT or Bearer token is already configured via User Secrets / runtime config
             try
             {
                 var config = ConfigService.GetCurrentConfig();
@@ -600,10 +707,13 @@ else
                     "GitHub" => !string.IsNullOrWhiteSpace(config.Project?.GitHubToken),
                     _ => false
                 };
+                _hasUserSecretsBearer = _settings.Platform == "AzureDevOps"
+                    && !string.IsNullOrWhiteSpace(config.DevPlatform?.AzureDevOps?.BearerToken);
             }
             catch
             {
                 _hasUserSecretsPat = false;
+                _hasUserSecretsBearer = false;
             }
         }
         catch (Exception ex)
@@ -718,6 +828,70 @@ else
             _patVerifying = false;
         }
         await Task.CompletedTask;
+    }
+
+    private void SwitchAuthMethod(string method)
+    {
+        _settings.AuthMethod = method;
+        // Reset verification state when switching
+        _patVerified = null;
+        _patError = null;
+        _bearerVerified = null;
+        _bearerError = null;
+        _bearerUser = null;
+    }
+
+    private async Task VerifyBearerAsync()
+    {
+        _bearerVerifying = true;
+        _bearerVerified = null;
+        _bearerError = null;
+        _bearerUser = null;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(_bearerInput) || _bearerInput.Length < 100)
+            {
+                _bearerVerified = false;
+                _bearerError = "Bearer token appears too short. ADO bearer tokens are typically 2000+ characters.";
+                return;
+            }
+
+            // Live verification: call ADO connection data API with the bearer token
+            var org = _settings.AzureDevOps.Organization;
+            if (string.IsNullOrWhiteSpace(org))
+            {
+                _bearerVerified = false;
+                _bearerError = "Set the ADO organization first so we can verify the token.";
+                return;
+            }
+
+            using var http = new HttpClient();
+            http.DefaultRequestHeaders.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _bearerInput.Trim());
+            var resp = await http.GetAsync($"https://dev.azure.com/{org}/_apis/connectionData");
+            if (resp.IsSuccessStatusCode)
+            {
+                var json = await resp.Content.ReadFromJsonAsync<System.Text.Json.JsonElement>();
+                _bearerUser = json.GetProperty("authenticatedUser")
+                    .GetProperty("providerDisplayName").GetString() ?? "Unknown";
+                _bearerVerified = true;
+            }
+            else
+            {
+                _bearerVerified = false;
+                _bearerError = $"ADO returned {(int)resp.StatusCode}. Token may be expired or invalid for org '{org}'.";
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Bearer token verification failed");
+            _bearerVerified = false;
+            _bearerError = ex.Message;
+        }
+        finally
+        {
+            _bearerVerifying = false;
+        }
     }
 
     private async Task CreateRepoAsync()
@@ -882,6 +1056,35 @@ else
 }
 
 <style>
+    /* ── Auth Method Toggle ── */
+    .auth-method-toggle {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    .auth-method-btn {
+        padding: 0.4rem 1rem;
+        border: 1px solid var(--border-card, #2a2a2a);
+        border-radius: 6px;
+        background: var(--bg-card, #1e1e2e);
+        color: var(--text-secondary, #888);
+        cursor: pointer;
+        font-size: 0.85rem;
+        transition: all 0.15s ease;
+    }
+
+    .auth-method-btn:hover {
+        border-color: var(--accent-cyan, #00e5ff);
+        color: var(--text-primary, #e0e0e0);
+    }
+
+    .auth-method-btn.auth-method-active {
+        border-color: var(--accent-cyan, #00e5ff);
+        background: rgba(0, 229, 255, 0.1);
+        color: var(--accent-cyan, #00e5ff);
+        font-weight: 600;
+    }
+
     /* ── Wizard Step Indicator ── */
     .wizard-steps {
         display: flex;

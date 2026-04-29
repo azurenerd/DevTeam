@@ -74,22 +74,35 @@ public sealed class AzureCliBearerProvider : IDevPlatformAuthProvider, IDisposab
         }
     }
 
+    private bool _initialLoginDone;
+
     private async Task<(string Token, DateTime ExpiresAt)> AcquireTokenAsync(CancellationToken ct)
     {
-        // Step 1: Ensure we're logged into the right tenant
-        if (!string.IsNullOrEmpty(_tenantId))
+        // Only run az login on the very first call (if tenant is specified).
+        // Subsequent calls just get-access-token — az CLI caches refresh tokens
+        // and can silently renew without interactive login.
+        if (!_initialLoginDone && !string.IsNullOrEmpty(_tenantId))
         {
-            await RunAzCommandAsync($"login --tenant {_tenantId} --allow-no-subscriptions", ct, timeoutSeconds: 60);
+            try
+            {
+                await RunAzCommandAsync($"login --tenant {_tenantId} --allow-no-subscriptions", ct, timeoutSeconds: 60);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "az login failed — assuming user is already logged in. " +
+                    "Run 'az login --allow-no-subscriptions' manually if token acquisition fails.");
+            }
+            _initialLoginDone = true;
         }
 
-        // Step 2: Get the access token
+        // Get the access token (silently refreshes from cached az CLI session)
         var token = await RunAzCommandAsync(
             $"account get-access-token --resource {AdoResourceId} --query accessToken -o tsv",
             ct, timeoutSeconds: 30);
 
         if (string.IsNullOrWhiteSpace(token))
             throw new InvalidOperationException(
-                "Azure CLI returned empty token. Run 'az login' manually and retry.");
+                "Azure CLI returned empty token. Run 'az login --allow-no-subscriptions' manually and retry.");
 
         // ADO bearer tokens typically expire in 1 hour
         var expiresAt = DateTime.UtcNow.AddMinutes(55);
