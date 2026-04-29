@@ -1944,17 +1944,8 @@ public class TestEngineerAgent : AgentBase
                     continue;
                 }
 
-                // If architect approved, it's an untested code PR the TE should handle
-                if (isArchitectApproved)
-                {
-                    untestedCodePRs++;
-                }
-                else
-                {
-                    // PM-approved or ready-for-review but not architect-approved:
-                    // count as "already covered" since review happened out of order
-                    alreadyTestedPRs++;
-                }
+                // Any reviewed PR (architect-approved, pm-approved, or ready-for-review) needs testing
+                untestedCodePRs++;
             }
         }
         else
