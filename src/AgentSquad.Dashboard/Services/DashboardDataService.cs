@@ -124,6 +124,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly IPlatformHostContext _platformHost;
     private readonly RateLimitManager _rateLimitManager;
     private readonly IAgentTaskTracker? _taskTracker;
+    private readonly IRepositoryContentService? _repositoryContentService;
+    private readonly IRunBranchProvider? _branchProvider;
     private readonly ILogger<DashboardDataService> _logger;
 
     private readonly Dictionary<string, AgentSnapshot> _agentCache = new();
@@ -160,7 +162,9 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         IPlatformHostContext platformHost,
         RateLimitManager rateLimitManager,
         ILogger<DashboardDataService> logger,
-        IAgentTaskTracker? taskTracker = null)
+        IAgentTaskTracker? taskTracker = null,
+        IRepositoryContentService? repositoryContentService = null,
+        IRunBranchProvider? branchProvider = null)
     {
         _registry = registry;
         _healthMonitor = healthMonitor;
@@ -177,6 +181,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _rateLimitManager = rateLimitManager;
         _logger = logger;
         _taskTracker = taskTracker;
+        _repositoryContentService = repositoryContentService;
+        _branchProvider = branchProvider;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -1271,6 +1277,53 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                 Interlocked.Exchange(ref _backgroundRefreshScheduled, 0);
             }
         });
+    }
+
+    // ── Repository file browsing ──
+
+    public async Task<RepositoryFileTreeResult> GetRepositoryFileTreeAsync(string? branch = null, CancellationToken ct = default)
+    {
+        var effectiveBranch = branch ?? _branchProvider?.EffectiveBranch ?? "main";
+        if (_repositoryContentService is null)
+            return new RepositoryFileTreeResult { Branch = effectiveBranch, Files = Array.Empty<string>() };
+
+        var files = await _repositoryContentService.GetRepositoryTreeAsync(effectiveBranch, ct);
+        return new RepositoryFileTreeResult { Branch = effectiveBranch, Files = files };
+    }
+
+    public async Task<RepositoryFileContentResult?> GetFileContentWithMetadataAsync(string path, string? branch = null, CancellationToken ct = default)
+    {
+        var effectiveBranch = branch ?? _branchProvider?.EffectiveBranch ?? "main";
+        if (_repositoryContentService is null)
+            return null;
+
+        if (RepositoryFileContentResult.IsBinaryPath(path))
+        {
+            return new RepositoryFileContentResult
+            {
+                Path = path,
+                IsBinary = true,
+                Content = null,
+                ContentType = RepositoryFileContentResult.InferContentType(path)
+            };
+        }
+
+        var content = await _repositoryContentService.GetFileContentAsync(path, effectiveBranch, ct);
+        if (content is null) return null;
+
+        const int maxDisplayBytes = 100 * 1024;
+        var wasTruncated = content.Length > maxDisplayBytes;
+        var displayContent = wasTruncated ? content[..maxDisplayBytes] : content;
+
+        return new RepositoryFileContentResult
+        {
+            Path = path,
+            IsBinary = false,
+            SizeBytes = content.Length,
+            Content = displayContent,
+            WasTruncated = wasTruncated,
+            ContentType = RepositoryFileContentResult.InferContentType(path)
+        };
     }
 
     // Observable event for Blazor components to subscribe to for re-rendering

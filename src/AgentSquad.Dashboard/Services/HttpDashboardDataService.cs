@@ -361,9 +361,48 @@ public sealed class HttpDashboardDataService : IDashboardDataService, IHostedSer
         return _cachedTotalCalls;
     }
 
+    public async Task<RepositoryFileTreeResult> GetRepositoryFileTreeAsync(string? branch = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var url = branch is not null ? $"api/dashboard/platform/tree?branch={Uri.EscapeDataString(branch)}" : "api/dashboard/platform/tree";
+            var result = await _http.GetFromJsonAsync<TreeResponse>(url, ct);
+            return new RepositoryFileTreeResult
+            {
+                Branch = result?.Branch ?? "main",
+                Files = result?.Files ?? Array.Empty<string>()
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch repository tree");
+            return new RepositoryFileTreeResult { Branch = branch ?? "main", Files = Array.Empty<string>() };
+        }
+    }
+
+    public async Task<RepositoryFileContentResult?> GetFileContentWithMetadataAsync(string path, string? branch = null, CancellationToken ct = default)
+    {
+        try
+        {
+            var url = $"api/dashboard/platform/file?path={Uri.EscapeDataString(path)}";
+            if (branch is not null) url += $"&branch={Uri.EscapeDataString(branch)}";
+            return await _http.GetFromJsonAsync<RepositoryFileContentResult>(url, ct);
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to fetch file content for {Path}", path);
+            return null;
+        }
+    }
+
     // DTOs for deserialization
     private record DeadlockResponse(bool HasDeadlock, List<string>? Cycle);
     private record RateLimitResponse(bool IsRateLimited);
     private record CostSummaryResponse(decimal TotalCost, int TotalCalls);
     private record RepoInfoResponse(string FullName);
+    private record TreeResponse(string Branch, string[] Files);
 }

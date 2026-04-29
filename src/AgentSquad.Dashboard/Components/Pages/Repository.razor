@@ -26,6 +26,9 @@
     <button class="repo-tab @(_activeTab == "issues" ? "active" : "")" @onclick='() => SwitchTab("issues")'>
         📋 Issues <span class="repo-tab-count">@_allIssues.Count</span>
     </button>
+    <button class="repo-tab" @onclick="NavigateToFiles">
+        📁 Files
+    </button>
 </div>
 
 @if (_loading)
@@ -310,6 +313,8 @@ else
         _showAssigneeDropdown = false;
         _showSortDropdown = false;
     }
+
+    private void NavigateToFiles() => Navigation.NavigateTo("/repository/files");
 
     // ── PR methods ──
     private void SetPrFilter(string filter) { _prFilter = filter; ApplyPrFilter(); }

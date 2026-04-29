@@ -296,10 +296,45 @@ api.MapGet("/metrics/aggregates", async (AgentSquad.Core.Metrics.BuildTestMetric
 api.MapGet("/repo-info", (DashboardDataService svc) =>
     Results.Ok(new { FullName = svc.RepositoryDisplayName }));
 
-api.MapGet("/platform/file", async (string path, IGitHubService github, CancellationToken ct) =>
+api.MapGet("/platform/file", async (string path, string? branch, IRepositoryContentService repoContent, IRunBranchProvider branchProvider, CancellationToken ct) =>
 {
-    var content = await github.GetFileContentAsync(path, ct: ct);
-    return content is not null ? Results.Ok(new { content }) : Results.NotFound();
+    var effectiveBranch = branch ?? branchProvider.EffectiveBranch;
+    var isBinary = AgentSquad.Core.DevPlatform.Models.RepositoryFileContentResult.IsBinaryPath(path);
+
+    if (isBinary)
+    {
+        return Results.Ok(new AgentSquad.Core.DevPlatform.Models.RepositoryFileContentResult
+        {
+            Path = path,
+            IsBinary = true,
+            Content = null,
+            ContentType = AgentSquad.Core.DevPlatform.Models.RepositoryFileContentResult.InferContentType(path)
+        });
+    }
+
+    var content = await repoContent.GetFileContentAsync(path, effectiveBranch, ct);
+    if (content is null) return Results.NotFound();
+
+    const int maxDisplayBytes = 100 * 1024; // 100KB
+    var wasTruncated = content.Length > maxDisplayBytes;
+    var displayContent = wasTruncated ? content[..maxDisplayBytes] : content;
+
+    return Results.Ok(new AgentSquad.Core.DevPlatform.Models.RepositoryFileContentResult
+    {
+        Path = path,
+        IsBinary = false,
+        SizeBytes = content.Length,
+        Content = displayContent,
+        WasTruncated = wasTruncated,
+        ContentType = AgentSquad.Core.DevPlatform.Models.RepositoryFileContentResult.InferContentType(path)
+    });
+});
+
+api.MapGet("/platform/tree", async (string? branch, IRepositoryContentService repoContent, IRunBranchProvider branchProvider, CancellationToken ct) =>
+{
+    var effectiveBranch = branch ?? branchProvider.EffectiveBranch;
+    var files = await repoContent.GetRepositoryTreeAsync(effectiveBranch, ct);
+    return Results.Ok(new { branch = effectiveBranch, files });
 });
 
 // ── Configuration REST API (consumed by standalone Dashboard.Host) ──

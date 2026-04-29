@@ -63,6 +63,12 @@ public interface IDashboardDataService
     decimal GetTotalEstimatedCost();
     int GetTotalAiCalls();
 
+    // Repository file browsing
+    /// <summary>Get the file tree for the effective branch. Returns flat file paths.</summary>
+    Task<RepositoryFileTreeResult> GetRepositoryFileTreeAsync(string? branch = null, CancellationToken ct = default);
+    /// <summary>Get file content with metadata (binary detection, truncation).</summary>
+    Task<RepositoryFileContentResult?> GetFileContentWithMetadataAsync(string path, string? branch = null, CancellationToken ct = default);
+
     // Change notification
     event Action? OnChange;
 }
