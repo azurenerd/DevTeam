@@ -1643,14 +1643,29 @@ public class ProgramManagerAgent : AgentBase
                     // Close them only when ALL engineering tasks are done AND no open code PRs remain.
                     if (_config.Limits.SinglePRMode)
                     {
-                        // Guard: don't close if any engineering tasks are still in progress
-                        var engineeringTasks = await _workItemService!.ListByLabelAsync(
-                            EngineeringTaskIssueManager.TaskLabel, "open", ct);
-                        if (engineeringTasks.Count > 0)
+                        // Guard: don't close until engineering tasks have been created AND all are done.
+                        // Without this, the PM would close stories as soon as a doc PR merges (e.g.,
+                        // Architecture.md) because "no open tasks" is trivially true when no tasks exist.
+                        var allEngineeringTasks = await _workItemService!.ListByLabelAsync(
+                            EngineeringTaskIssueManager.TaskLabel, null, ct);
+                        if (allEngineeringTasks.Count == 0)
+                        {
+                            Logger.LogDebug(
+                                "SinglePRMode: No engineering tasks exist yet — SE phase hasn't started. Deferring closure of #{Number}",
+                                issue.Number);
+                            continue;
+                        }
+
+                        var openEngineeringTasks = allEngineeringTasks
+                            .Where(t => !string.Equals(t.State, "closed", StringComparison.OrdinalIgnoreCase) &&
+                                        !string.Equals(t.State, "done", StringComparison.OrdinalIgnoreCase) &&
+                                        !string.Equals(t.State, "removed", StringComparison.OrdinalIgnoreCase))
+                            .ToList();
+                        if (openEngineeringTasks.Count > 0)
                         {
                             Logger.LogDebug(
                                 "SinglePRMode: {Count} engineering tasks still open — deferring closure of #{Number}",
-                                engineeringTasks.Count, issue.Number);
+                                openEngineeringTasks.Count, issue.Number);
                             continue;
                         }
 

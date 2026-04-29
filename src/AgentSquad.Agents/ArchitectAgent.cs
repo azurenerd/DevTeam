@@ -104,33 +104,9 @@ public class ArchitectAgent : AgentBase
         _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
             Identity.Id, HandleReviewRequestAsync));
 
-        // Recovery: check if Architecture.md already exists from a prior run
-        // Must verify content has real architecture sections, not just any file content
-        try
-        {
-            var archDoc = await _projectFiles.GetArchitectureDocAsync(ct);
-            if (!string.IsNullOrWhiteSpace(archDoc)
-                && !archDoc.Contains("No architecture document has been created yet", StringComparison.OrdinalIgnoreCase)
-                && archDoc.Length > 200
-                && archDoc.Contains("## System Components", StringComparison.OrdinalIgnoreCase))
-            {
-                _architectureComplete = true;
-                Logger.LogInformation("Architect recovered: Architecture.md already exists with valid sections, moving to PR review mode");
-                _reasoningLog.Log(new AgentReasoningEvent
-                {
-                    AgentId = Identity.Id,
-                    AgentDisplayName = Identity.DisplayName,
-                    EventType = AgentReasoningEventType.Decision,
-                    Phase = "Architecture",
-                    Summary = "Architecture.md already exists — skipping design phase",
-                    Detail = "Detected existing architecture document with valid System Components sections (>200 chars). Transitioning directly to PR review/monitoring mode."
-                });
-            }
-        }
-        catch (Exception ex)
-        {
-            Logger.LogWarning(ex, "Failed to check for existing Architecture.md during init");
-        }
+        // NOTE: Idempotency check for existing Architecture.md is performed inside
+        // DesignArchitectureAsync (not here) because EffectiveBranch isn't set yet
+        // during init — the run hasn't started. Checking here reads from the wrong branch.
 
         Logger.LogInformation("Architect agent initialized, awaiting PMSpec completion");
     }
