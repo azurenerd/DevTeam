@@ -542,12 +542,18 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
                     ? DateTime.UtcNow
                     : cached.LastStatusChange;
 
-                var currentStep = _taskTracker?.GetCurrentStep(e.Agent.Id);
+                // Only show step info when agent is actively working — prevents stale
+                // "Step 16/17" display after the agent transitions to Idle.
+                AgentTaskStep? currentStep = null;
                 string? taskName = null;
-                if (currentStep is not null && _taskTracker is not null)
+                if (e.NewStatus == AgentStatus.Working)
                 {
-                    taskName = _taskTracker.GetGroupedSteps(e.Agent.Id)
-                        .FirstOrDefault(g => g.TaskId == currentStep.TaskId)?.DisplayName;
+                    currentStep = _taskTracker?.GetCurrentStep(e.Agent.Id);
+                    if (currentStep is not null && _taskTracker is not null)
+                    {
+                        taskName = _taskTracker.GetGroupedSteps(e.Agent.Id)
+                            .FirstOrDefault(g => g.TaskId == currentStep.TaskId)?.DisplayName;
+                    }
                 }
 
                 _agentCache[e.Agent.Id] = cached with
@@ -614,14 +620,23 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             var changed = false;
             foreach (var (agentId, snapshot) in _agentCache.ToList())
             {
-                var step = _taskTracker.GetCurrentStep(agentId);
-                var stepName = step?.Name;
-                var stepDesc = step?.Description;
+                // Only show step info for actively working agents — clears stale steps
+                // when agent transitions to Idle without explicitly completing its last step.
+                AgentTaskStep? step = null;
+                string? stepName = null;
+                string? stepDesc = null;
                 string? taskName = null;
-                if (step is not null)
+
+                if (snapshot.Status == AgentStatus.Working)
                 {
-                    taskName = _taskTracker.GetGroupedSteps(agentId)
-                        .FirstOrDefault(g => g.TaskId == step.TaskId)?.DisplayName;
+                    step = _taskTracker.GetCurrentStep(agentId);
+                    stepName = step?.Name;
+                    stepDesc = step?.Description;
+                    if (step is not null)
+                    {
+                        taskName = _taskTracker.GetGroupedSteps(agentId)
+                            .FirstOrDefault(g => g.TaskId == step.TaskId)?.DisplayName;
+                    }
                 }
 
                 if (snapshot.CurrentStepName != stepName || snapshot.CurrentStepDescription != stepDesc

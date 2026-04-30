@@ -156,6 +156,31 @@
                                     }
                                 </div>
                             }
+                            else if (candidate.InitialAcScore.HasValue || candidate.InitialDesignScore.HasValue || candidate.InitialReadabilityScore.HasValue)
+                            {
+                                <div class="candidate-scores initial-scores" title="Initial judge scores — revision in progress to improve these">
+                                    @if (candidate.InitialAcScore.HasValue)
+                                    {
+                                        <div title="Acceptance Criteria (initial)">AC <span>@candidate.InitialAcScore.Value</span></div>
+                                    }
+                                    @if (candidate.InitialDesignScore.HasValue)
+                                    {
+                                        <div title="Design (initial)">Des <span>@candidate.InitialDesignScore.Value</span></div>
+                                    }
+                                    @if (candidate.InitialReadabilityScore.HasValue)
+                                    {
+                                        <div title="Readability (initial)">Read <span>@candidate.InitialReadabilityScore.Value</span></div>
+                                    }
+                                    @if (candidate.InitialVisualsScore.HasValue)
+                                    {
+                                        <div title="Visuals (initial)" class="visuals-score">Vis <span>@candidate.InitialVisualsScore.Value</span></div>
+                                    }
+                                    @if (candidate.State == CandidateState.Revising)
+                                    {
+                                        <span class="scores-label-revision" title="Candidate is being revised based on judge feedback">⟳ revising</span>
+                                    }
+                                </div>
+                            }
                             else if (candidate.State == CandidateState.Evaluated && candidate.Survived == true)
                             {
                                 <div class="candidate-scores muted" title="This candidate passed gate checks but was not scored by the LLM judge">@(candidate.JudgeSkippedReason ?? "not scored")</div>
@@ -173,6 +198,29 @@
                             @if (candidate.Succeeded == false)
                             {
                                 <div class="candidate-fail" title="Reason this candidate failed during execution">@candidate.FailureReason</div>
+                            }
+                            @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback)
+                                 && candidate.State != CandidateState.Scored
+                                 && candidate.State != CandidateState.Winner)
+                            {
+                                <div class="candidate-judge-feedback" title="Judge's recommendations for improvement">
+                                    <div class="judge-feedback-label">🧑‍⚖️ Judge Feedback:</div>
+                                    <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                </div>
+                            }
+                            @{
+                                var thumbScreenshot = (candidate.State == CandidateState.InitialScored || candidate.State == CandidateState.Revising)
+                                    ? (candidate.InitialScreenshotBase64 ?? candidate.ScreenshotBase64)
+                                    : (candidate.ScreenshotBase64 ?? candidate.InitialScreenshotBase64);
+                            }
+                            @if (!isActiveExpanded && !string.IsNullOrEmpty(thumbScreenshot))
+                            {
+                                <div class="candidate-screenshot-thumb">
+                                    <img src="data:image/png;base64,@thumbScreenshot"
+                                         alt="@candidate.StrategyId preview" class="cd-screenshot-thumb-img"
+                                         @onclick="() => OpenLightbox(thumbScreenshot, candidate.StrategyId)"
+                                         @onclick:stopPropagation="true" />
+                                </div>
                             }
 
                             @* Expandable detail panel — same tabbed UI as Recent Completed *@
@@ -228,6 +276,42 @@
                                                     <div class="cd-score-total" title="Combined score (max @MaxScore(candidate))">Total: <strong>@TotalScore(candidate)</strong>/@MaxScore(candidate)</div>
                                                 </div>
                                             }
+                                            else if (candidate.InitialAcScore.HasValue || candidate.InitialDesignScore.HasValue || candidate.InitialReadabilityScore.HasValue)
+                                            {
+                                                <div class="cd-scores initial-scores">
+                                                    <div class="cd-score-label-note">Initial Scores (revision in progress)</div>
+                                                    <div class="cd-score-row" title="Acceptance Criteria (initial)">
+                                                        <span class="cd-score-label">Acceptance</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialAcScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialAcScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row" title="Design (initial)">
+                                                        <span class="cd-score-label">Design</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialDesignScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialDesignScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row" title="Readability (initial)">
+                                                        <span class="cd-score-label">Readability</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialReadabilityScore ?? 0) * 10)%"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialReadabilityScore ?? 0)/10</span>
+                                                    </div>
+                                                    @if (candidate.InitialVisualsScore.HasValue)
+                                                    {
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Visuals</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar cd-score-bar-visuals" style="width: @(candidate.InitialVisualsScore.Value * 10)%"></div></div>
+                                                        <span class="cd-score-val">@candidate.InitialVisualsScore.Value/10</span>
+                                                    </div>
+                                                    }
+                                                </div>
+                                                @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
+                                                {
+                                                    <div class="candidate-judge-feedback" title="Judge's recommendations for improvement">
+                                                        <div class="judge-feedback-label">🧑‍⚖️ Judge Feedback:</div>
+                                                        <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                                    </div>
+                                                }
+                                            }
                                             else if (candidate.Succeeded == false)
                                             {
                                                 <div class="cd-no-scores">Not scored — strategy execution failed</div>
@@ -252,12 +336,15 @@
                                                 <div class="cd-failure"><span class="cd-failure-label">Failure:</span> @candidate.FailureReason</div>
                                             }
 
-                                            @if (!string.IsNullOrEmpty(candidate.ScreenshotBase64))
+                                            var expandedScreenshot = candidate.ScreenshotBase64 ?? candidate.InitialScreenshotBase64;
+                                            @if (!string.IsNullOrEmpty(expandedScreenshot))
                                             {
                                                 <div class="cd-screenshot">
-                                                    <div class="cd-screenshot-label">Preview Screenshot (click to enlarge)</div>
-                                                    <img src="data:image/png;base64,@candidate.ScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
-                                                         @onclick="() => OpenLightbox(candidate.ScreenshotBase64, candidate.StrategyId)" @onclick:stopPropagation="true" />
+                                                    <div class="cd-screenshot-label">
+                                                        @(string.IsNullOrEmpty(candidate.ScreenshotBase64) ? "Initial Screenshot (pre-revision)" : "Preview Screenshot") (click to enlarge)
+                                                    </div>
+                                                    <img src="data:image/png;base64,@expandedScreenshot" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
+                                                         @onclick="() => OpenLightbox(expandedScreenshot, candidate.StrategyId)" @onclick:stopPropagation="true" />
                                                 </div>
                                             }
                                         }
@@ -563,6 +650,14 @@
                                                             <div class="cd-screenshot-label">Preview Screenshot (click to enlarge)</div>
                                                             <img src="data:image/png;base64,@candidate.ScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
                                                                  @onclick="() => OpenLightbox(candidate.ScreenshotBase64, candidate.StrategyId)" />
+                                                        </div>
+                                                    }
+                                                    else if (!string.IsNullOrEmpty(candidate.InitialScreenshotBase64))
+                                                    {
+                                                        <div class="cd-screenshot">
+                                                            <div class="cd-screenshot-label">Initial Screenshot (pre-revision) (click to enlarge)</div>
+                                                            <img src="data:image/png;base64,@candidate.InitialScreenshotBase64" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
+                                                                 @onclick="() => OpenLightbox(candidate.InitialScreenshotBase64, candidate.StrategyId)" />
                                                         </div>
                                                     }
                                                     else if (candidate.State >= CandidateState.Evaluated)
@@ -940,6 +1035,21 @@
     .cancel-btn:hover { background: rgba(255,107,107,.25); border-color: #ff6b6b; }
     .task-phase { font-size: .75em; padding: .15rem .45rem; background: rgba(77,171,247,.12); color: #4dabf7; border-radius: 3px; margin-left: .5rem; font-weight: 500; }
     .task-progress-detail { font-size: .82em; opacity: .7; margin-bottom: .5rem; padding: .25rem .5rem; background: rgba(255,255,255,.03); border-radius: 3px; }
+
+    /* Initial scores (during revision) */
+    .initial-scores { opacity: 0.75; }
+    .scores-label-revision { font-size: 0.75em; color: var(--color-warning, #f0ad4e); margin-left: 8px; }
+    .cd-score-label-note { font-size: .78em; opacity: .65; margin-bottom: 4px; font-style: italic; }
+
+    /* Judge feedback */
+    .candidate-judge-feedback { margin-top: 6px; padding: 6px 8px; background: rgba(255, 255, 255, 0.03); border-left: 2px solid var(--color-warning, #f0ad4e); border-radius: 4px; font-size: 0.82em; }
+    .judge-feedback-label { font-weight: 600; margin-bottom: 3px; }
+    .judge-feedback-text { white-space: pre-wrap; max-height: 120px; overflow-y: auto; color: rgba(255, 255, 255, 0.8); }
+
+    /* Screenshot thumbnail (collapsed card) */
+    .candidate-screenshot-thumb { margin-top: 6px; }
+    .cd-screenshot-thumb-img { max-height: 80px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; opacity: 0.9; cursor: pointer; transition: opacity 0.2s; }
+    .cd-screenshot-thumb-img:hover { opacity: 1; }
 </style>
 
 @code {
