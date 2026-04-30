@@ -884,10 +884,10 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
             // Use WaitForExit with a timeout rather than async + CancellationToken,
             // because cancelling ReadToEndAsync doesn't kill the process, and
             // Process.Dispose() blocks waiting for exit — causing a deadlock.
-            var exited = process.WaitForExit(TimeSpan.FromSeconds(10));
+            var exited = process.WaitForExit(TimeSpan.FromSeconds(30));
             if (!exited)
             {
-                _logger.LogWarning("Copilot CLI verification timed out after 10s — treating as unavailable");
+                _logger.LogWarning("Copilot CLI verification timed out after 30s — treating as unavailable");
                 KillProcessSafely(process);
                 return false;
             }
