@@ -114,6 +114,47 @@ public class GitHubService : IGitHubService
         lock (_prCommentsCache) { _prCommentsCache.Clear(); }
     }
 
+    // Cache of labels known to exist in the repo (populated on first use, then updated as we create).
+    private HashSet<string>? _knownLabels;
+    private readonly SemaphoreSlim _labelEnsureLock = new(1, 1);
+
+    /// <summary>
+    /// Ensures all specified labels exist in the repository, creating any that are missing.
+    /// Uses an in-memory cache to avoid redundant API calls on subsequent invocations.
+    /// </summary>
+    private async Task EnsureLabelsExistAsync(IEnumerable<string> labels, CancellationToken ct)
+    {
+        await _labelEnsureLock.WaitAsync(ct);
+        try
+        {
+            if (_knownLabels is null)
+            {
+                var existing = await _client.Issue.Labels.GetAllForRepository(_owner, _repo);
+                _knownLabels = new HashSet<string>(existing.Select(l => l.Name), StringComparer.OrdinalIgnoreCase);
+            }
+
+            foreach (var label in labels)
+            {
+                if (_knownLabels.Contains(label)) continue;
+                try
+                {
+                    await _client.Issue.Labels.Create(_owner, _repo, new NewLabel(label, "ededed"));
+                    _knownLabels.Add(label);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // Label may have been created concurrently — add to cache anyway
+                    _knownLabels.Add(label);
+                    _logger.LogDebug(ex, "Label '{Label}' creation returned error (may already exist)", label);
+                }
+            }
+        }
+        finally
+        {
+            _labelEnsureLock.Release();
+        }
+    }
+
     /// <summary>
     /// Updates rate limit tracking from the last Octokit API response.
     /// Call after any successful _client call to keep quota tracking current.
@@ -188,6 +229,11 @@ public class GitHubService : IGitHubService
         string title, string body, string headBranch, string baseBranch,
         string[] labels, CancellationToken ct = default)
     {
+        var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
+            ? labels
+            : [.. labels, AiGeneratedLabel];
+        await EnsureLabelsExistAsync(allLabels, ct);
+
         return await _rl.ExecuteAsync(async _ =>
         {
             try
@@ -202,26 +248,18 @@ public class GitHubService : IGitHubService
                 TrackRateLimit();
 
                 // Always add labels (at minimum AI-Generated)
+                try
                 {
-                    var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
-                        ? labels
-                        : [.. labels, AiGeneratedLabel];
-                    try
-                    {
-                        await WithTransientRetryAsync("AddPRLabels", pr.Number,
-                            () => _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, allLabels), ct);
-                    }
-                    catch (Exception labelEx)
-                    {
-                        _logger.LogWarning(labelEx, "Failed to add labels to PR #{Number} — PR was created successfully", pr.Number);
-                    }
+                    await WithTransientRetryAsync("AddPRLabels", pr.Number,
+                        () => _client.Issue.Labels.AddToIssue(_owner, _repo, pr.Number, allLabels), ct);
+                }
+                catch (Exception labelEx)
+                {
+                    _logger.LogWarning(labelEx, "Failed to add labels to PR #{Number} — PR was created successfully", pr.Number);
                 }
 
                 InvalidateListCaches();
-                var returnLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
-                    ? labels.ToList()
-                    : [.. labels, AiGeneratedLabel];
-                return MapPullRequest(pr, returnLabels);
+                return MapPullRequest(pr, allLabels.ToList());
             }
             catch (Exception ex)
             {
@@ -1023,6 +1061,11 @@ public class GitHubService : IGitHubService
     public async Task<AgentIssue> CreateIssueAsync(
         string title, string body, string[] labels, CancellationToken ct = default)
     {
+        var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
+            ? labels
+            : [.. labels, AiGeneratedLabel];
+        await EnsureLabelsExistAsync(allLabels, ct);
+
         return await _rl.ExecuteAsync(async _ =>
         {
             try
@@ -1030,10 +1073,8 @@ public class GitHubService : IGitHubService
                 _logger.LogInformation("Creating issue: {Title}", title);
 
                 var newIssue = new NewIssue(title) { Body = body };
-                foreach (var label in labels)
+                foreach (var label in allLabels)
                     newIssue.Labels.Add(label);
-                if (!labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase))
-                    newIssue.Labels.Add(AiGeneratedLabel);
 
                 var issue = await WithTransientRetryAsync("CreateIssue", 0,
                     () => _client.Issue.Create(_owner, _repo, newIssue), ct);
