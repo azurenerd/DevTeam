@@ -575,6 +575,34 @@ public abstract class EngineerAgentBase : AgentBase
     #region Issue-Driven Work
 
     /// <summary>
+    /// Checks whether all dependency issues (from "Depends On:" metadata) are closed.
+    /// Returns true if the item has no dependencies or all are resolved.
+    /// </summary>
+    protected async Task<bool> AreDependenciesSatisfiedAsync(string? body, CancellationToken ct)
+    {
+        if (WorkItemService is null) return true; // Can't check — assume OK
+
+        var deps = EngineeringTaskIssueManager.ParseDependencies(body);
+        if (deps.Count == 0) return true;
+
+        foreach (var depNumber in deps)
+        {
+            try
+            {
+                var dep = await WorkItemService.GetAsync(depNumber, ct);
+                if (dep is null || !dep.State.Equals("closed", StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+            catch
+            {
+                // If we can't check a dependency, assume it's unmet
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /// <summary>
     /// Processes a new Issue assignment. Reads the Issue, optionally runs the clarification loop,
     /// creates a PR linking to the Issue, and implements the solution.
     /// </summary>
@@ -606,6 +634,19 @@ public abstract class EngineerAgentBase : AgentBase
             if (issue is null)
             {
                 Logger.LogWarning("Cannot find issue #{Number}", assignment.IssueNumber);
+                CurrentIssueNumber = null;
+                return;
+            }
+
+            // Dependency gate: skip if prerequisites are still open
+            if (!await AreDependenciesSatisfiedAsync(issue.Body, ct))
+            {
+                var deps = EngineeringTaskIssueManager.ParseDependencies(issue.Body);
+                Logger.LogWarning(
+                    "{Role} {Name}: Issue #{Number} has unmet dependencies ({Deps}) — deferring",
+                    Identity.Role, Identity.DisplayName, assignment.IssueNumber,
+                    string.Join(", ", deps.Select(d => $"#{d}")));
+                _taskTracker.CompleteStep(claimStepId);
                 CurrentIssueNumber = null;
                 return;
             }

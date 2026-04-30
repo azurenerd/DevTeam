@@ -4,6 +4,7 @@ using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
+using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
@@ -163,13 +164,28 @@ public class SpecialistEngineerAgent : EngineerAgentBase
                 return;
             }
 
+            // Filter out tasks whose dependencies are not yet satisfied
+            var ready = new List<PlatformWorkItem>();
+            foreach (var item in unassigned)
+            {
+                if (await AreDependenciesSatisfiedAsync(item.Body, ct))
+                    ready.Add(item);
+            }
+
+            if (ready.Count == 0)
+            {
+                Logger.LogDebug("{Role} {Name} self-claim: {Total} unassigned tasks but all have unmet dependencies",
+                    Identity.Role, Identity.DisplayName, unassigned.Count);
+                return;
+            }
+
             // Prefer tasks matching our capabilities
             var capabilityKeywords = Definition.Capabilities
                 .SelectMany(c => c.ToLowerInvariant().Split(' ', StringSplitOptions.RemoveEmptyEntries))
                 .Where(w => w.Length > 3)
                 .ToHashSet();
 
-            var bestMatch = unassigned
+            var bestMatch = ready
                 .OrderByDescending(item =>
                 {
                     var text = $"{item.Title} {item.Body}".ToLowerInvariant();
