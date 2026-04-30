@@ -86,7 +86,7 @@ public sealed class SquadReadinessChecker : IFrameworkLifecycle
             status, string.Join(", ", missing));
 
         return new FrameworkReadinessResult(status,
-            $"Missing {missing.Count} dependency(ies)",
+            $"Missing {missing.Count} dependency(ies): {string.Join(", ", missing)}",
             missing.AsReadOnly());
     }
 
