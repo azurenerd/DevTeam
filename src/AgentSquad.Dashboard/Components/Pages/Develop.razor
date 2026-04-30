@@ -149,6 +149,25 @@ else
                             </label>
                         </div>
                     </div>
+
+                    <div class="config-field">
+                        <label title="Controls whether the SE delivers all work in a single PR or splits across parallel tasks/PRs.">
+                            Delivery Mode
+                            <span class="wizard-tooltip" title="Single PR mode delivers the entire project in one engineering task and one PR. Best for smaller features that can be completed in a single session (~20 min) without needing parallelism. Multi-PR mode splits work into parallel tasks for larger projects where concurrent progress is beneficial.">ⓘ</span>
+                        </label>
+                        <div class="wizard-radio-group">
+                            <label class="wizard-radio-label">
+                                <input type="radio" name="deliveryMode" checked="@(_settings.SinglePRMode)"
+                                       @onchange='() => _settings.SinglePRMode = true' />
+                                <span>⚡ Single PR — fast, single session (~20 min)</span>
+                            </label>
+                            <label class="wizard-radio-label">
+                                <input type="radio" name="deliveryMode" checked="@(!_settings.SinglePRMode)"
+                                       @onchange='() => _settings.SinglePRMode = false' />
+                                <span>🔀 Multi-PR — parallel tasks for larger projects</span>
+                            </label>
+                        </div>
+                    </div>
                 </div>
             </div>
         }

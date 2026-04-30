@@ -193,7 +193,7 @@ else if (_config is not null)
                             </label>
                         </div>
                         <div class="config-field" title="Interactive CLI session (third option) — the engineer delegates the entire task to 'copilot --allow-all' running autonomously in the worktree. The CLI can read/write files, run builds, and iterate until the task works. Most robust but slowest and most expensive. This is the Method-3 path the user wants to keep.">
-                            <label>GitHub Copilot CLI (interactive autonomous session)</label>
+                            <label>GitHub Copilot (Agent Mode)</label>
                             <label class="config-toggle">
                                 <input type="checkbox" checked="@IsStrategyEnabled(StrategyAgentic)"
                                     @onchange="e => SetStrategyEnabled(StrategyAgentic, (bool)(e.Value ?? false))" />

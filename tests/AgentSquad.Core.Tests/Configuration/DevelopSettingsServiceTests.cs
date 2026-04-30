@@ -98,6 +98,7 @@ public class DevelopSettingsServiceTests : IDisposable
             Description = "New description",
             TechStack = "React + Node",
             ParentWorkItemId = 42,
+            SinglePRMode = true,
             AzureDevOps = new AdoRepoSettings
             {
                 Organization = "org",
@@ -113,6 +114,7 @@ public class DevelopSettingsServiceTests : IDisposable
         Assert.Equal("New description", config.Project.Description);
         Assert.Equal("React + Node", config.Project.TechStack);
         Assert.Equal(42, config.Project.ParentWorkItemId);
+        Assert.True(config.Limits.SinglePRMode);
         Assert.Equal(DevPlatformType.AzureDevOps, config.DevPlatform.Platform);
         Assert.Equal("org", config.DevPlatform.AzureDevOps!.Organization);
     }
@@ -149,6 +151,7 @@ public class DevelopSettingsServiceTests : IDisposable
         config.Project.Description = "My project";
         config.Project.TechStack = "Rust";
         config.Project.ParentWorkItemId = 99;
+        config.Limits.SinglePRMode = true;
 
         using var svc = CreateService();
         var settings = svc.CreateFromExistingConfig(config);
@@ -160,5 +163,6 @@ public class DevelopSettingsServiceTests : IDisposable
         Assert.Equal("My project", settings.Description);
         Assert.Equal("Rust", settings.TechStack);
         Assert.Equal(99, settings.ParentWorkItemId);
+        Assert.True(settings.SinglePRMode);
     }
 }

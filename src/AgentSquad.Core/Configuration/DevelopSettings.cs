@@ -24,6 +24,13 @@ public class DevelopSettings
     public bool SingleIssueMode { get; set; } = false;
 
     /// <summary>
+    /// When true, the entire project is delivered as a single engineering task and PR
+    /// instead of being split across parallel tasks. Best for smaller features that can
+    /// be completed in a single session (~20 minutes) without needing parallelism.
+    /// </summary>
+    public bool SinglePRMode { get; set; } = true;
+
+    /// <summary>
     /// Optional working branch name. When set, all agent work targets this branch
     /// instead of the default branch. Leave empty to work directly on the default branch.
     /// </summary>

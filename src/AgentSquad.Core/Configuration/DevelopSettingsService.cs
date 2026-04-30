@@ -128,6 +128,7 @@ public sealed class DevelopSettingsService : IDisposable
             config.Project.DocsFolderPath = settings.DocsFolderPath;
 
         config.Limits.SingleIssueMode = settings.SingleIssueMode;
+        config.Limits.SinglePRMode = settings.SinglePRMode;
 
         // Working branch
         config.Project.WorkingBranch = string.IsNullOrWhiteSpace(settings.WorkingBranch) ? null : settings.WorkingBranch;
@@ -234,6 +235,7 @@ public sealed class DevelopSettingsService : IDisposable
         settings.ParentWorkItemId = config.Project.ParentWorkItemId;
         settings.DocsFolderPath = config.Project.DocsFolderPath;
         settings.SingleIssueMode = config.Limits.SingleIssueMode;
+        settings.SinglePRMode = config.Limits.SinglePRMode;
         settings.WorkingBranch = config.Project.WorkingBranch;
 
         return settings;
