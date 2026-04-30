@@ -75,6 +75,12 @@ public class GitHubService : IGitHubService
 
     public string RepositoryFullName => $"{_owner}/{_repo}";
 
+    /// <inheritdoc/>
+    public bool IsConfigured => !string.IsNullOrEmpty(_owner) && !string.IsNullOrEmpty(_repo) && !string.IsNullOrEmpty(_token);
+
+    /// <summary>Returns true if the currently configured token differs from the given value.</summary>
+    public bool HasTokenChanged(string? token) => _token != (token ?? "");
+
     public GitHubService(IOptions<AgentSquadConfig> config, RateLimitManager rateLimitManager, ILogger<GitHubService> logger,
         AgentStateStore? stateStore = null)
     {
@@ -83,18 +89,40 @@ public class GitHubService : IGitHubService
         _runStartedUtc = stateStore?.RunStartedUtc;
 
         var projectConfig = config.Value.Project;
-        var repoParts = projectConfig.GitHubRepo.Split('/', 2);
-        if (repoParts.Length != 2)
-            throw new ArgumentException($"GitHubRepo must be in 'owner/repo' format. Got: '{projectConfig.GitHubRepo}'");
+        var repoValue = projectConfig.GitHubRepo ?? "";
 
+        if (string.IsNullOrWhiteSpace(repoValue) || !repoValue.Contains('/'))
+        {
+            // First-run: no repo configured yet. Start in unconfigured state.
+            _owner = "";
+            _repo = "";
+            _token = "";
+            _client = new GitHubClient(new ProductHeaderValue("AgentSquad"));
+            _logger.LogInformation("GitHubService starting in unconfigured state — use /develop wizard to set up");
+            return;
+        }
+
+        var repoParts = repoValue.Split('/', 2);
         _owner = repoParts[0];
         _repo = repoParts[1];
-        _token = projectConfig.GitHubToken;
+        _token = projectConfig.GitHubToken ?? "";
 
         _client = new GitHubClient(new ProductHeaderValue("AgentSquad"))
         {
-            Credentials = new Credentials(projectConfig.GitHubToken)
+            Credentials = string.IsNullOrEmpty(_token)
+                ? Credentials.Anonymous
+                : new Credentials(_token)
         };
+    }
+
+    /// <summary>
+    /// Throws if the service hasn't been configured yet. Call at the top of every public API method.
+    /// </summary>
+    private void ThrowIfNotConfigured()
+    {
+        if (!IsConfigured)
+            throw new InvalidOperationException(
+                "GitHubService is not configured. Navigate to /develop to set up your repository and PAT.");
     }
 
     /// <summary>
@@ -255,6 +283,7 @@ public class GitHubService : IGitHubService
         string title, string body, string headBranch, string baseBranch,
         string[] labels, CancellationToken ct = default)
     {
+        ThrowIfNotConfigured();
         var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
             ? labels
             : [.. labels, AiGeneratedLabel];
@@ -330,6 +359,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetOpenPullRequestsAsync(CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentPullRequest>();
         if (_openPrsCache is { } cached && DateTime.UtcNow - _openPrsCacheTime < ListCacheTtl)
             return cached;
 
@@ -362,6 +392,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetAllPullRequestsAsync(CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentPullRequest>();
         if (_allPrsCache is { } cached && DateTime.UtcNow - _allPrsCacheTime < ListCacheTtl)
             return cached;
 
@@ -428,6 +459,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentPullRequest>> GetMergedPullRequestsAsync(CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentPullRequest>();
         if (_mergedPrsCache is { } cached && DateTime.UtcNow - _mergedPrsCacheTime < ListCacheTtl)
             return cached;
 
@@ -1087,6 +1119,7 @@ public class GitHubService : IGitHubService
     public async Task<AgentIssue> CreateIssueAsync(
         string title, string body, string[] labels, CancellationToken ct = default)
     {
+        ThrowIfNotConfigured();
         var allLabels = labels.Contains(AiGeneratedLabel, StringComparer.OrdinalIgnoreCase)
             ? labels
             : [.. labels, AiGeneratedLabel];
@@ -1142,6 +1175,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetOpenIssuesAsync(CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentIssue>();
         if (_openIssuesCache is { } cached && DateTime.UtcNow - _openIssuesCacheTime < ListCacheTtl)
             return cached;
 
@@ -1179,6 +1213,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetAllIssuesAsync(CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentIssue>();
         if (_allIssuesCache is { } cached && DateTime.UtcNow - _allIssuesCacheTime < ListCacheTtl)
             return cached;
 
@@ -1356,6 +1391,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentIssue>();
         var cacheKey = $"{label}|open";
         await _labelIssuesLock.WaitAsync(ct);
         try
@@ -1452,6 +1488,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<AgentIssue>> GetIssuesByLabelAsync(string label, string state, CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<AgentIssue>();
         var cacheKey = $"{label}|{state.ToLowerInvariant()}";
         await _labelIssuesLock.WaitAsync(ct);
         try
@@ -1538,6 +1575,7 @@ public class GitHubService : IGitHubService
 
     public async Task<string?> GetFileContentAsync(string path, string? branch = null, CancellationToken ct = default)
     {
+        if (!IsConfigured) return null;
         var cacheKey = $"{path}|{branch ?? "default"}";
 
         await _fileContentCacheLock.WaitAsync(ct);
@@ -1584,6 +1622,7 @@ public class GitHubService : IGitHubService
     public async Task CreateOrUpdateFileAsync(
         string path, string content, string commitMessage, string? branch = null, CancellationToken ct = default)
     {
+        ThrowIfNotConfigured();
         await _rl.ExecuteAsync(async _ =>
         {
             const int maxRetries = 3;
@@ -1689,6 +1728,7 @@ public class GitHubService : IGitHubService
         string branch,
         CancellationToken ct = default)
     {
+        ThrowIfNotConfigured();
         await _rl.ExecuteAsync(async _ =>
         {
             ArgumentNullException.ThrowIfNull(files);
@@ -1792,6 +1832,7 @@ public class GitHubService : IGitHubService
 
     public async Task CreateBranchAsync(string branchName, string fromBranch = "main", CancellationToken ct = default)
     {
+        ThrowIfNotConfigured();
         await _rl.ExecuteAsync(async _ =>
         {
             try
@@ -2330,6 +2371,7 @@ public class GitHubService : IGitHubService
 
     public async Task<IReadOnlyList<string>> GetRepositoryTreeAsync(string branch = "main", CancellationToken ct = default)
     {
+        if (!IsConfigured) return Array.Empty<string>();
         await _treeCacheLock.WaitAsync(ct);
         try
         {

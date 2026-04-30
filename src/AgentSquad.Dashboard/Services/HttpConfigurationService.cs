@@ -127,6 +127,45 @@ public sealed class HttpConfigurationService : IConfigurationService
         _logger.LogInformation("Configuration saved successfully");
     }
 
+    /// <inheritdoc/>
+    public async Task PersistSecretsOnlyAsync(string? gitHubToken = null, string? adoPat = null, string? adoBearerToken = null)
+    {
+        var secrets = new Dictionary<string, string>();
+
+        if (!string.IsNullOrEmpty(gitHubToken))
+            secrets["AgentSquad:Project:GitHubToken"] = gitHubToken;
+        if (!string.IsNullOrEmpty(adoPat))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:Pat"] = adoPat;
+        if (!string.IsNullOrEmpty(adoBearerToken))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:BearerToken"] = adoBearerToken;
+
+        if (secrets.Count == 0) return;
+
+        // Discover UserSecretsIds from local csproj files
+        var appSettingsDir = Path.GetDirectoryName(_localAppSettingsPath) ?? "";
+        var runnerDir = appSettingsDir;
+        var dashboardDir = Path.GetFullPath(Path.Combine(appSettingsDir, "..", "AgentSquad.Dashboard"));
+
+        var secretsIds = new HashSet<string>();
+        foreach (var dir in new[] { runnerDir, dashboardDir })
+        {
+            var id = ReadUserSecretsIdFromCsproj(dir);
+            if (id is not null) secretsIds.Add(id);
+        }
+
+        if (secretsIds.Count == 0)
+        {
+            _logger.LogWarning("No UserSecretsId found in project files — secrets will not be persisted");
+            return;
+        }
+
+        foreach (var secretsId in secretsIds)
+            await MergeUserSecretsAsync(secretsId, secrets);
+
+        _logger.LogInformation("Persisted {Count} secret(s) to {Stores} User Secrets store(s) via wizard",
+            secrets.Count, secretsIds.Count);
+    }
+
     public async Task<PatValidationResult> ValidatePatAsync(string token, string repoFullName, CancellationToken ct = default)
     {
         return await Task.Run(async () =>
@@ -280,6 +319,8 @@ public sealed class HttpConfigurationService : IConfigurationService
                 azureDevOps["Pat"] = "";
             if (azureDevOps.ContainsKey("TenantId"))
                 azureDevOps["TenantId"] = "";
+            if (azureDevOps.ContainsKey("BearerToken"))
+                azureDevOps["BearerToken"] = "";
         }
     }
 
@@ -329,6 +370,9 @@ public sealed class HttpConfigurationService : IConfigurationService
 
         if (!string.IsNullOrEmpty(config.DevPlatform?.AzureDevOps?.TenantId))
             secrets["AgentSquad:DevPlatform:AzureDevOps:TenantId"] = config.DevPlatform!.AzureDevOps!.TenantId;
+
+        if (!string.IsNullOrEmpty(config.DevPlatform?.AzureDevOps?.BearerToken))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:BearerToken"] = config.DevPlatform!.AzureDevOps!.BearerToken;
 
         if (config.Models is not null)
         {

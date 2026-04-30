@@ -347,7 +347,13 @@ api.MapGet("/platform/tree", async (string? branch, IRepositoryContentService re
 var configApi = app.MapGroup("/api/configuration").WithTags("Configuration");
 
 configApi.MapGet("/current", (ConfigurationService svc) =>
-    Results.Ok(svc.GetCurrentConfig()));
+{
+    var config = svc.GetCurrentConfig();
+    // Serialize to JsonNode and strip all secrets before exposing over the API
+    var json = System.Text.Json.JsonSerializer.SerializeToNode(config);
+    ConfigurationService.StripSecrets(json);
+    return Results.Ok(json);
+});
 
 configApi.MapPost("/save", async (AgentSquadConfig config, ConfigurationService svc) =>
 {

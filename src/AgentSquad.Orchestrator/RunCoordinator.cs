@@ -241,44 +241,54 @@ public class RunCoordinator
     /// </summary>
     private void ReconfigureServicesForRepo()
     {
-        var repoParts = _config.Project.GitHubRepo.Split('/', 2);
-        if (repoParts.Length != 2)
+        var repoValue = _config.Project.GitHubRepo ?? "";
+        if (string.IsNullOrWhiteSpace(repoValue) || !repoValue.Contains('/'))
         {
-            _logger.LogWarning("Cannot reconfigure — GitHubRepo '{Repo}' is not in owner/repo format",
-                _config.Project.GitHubRepo);
+            _logger.LogWarning("Cannot reconfigure — GitHubRepo '{Repo}' is not in owner/repo format", repoValue);
             return;
         }
 
+        var repoParts = repoValue.Split('/', 2);
         var owner = repoParts[0];
         var repo = repoParts[1];
-        var token = _config.Project.GitHubToken;
+        var token = _config.Project.GitHubToken ?? "";
 
-        // Skip if repo hasn't changed
-        if (_gitHubService.RepositoryFullName == _config.Project.GitHubRepo)
+        // Detect whether repo or token changed
+        var repoChanged = _gitHubService.RepositoryFullName != repoValue;
+        var tokenChanged = _gitHubService is GitHubService gs && gs.HasTokenChanged(token);
+
+        if (!repoChanged && !tokenChanged)
         {
-            _logger.LogDebug("Repository unchanged ({Repo}), skipping service reconfiguration",
-                _config.Project.GitHubRepo);
+            _logger.LogDebug("Repository and auth unchanged ({Repo}), skipping service reconfiguration", repoValue);
             return;
         }
 
-        _logger.LogInformation("Repository changed to {Owner}/{Repo} — reconfiguring services", owner, repo);
+        _logger.LogInformation("Reconfiguring services — repo={RepoChanged}, auth={AuthChanged} → {Owner}/{Repo}",
+            repoChanged, tokenChanged, owner, repo);
 
         // 1. Reconfigure GitHub API services
         if (_gitHubService is GitHubService concreteGitHub)
             concreteGitHub.ReconfigureRepository(owner, repo, token);
         _conflictResolver.Reconfigure(owner, repo, token);
 
-        // 2. Reconfigure SQLite stores to use the new repo's database
-        var repoSlug = _config.Project.GitHubRepo.Replace('/', '_');
-        var newDbPath = $"agentsquad_{repoSlug}.db";
-        _stateStore.Reconfigure(newDbPath);
-        _memoryStore.Reconfigure(newDbPath);
+        // 2. Reconfigure SQLite stores to use the new repo's database (only if repo changed)
+        if (repoChanged)
+        {
+            var repoSlug = repoValue.Replace('/', '_');
+            var newDbPath = $"agentsquad_{repoSlug}.db";
+            _stateStore.Reconfigure(newDbPath);
+            _memoryStore.Reconfigure(newDbPath);
 
-        // 3. Reset CandidateStateStore (clears in-memory state, re-hydrates from new DB)
-        _candidateStateStore.Reset();
+            // 3. Reset CandidateStateStore (clears in-memory state, re-hydrates from new DB)
+            _candidateStateStore.Reset();
 
-        _logger.LogInformation("All services reconfigured for {Owner}/{Repo} (db: {DbPath})",
-            owner, repo, newDbPath);
+            _logger.LogInformation("All services reconfigured for {Owner}/{Repo} (db: {DbPath})",
+                owner, repo, newDbPath);
+        }
+        else
+        {
+            _logger.LogInformation("Auth reconfigured for {Owner}/{Repo} (repo unchanged)", owner, repo);
+        }
     }
 
     /// <summary>

@@ -9,14 +9,32 @@
 @using AgentSquad.Core.Notifications
 @using AgentSquad.Dashboard.Services
 @using Microsoft.Extensions.Logging
+@using Microsoft.Extensions.Options
 @using Markdig
 @implements IDisposable
 @inject IDashboardDataService DataService
 @inject NavigationManager Navigation
 @inject IServiceProvider ServiceProvider
 @inject IGitHubService GitHub
+@inject IOptions<AgentSquadConfig> Config
 
 <PageTitle>Virtual Dev Team — Overview</PageTitle>
+
+@if (string.IsNullOrWhiteSpace(Config.Value.Project.Name) && string.IsNullOrWhiteSpace(Config.Value.Project.GitHubRepo))
+{
+    <div style="background:var(--card-bg); border:1px solid var(--accent-primary); border-radius:8px; padding:1.25rem 1.5rem; margin-bottom:1.5rem; display:flex; align-items:center; gap:1rem;">
+        <span style="font-size:1.5rem;">🚀</span>
+        <div style="flex:1;">
+            <strong style="color:var(--text-primary);">Welcome to AgentSquad!</strong>
+            <p style="color:var(--text-secondary); margin:0.25rem 0 0;">
+                Get started by configuring your project in the Develop wizard.
+            </p>
+        </div>
+        <a href="/develop" style="background:var(--accent-primary); color:white; padding:0.5rem 1rem; border-radius:6px; text-decoration:none; font-weight:500; white-space:nowrap;">
+            Get Started →
+        </a>
+    </div>
+}
 
 <div class="dashboard-header" data-testid="page-agent-overview">
     <h1>Agent Overview</h1>

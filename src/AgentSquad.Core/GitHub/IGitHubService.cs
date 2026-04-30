@@ -7,6 +7,12 @@ public interface IGitHubService
     /// <summary>The "owner/repo" identifier for the target repository.</summary>
     string RepositoryFullName { get; }
 
+    /// <summary>
+    /// Returns true when the service has a valid repo and token configured.
+    /// False when the app started with empty/blank config (first-run state).
+    /// </summary>
+    bool IsConfigured { get; }
+
     // Pull Requests
     Task<AgentPullRequest> CreatePullRequestAsync(string title, string body, string headBranch, string baseBranch, string[] labels, CancellationToken ct = default);
     Task<AgentPullRequest?> GetPullRequestAsync(int number, CancellationToken ct = default);

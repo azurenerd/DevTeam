@@ -91,6 +91,7 @@ file sealed class NullGitHubService : IGitHubService
     }
 
     public string RepositoryFullName => "standalone/not-connected";
+    public bool IsConfigured => false;
 
     // Pull Requests
     public Task<AgentPullRequest> CreatePullRequestAsync(string title, string body, string headBranch, string baseBranch, string[] labels, CancellationToken ct = default)

@@ -19,6 +19,12 @@ public interface IConfigurationService
     /// <summary>Saves updated configuration to appsettings.json.</summary>
     Task SaveConfigAsync(AgentSquadConfig updatedConfig);
 
+    /// <summary>
+    /// Persists only secrets (PAT/tokens) to .NET User Secrets without touching appsettings.json.
+    /// Use from the Develop wizard to save authentication tokens for future sessions.
+    /// </summary>
+    Task PersistSecretsOnlyAsync(string? gitHubToken = null, string? adoPat = null, string? adoBearerToken = null);
+
     /// <summary>Validates a GitHub PAT token against a specified repo.</summary>
     Task<PatValidationResult> ValidatePatAsync(string token, string repoFullName, CancellationToken ct = default);
 

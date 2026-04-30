@@ -34,6 +34,7 @@ public sealed class InMemoryGitHubService : IGitHubService
     public bool ValidateInputs { get; set; } = true;
 
     public string RepositoryFullName { get; set; } = "test-owner/test-repo";
+    public bool IsConfigured => true;
 
     public InMemoryGitHubService()
     {

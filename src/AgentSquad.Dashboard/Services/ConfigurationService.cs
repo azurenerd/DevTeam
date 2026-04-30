@@ -222,12 +222,54 @@ public sealed class ConfigurationService : IConfigurationService
         }
     }
 
+    /// <inheritdoc/>
+    public async Task PersistSecretsOnlyAsync(string? gitHubToken = null, string? adoPat = null, string? adoBearerToken = null)
+    {
+        var secrets = new Dictionary<string, string>();
+
+        if (!string.IsNullOrEmpty(gitHubToken))
+            secrets["AgentSquad:Project:GitHubToken"] = gitHubToken;
+        if (!string.IsNullOrEmpty(adoPat))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:Pat"] = adoPat;
+        if (!string.IsNullOrEmpty(adoBearerToken))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:BearerToken"] = adoBearerToken;
+
+        if (secrets.Count == 0) return;
+
+        // Discover UserSecretsIds from both project csproj files
+        var dashboardDir = _env.ContentRootPath;
+        var runnerDir = Path.GetFullPath(Path.Combine(dashboardDir, "..", "AgentSquad.Runner"));
+
+        var secretsIds = new HashSet<string>();
+        foreach (var dir in new[] { dashboardDir, runnerDir })
+        {
+            var id = ReadUserSecretsIdFromCsproj(dir);
+            if (id is not null) secretsIds.Add(id);
+        }
+
+        if (secretsIds.Count == 0)
+        {
+            _logger.LogWarning("No UserSecretsId found in project files — secrets will not be persisted");
+            return;
+        }
+
+        foreach (var secretsId in secretsIds)
+            await MergeUserSecretsAsync(secretsId, secrets);
+
+        _logger.LogInformation("Persisted {Count} secret(s) to {Stores} User Secrets store(s) via wizard",
+            secrets.Count, secretsIds.Count);
+    }
+
     /// <summary>
     /// Removes secret values from a serialized config JSON node so they are not
     /// persisted to appsettings.json. Secrets should be stored in User Secrets
     /// or environment variables instead.
     /// </summary>
-    private static void StripSecrets(JsonNode? configNode)
+    /// <summary>
+    /// Removes secret-bearing fields from a serialized config JSON node.
+    /// Used when saving to disk and when returning config over the API.
+    /// </summary>
+    public static void StripSecrets(JsonNode? configNode)
     {
         if (configNode is not JsonObject config) return;
 
@@ -272,6 +314,8 @@ public sealed class ConfigurationService : IConfigurationService
                 azureDevOps["Pat"] = "";
             if (azureDevOps.ContainsKey("TenantId"))
                 azureDevOps["TenantId"] = "";
+            if (azureDevOps.ContainsKey("BearerToken"))
+                azureDevOps["BearerToken"] = "";
         }
     }
 
@@ -326,6 +370,9 @@ public sealed class ConfigurationService : IConfigurationService
 
         if (!string.IsNullOrEmpty(config.DevPlatform?.AzureDevOps?.TenantId))
             secrets["AgentSquad:DevPlatform:AzureDevOps:TenantId"] = config.DevPlatform!.AzureDevOps!.TenantId;
+
+        if (!string.IsNullOrEmpty(config.DevPlatform?.AzureDevOps?.BearerToken))
+            secrets["AgentSquad:DevPlatform:AzureDevOps:BearerToken"] = config.DevPlatform!.AzureDevOps!.BearerToken;
 
         if (config.Models is not null)
         {

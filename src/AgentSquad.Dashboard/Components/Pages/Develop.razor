@@ -26,6 +26,29 @@
     </div>
 </div>
 
+@if (!_loading && _isFirstRun)
+{
+    <div class="config-card" style="margin-bottom:1.5rem; border-left:4px solid var(--accent-primary);">
+        <div class="config-card-header" style="cursor:default;">
+            <span class="config-card-icon">🚀</span>
+            <span class="config-card-title">Welcome to AgentSquad!</span>
+        </div>
+        <div class="config-card-content" style="display:block;">
+            <p style="color:var(--text-secondary); margin-bottom:0.75rem;">
+                Fill in the wizard below to configure your first project. You'll need:
+            </p>
+            <ul style="color:var(--text-secondary); margin:0 0 0.75rem 1.25rem; padding:0; list-style:disc;">
+                <li>A project description (what you want the agents to build)</li>
+                <li>A GitHub or Azure DevOps repository (will be created if it doesn't exist)</li>
+                <li>A PAT (Personal Access Token) with repo permissions</li>
+            </ul>
+            <p style="color:var(--text-tertiary); font-size:0.85rem; margin:0;">
+                <strong>Prerequisites:</strong> .NET 8 SDK ✅ &nbsp;|&nbsp; GitHub Copilot CLI (optional, for AI) &nbsp;|&nbsp; Git CLI
+            </p>
+        </div>
+    </div>
+}
+
 @if (_loading)
 {
     <div class="config-loading" style="text-align:center; padding:3rem;">
@@ -731,6 +754,9 @@ else
     private bool _startSuccess;
     private string? _startError;
 
+    // First-run detection
+    private bool _isFirstRun;
+
     private string CurrentDefaultBranch
     {
         get => _settings.Platform == "GitHub" ? _settings.GitHub.DefaultBranch : _settings.AzureDevOps.DefaultBranch;
@@ -748,6 +774,13 @@ else
         try
         {
             _settings = await SettingsService.LoadAsync();
+
+            // Detect first-run: no description and no repo configured
+            _isFirstRun = string.IsNullOrWhiteSpace(_settings.Description)
+                && string.IsNullOrWhiteSpace(_settings.Platform == "GitHub"
+                    ? _settings.GitHub?.Repo
+                    : _settings.AzureDevOps?.Repository);
+
             if (_settings.ParentWorkItemId.HasValue)
             {
                 _ = LoadLinkedWorkItemAsync(_settings.ParentWorkItemId.Value);
@@ -1085,6 +1118,9 @@ else
         {
             await SettingsService.SaveAsync(_settings);
 
+            // Persist PAT/bearer to user-secrets and inject into runtime config
+            await ApplyAuthenticationAsync();
+
             // Start the project run via RunCoordinator
             var coordinator = ServiceProvider.GetService<AgentSquad.Orchestrator.RunCoordinator>();
             if (coordinator is not null)
@@ -1112,6 +1148,55 @@ else
         finally
         {
             _starting = false;
+        }
+    }
+
+    /// <summary>
+    /// Persists entered PAT/bearer to user-secrets for future sessions and injects
+    /// into the runtime config so the current run can use them immediately.
+    /// </summary>
+    private async Task ApplyAuthenticationAsync()
+    {
+        var config = ConfigService.GetCurrentConfig();
+        string? ghToken = null;
+        string? adoPat = null;
+        string? adoBearer = null;
+
+        if (_settings.Platform == "GitHub" && !string.IsNullOrWhiteSpace(_patInput))
+        {
+            ghToken = _patInput.Trim();
+            config.Project.GitHubToken = ghToken;
+        }
+        else if (_settings.Platform == "AzureDevOps")
+        {
+            if (!string.IsNullOrWhiteSpace(_patInput))
+            {
+                adoPat = _patInput.Trim();
+                config.DevPlatform ??= new DevPlatformConfig();
+                config.DevPlatform.AzureDevOps ??= new AzureDevOpsConfig();
+                config.DevPlatform.AzureDevOps.Pat = adoPat;
+            }
+            if (!string.IsNullOrWhiteSpace(_bearerInput))
+            {
+                adoBearer = _bearerInput.Trim();
+                config.DevPlatform ??= new DevPlatformConfig();
+                config.DevPlatform.AzureDevOps ??= new AzureDevOpsConfig();
+                config.DevPlatform.AzureDevOps.BearerToken = adoBearer;
+            }
+        }
+
+        // Persist to user-secrets so it survives restarts
+        if (ghToken is not null || adoPat is not null || adoBearer is not null)
+        {
+            try
+            {
+                await ConfigService.PersistSecretsOnlyAsync(ghToken, adoPat, adoBearer);
+                Logger.LogInformation("PAT/bearer persisted to user-secrets for future sessions");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogWarning(ex, "Failed to persist secrets to user-secrets — will use in-memory only");
+            }
         }
     }
 
