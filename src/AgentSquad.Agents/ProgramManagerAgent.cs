@@ -3189,9 +3189,33 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
+                    // === Gate: AgentToAgentResponse — human reviews before posting answer ===
+                    if (_gateCheck.RequiresHuman(GateIds.AgentToAgentResponse))
+                        UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on answer for #{request.IssueNumber}");
+                    var gateResult = await _gateCheck.WaitForGateAsync(
+                        GateIds.AgentToAgentResponse,
+                        $"{Identity.DisplayName} → {request.FromAgentId}: Answering question on Issue #{request.IssueNumber}\n\n" +
+                        $"**Question:** {request.Question}\n\n" +
+                        $"**Proposed Answer:**\n{answer}",
+                        request.IssueNumber, ct: ct);
+
+                    // Human may have edited the answer via gate feedback
+                    var finalAnswer = !string.IsNullOrWhiteSpace(gateResult.Feedback)
+                        && gateResult.Decision != GateDecision.Rejected
+                        ? gateResult.Feedback
+                        : answer;
+
+                    if (gateResult.Decision == GateDecision.Rejected)
+                    {
+                        Logger.LogInformation("Human rejected agent answer for issue #{Number}", request.IssueNumber);
+                        _taskTracker.RecordSubStep(clarifyStepId, "Human rejected answer — not posting");
+                        _taskTracker.CompleteStep(clarifyStepId);
+                        continue;
+                    }
+
                     // Post the answer on the issue
                     await _workItemService!.AddCommentAsync(request.IssueNumber,
-                        $"**{Identity.DisplayName}**: {answer}", ct);
+                        $"**{Identity.DisplayName}**: {finalAnswer}", ct);
 
                     // Notify the engineer
                     await _messageBus.PublishAsync(new ClarificationResponseMessage
@@ -3200,7 +3224,7 @@ public class ProgramManagerAgent : AgentBase
                         ToAgentId = request.FromAgentId,
                         MessageType = "ClarificationResponse",
                         IssueNumber = request.IssueNumber,
-                        Response = answer
+                        Response = finalAnswer
                     }, ct);
 
                     Logger.LogInformation(

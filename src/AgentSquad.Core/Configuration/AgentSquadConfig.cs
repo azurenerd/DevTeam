@@ -622,6 +622,7 @@ public static class GateIds
     public const string PRReviewApproval = "PRReviewApproval";
     public const string ReworkExhaustion = "ReworkExhaustion";
     public const string SourceBugEscalation = "SourceBugEscalation";
+    public const string AgentToAgentResponse = "AgentToAgentResponse";
 
     // Phase: Testing
     public const string TestResults = "TestResults";
@@ -659,6 +660,8 @@ public static class GateIds
             "Pause when an agent has exhausted its max rework cycles on a PR. When enabled: you decide the next step — merge as-is, provide guidance, reassign, or close. When auto: the system escalates or closes the PR based on configured policy."),
         ("Development", SourceBugEscalation, "Source Bug Escalation",
             "Pause when the Test Engineer finds bugs in source code (not test code). When enabled: you review the bug report and decide whether to send it back to the engineer or handle it differently. When auto: bug report is sent to the assigned engineer automatically."),
+        ("Development", AgentToAgentResponse, "Agent-to-Agent Response",
+            "Pause when any agent answers a question from another agent (e.g., PM answering engineer clarifications, Architect responding to SE questions). When enabled: you review, edit, or add context to the answer before it is posted. When auto: agent answers are posted immediately without human review."),
         ("Testing", TestResults, "Test Results",
             "Pause after test tiers complete (unit, integration, UI). When enabled: you review pass/fail results, coverage, and failure details before the PR proceeds. When auto: test results feed directly into the review/merge pipeline."),
         ("Testing", TestScreenshots, "Test Screenshots",

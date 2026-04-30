@@ -3642,6 +3642,17 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 if (pr is null)
                     continue;
 
+                // BUG FIX: Skip PRs that were merged/closed between discovery and review.
+                // After merge, the head branch is deleted — reading files from it returns empty,
+                // causing the reviewer to falsely claim "zero files in diff".
+                if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
+                {
+                    _reviewedPrNumbers.Add(prNumber);
+                    Logger.LogDebug("PR #{Number} is no longer open (state: {State}), skipping review",
+                        prNumber, pr.State);
+                    continue;
+                }
+
                 // Skip our own PRs (use colon delimiter for multi-PE correctness)
                 if (pr.Title.StartsWith($"{Identity.DisplayName}:", StringComparison.OrdinalIgnoreCase))
                 {

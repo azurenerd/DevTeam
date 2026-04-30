@@ -1426,6 +1426,7 @@ public partial class PullRequestWorkflow
 
         var sb = new System.Text.StringBuilder();
         sb.AppendLine("## Files Changed in This PR\n");
+        var filesRead = 0;
 
         foreach (var filePath in changedFiles)
         {
@@ -1438,6 +1439,7 @@ public partial class PullRequestWorkflow
                 if (string.IsNullOrWhiteSpace(content))
                     continue;
 
+                filesRead++;
                 var ext = Path.GetExtension(filePath).TrimStart('.');
                 string truncated;
                 if (content.Length > maxFileSizeChars)
@@ -1462,6 +1464,21 @@ public partial class PullRequestWorkflow
                 _logger.LogDebug(ex, "Could not read {Path} from branch {Branch} for review context",
                     filePath, headBranch);
             }
+        }
+
+        // Safety: if the API listed changed files but we couldn't read any, the branch
+        // was likely deleted (merged PR). Return a clear indicator instead of empty context
+        // that would mislead the reviewer into thinking "zero files".
+        if (filesRead == 0 && changedFiles.Count > 0)
+        {
+            _logger.LogWarning(
+                "PR #{PrNumber}: {FileCount} files listed in diff but none readable from branch '{Branch}' " +
+                "(branch may be deleted after merge)",
+                prNumber, changedFiles.Count, headBranch);
+            return $"⚠️ UNABLE TO READ FILES: {changedFiles.Count} file(s) listed in PR diff but branch " +
+                $"'{headBranch}' is not accessible (likely deleted after merge). " +
+                "DO NOT review this PR — it has already been merged.\n\n" +
+                $"Files that were changed: {string.Join(", ", changedFiles.Take(20))}";
         }
 
         return sb.ToString();

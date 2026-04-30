@@ -277,16 +277,24 @@ public class AgentSpawnManager
             ? _registry.GetAgentsByRole(AgentRole.SoftwareEngineer).Count()
             : sameRoleCount;
 
+        // Use persisted display name from previous spawn (ensures PR recovery works after restart)
+        var displayName = definition.SpawnedDisplayName
+            ?? $"{definition.RoleName} {sameRoleCount + 1}";
+
         var identity = new AgentIdentity
         {
             Id = $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}"[..Math.Min(48, $"sme-{definition.DefinitionId}-{Guid.NewGuid():N}".Length)],
-            DisplayName = $"{definition.RoleName} {sameRoleCount + 1}",
+            DisplayName = displayName,
             Role = agentRole,
             ModelTier = definition.ModelTier,
             CustomAgentName = $"sme:{definition.DefinitionId}",
             Rank = rankBase,
             Capabilities = definition.Capabilities.ToList()
         };
+
+        // Persist the display name for future restarts (first spawn sets it permanently)
+        if (definition.SpawnedDisplayName is null)
+            definition.SpawnedDisplayName = displayName;
 
         try
         {

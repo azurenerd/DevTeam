@@ -1,5 +1,6 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Steps;
+using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
@@ -126,6 +127,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly IAgentTaskTracker? _taskTracker;
     private readonly IRepositoryContentService? _repositoryContentService;
     private readonly IRunBranchProvider? _branchProvider;
+    private readonly ActiveLlmCallTracker? _llmCallTracker;
     private readonly ILogger<DashboardDataService> _logger;
 
     private readonly Dictionary<string, AgentSnapshot> _agentCache = new();
@@ -164,7 +166,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         ILogger<DashboardDataService> logger,
         IAgentTaskTracker? taskTracker = null,
         IRepositoryContentService? repositoryContentService = null,
-        IRunBranchProvider? branchProvider = null)
+        IRunBranchProvider? branchProvider = null,
+        ActiveLlmCallTracker? llmCallTracker = null)
     {
         _registry = registry;
         _healthMonitor = healthMonitor;
@@ -183,6 +186,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _taskTracker = taskTracker;
         _repositoryContentService = repositoryContentService;
         _branchProvider = branchProvider;
+        _llmCallTracker = llmCallTracker;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -913,14 +917,24 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             taskName = _taskTracker.GetGroupedSteps(agent.Identity.Id)
                 .FirstOrDefault(g => g.TaskId == currentStep.TaskId)?.DisplayName;
         }
+        // Overlay "Working" status when agent has an active LLM call but reports Idle/Online
+        var effectiveStatus = agent.Status;
+        var effectiveReason = agent.StatusReason;
+        var activeCall = _llmCallTracker?.GetActiveCall(agent.Identity.Id);
+        if (activeCall is not null && effectiveStatus is not AgentStatus.Working)
+        {
+            effectiveStatus = AgentStatus.Working;
+            effectiveReason = $"AI call in progress ({activeCall.ModelName})";
+        }
+
         return new()
         {
             Id = agent.Identity.Id,
             DisplayName = agent.Identity.DisplayName,
             Role = agent.Identity.Role,
             ModelTier = agent.Identity.ModelTier,
-            Status = agent.Status,
-            StatusReason = agent.StatusReason,
+            Status = effectiveStatus,
+            StatusReason = effectiveReason,
             CreatedAt = agent.Identity.CreatedAt,
             AssignedPullRequest = agent.Identity.AssignedPullRequest,
             Specialty = agent.Identity.Role == AgentRole.Custom

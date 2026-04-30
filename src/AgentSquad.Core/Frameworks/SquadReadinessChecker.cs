@@ -190,6 +190,25 @@ public sealed class SquadReadinessChecker : IFrameworkLifecycle
             CreateNoWindow = true
         };
 
+        // BUG FIX: When dotnet runs as a child process (e.g., from VS Code or a service),
+        // it may not inherit the user's full PATH. Augment with common tool locations.
+        if (isWindows)
+        {
+            var currentPath = psi.Environment.TryGetValue("PATH", out var p) ? p ?? "" : "";
+            var appDataNpm = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "npm");
+            var programFilesNode = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs");
+            var localAppDataPrograms = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs");
+
+            var extraPaths = new[] { appDataNpm, programFilesNode, localAppDataPrograms }
+                .Where(dir => Directory.Exists(dir) && !currentPath.Contains(dir, StringComparison.OrdinalIgnoreCase));
+
+            var augmented = string.Join(';', extraPaths.Append(currentPath));
+            psi.Environment["PATH"] = augmented;
+        }
+
         using var process = Process.Start(psi)
             ?? throw new InvalidOperationException($"Failed to start '{command}'");
 

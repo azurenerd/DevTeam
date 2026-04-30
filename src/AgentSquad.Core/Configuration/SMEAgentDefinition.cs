@@ -48,6 +48,12 @@ public record SMEAgentDefinition
 
     /// <summary>When this definition was created</summary>
     public DateTime CreatedAt { get; init; } = DateTime.UtcNow;
+
+    /// <summary>
+    /// The display name assigned when this agent was first spawned.
+    /// Persisted so that restarts produce the same name (critical for PR/issue recovery).
+    /// </summary>
+    public string? SpawnedDisplayName { get; set; }
 }
 
 /// <summary>

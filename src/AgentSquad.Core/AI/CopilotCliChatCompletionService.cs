@@ -18,17 +18,20 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
     private readonly CopilotCliProcessManager _processManager;
     private readonly CopilotCliConfig _config;
     private readonly AgentUsageTracker _usageTracker;
+    private readonly ActiveLlmCallTracker _llmCallTracker;
     private readonly ILogger<CopilotCliChatCompletionService> _logger;
 
     public CopilotCliChatCompletionService(
         CopilotCliProcessManager processManager,
         CopilotCliConfig config,
         AgentUsageTracker usageTracker,
+        ActiveLlmCallTracker llmCallTracker,
         ILogger<CopilotCliChatCompletionService> logger)
     {
         _processManager = processManager ?? throw new ArgumentNullException(nameof(processManager));
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _usageTracker = usageTracker ?? throw new ArgumentNullException(nameof(usageTracker));
+        _llmCallTracker = llmCallTracker ?? throw new ArgumentNullException(nameof(llmCallTracker));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -57,28 +60,42 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         // Pick up CLI session ID from the ambient call context (set by the agent)
         var sessionId = AgentCallContext.CurrentSessionId;
 
+        // Track active LLM call for dashboard status overlay
+        var agentIdForTracking = AgentCallContext.CurrentAgentId;
+        var effectiveModelForTracking = modelOverride ?? _config.ModelName;
+        if (agentIdForTracking is not null)
+            _llmCallTracker.NotifyCallStarted(agentIdForTracking, effectiveModelForTracking);
+
         // Retry loop for transient errors (auth failures, timeouts)
         var maxRetries = _config.MaxRetries;
         CopilotCliResult? result = null;
-        for (var attempt = 0; attempt <= maxRetries; attempt++)
+        try
         {
-            result = await _processManager.ExecutePromptAsync(prompt, modelOverride, sessionId, cancellationToken);
-
-            if (result.IsSuccess)
-                break;
-
-            if (attempt < maxRetries && IsTransientError(result.Error))
+            for (var attempt = 0; attempt <= maxRetries; attempt++)
             {
-                var backoffSeconds = attempt switch { 0 => 5, 1 => 15, _ => 30 };
-                _logger.LogWarning(
-                    "Transient error on attempt {Attempt}/{MaxRetries}, retrying in {Backoff}s: {Error}",
-                    attempt + 1, maxRetries, backoffSeconds, result.Error);
-                await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken);
-                continue;
-            }
+                result = await _processManager.ExecutePromptAsync(prompt, modelOverride, sessionId, cancellationToken);
 
-            // Non-transient error or retries exhausted
-            break;
+                if (result.IsSuccess)
+                    break;
+
+                if (attempt < maxRetries && IsTransientError(result.Error))
+                {
+                    var backoffSeconds = attempt switch { 0 => 5, 1 => 15, _ => 30 };
+                    _logger.LogWarning(
+                        "Transient error on attempt {Attempt}/{MaxRetries}, retrying in {Backoff}s: {Error}",
+                        attempt + 1, maxRetries, backoffSeconds, result.Error);
+                    await Task.Delay(TimeSpan.FromSeconds(backoffSeconds), cancellationToken);
+                    continue;
+                }
+
+                // Non-transient error or retries exhausted
+                break;
+            }
+        }
+        finally
+        {
+            if (agentIdForTracking is not null)
+                _llmCallTracker.NotifyCallCompleted(agentIdForTracking);
         }
 
         if (!result!.IsSuccess)

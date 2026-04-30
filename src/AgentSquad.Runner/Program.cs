@@ -47,6 +47,7 @@ builder.WebHost.UseStaticWebAssets();
 builder.Services.AddInProcessMessageBus();
 builder.Services.AddSingleton<AgentSquad.Core.AI.AgentUsageTracker>(sp =>
     new AgentSquad.Core.AI.AgentUsageTracker(sp.GetRequiredService<AgentStateStore>()));
+builder.Services.AddSingleton<AgentSquad.Core.AI.ActiveLlmCallTracker>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.RequirementsCache>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.AgentChatService>();
 builder.Services.AddSemanticKernelModels();
