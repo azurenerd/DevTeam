@@ -2201,6 +2201,60 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 // ── LEADER PE: refresh cache from GitHub to see latest assignments, then pick ──
                 await _taskManager.LoadTasksAsync(ct);
 
+                // ═══ ASSIGN-FIRST RULE: Always ensure idle workers get tasks before the leader blocks itself ═══
+                // The leader's implementation loop can block for many minutes. Before self-claiming
+                // ANY task, verify all available workers are busy. If any are idle, assign to them first.
+                var allWorkers = _registry.GetAgentsByRole(AgentRole.SoftwareEngineer)
+                    .Where(a => a.Identity.Id != Identity.Id)
+                    .ToList();
+
+                if (allWorkers.Count > 0)
+                {
+                    var idleWorkers = allWorkers
+                        .Where(a => a.Status is AgentStatus.Idle or AgentStatus.Online or AgentStatus.Initializing)
+                        .Where(a => a.Identity.AssignedPullRequest is null)
+                        .ToList();
+
+                    if (idleWorkers.Count > 0)
+                    {
+                        // There are idle workers — try to assign them work before we pick up our own
+                        Logger.LogInformation(
+                            "SE leader: {IdleCount} idle worker(s) detected, assigning tasks before self-claiming",
+                            idleWorkers.Count);
+                        await AssignTasksToAvailableEngineersAsync(ct);
+
+                        // Re-check: are there still unassigned tasks that idle workers could take?
+                        // Only proceed to self-claim if all workers are now busy OR no more assignable tasks remain.
+                        await _taskManager.LoadTasksAsync(ct); // refresh after assignment
+                        var unassignedTasks = _taskManager.Tasks
+                            .Where(t => t.Status == "Pending"
+                                && _taskManager.IsWaveEligible(t)
+                                && _taskManager.AreDependenciesMet(t)
+                                && t.Id != IntegrationTaskId
+                                && t.IssueNumber.HasValue
+                                && !IsFoundationTask(t)
+                                && string.IsNullOrEmpty(t.AssignedTo))
+                            .ToList();
+
+                        // Re-read idle workers after assignment attempt
+                        var stillIdleWorkers = _registry.GetAgentsByRole(AgentRole.SoftwareEngineer)
+                            .Where(a => a.Identity.Id != Identity.Id)
+                            .Where(a => a.Status is AgentStatus.Idle or AgentStatus.Online or AgentStatus.Initializing)
+                            .Where(a => a.Identity.AssignedPullRequest is null)
+                            .ToList();
+
+                        if (stillIdleWorkers.Count > 0 && unassignedTasks.Count > 0)
+                        {
+                            // Workers are still idle and tasks exist — defer self-claim to give workers
+                            // time to pick up assignments (they may be mid-loop)
+                            Logger.LogInformation(
+                                "SE leader deferring self-claim: {IdleWorkers} worker(s) still idle, {Tasks} unassigned task(s) available",
+                                stillIdleWorkers.Count, unassignedTasks.Count);
+                            return;
+                        }
+                    }
+                }
+
                 // Prioritize foundation task (T1/W0) for self-implementation — it sets the
                 // project structure that all other tasks depend on, so the Lead handles it directly.
                 var foundationTask = _taskManager.Tasks
@@ -2238,38 +2292,22 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     return;
                 }
 
-                // Leader PE: guard against grabbing non-High tasks if we recently requested a PE spawn
-                // AND workers (other PEs, SEs, JEs) actually exist to handle them.
-                if (!string.Equals(task.Complexity, "High", StringComparison.OrdinalIgnoreCase)
-                    && DateTime.UtcNow - _lastResourceRequestTime < SpawnCooldown)
+                // Final guard: if non-foundation task and idle workers exist, defer to them
+                if (!IsFoundationTask(task))
                 {
-                    var allWorkers = _registry.GetAgentsByRole(AgentRole.SoftwareEngineer)
-                        .Where(a => a.Identity.Id != Identity.Id) // other SE workers
+                    var busyCheck = _registry.GetAgentsByRole(AgentRole.SoftwareEngineer)
+                        .Where(a => a.Identity.Id != Identity.Id)
+                        .Where(a => a.Status is AgentStatus.Idle or AgentStatus.Online or AgentStatus.Initializing)
+                        .Where(a => a.Identity.AssignedPullRequest is null)
                         .ToList();
-                    var freeWorkers = allWorkers.Count(a => !_agentAssignments.ContainsKey(a.Identity.Id));
 
-                    if (freeWorkers > 0)
+                    if (busyCheck.Count > 0)
                     {
                         Logger.LogInformation(
-                            "SE leader deferring {Complexity} task {TaskId} — {FreeWorkers} worker(s) available, " +
-                            "spawn cooldown active ({Remaining:F0}s remaining)",
-                            task.Complexity, task.Id, freeWorkers,
-                            (SpawnCooldown - (DateTime.UtcNow - _lastResourceRequestTime)).TotalSeconds);
+                            "SE leader deferring task {TaskId} ({Complexity}) — {IdleCount} idle worker(s) should take it",
+                            task.Id, task.Complexity, busyCheck.Count);
                         return;
                     }
-
-                    // Only wait for spawned worker if at least one worker is already registered
-                    if (allWorkers.Count > 0)
-                    {
-                        Logger.LogDebug(
-                            "SE leader waiting for spawned worker before taking {Complexity} task {TaskId}",
-                            task.Complexity, task.Id);
-                        return;
-                    }
-
-                    Logger.LogInformation(
-                        "SE leader taking {Complexity} task {TaskId} — no workers registered yet, not waiting",
-                        task.Complexity, task.Id);
                 }
             }
 
