@@ -207,6 +207,7 @@ public class RunCoordinator
 
         // Clear any stale state from a previous run and set the new run ID
         await _stateStore.ClearAllCheckpointsAsync(ct);
+        _stateStore.ResetRunStartedUtc(); // Advance run scope so queries don't see prior project's items
         _workflow.RunId = run.RunId;
 
         await _stateStore.SaveActiveRunAsync(run, ct);

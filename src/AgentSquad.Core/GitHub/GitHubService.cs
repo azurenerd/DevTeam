@@ -17,7 +17,9 @@ public class GitHubService : IGitHubService
     private readonly object _repoContextLock = new();
     private readonly ILogger<GitHubService> _logger;
     private readonly RateLimitManager _rl;
-    private readonly DateTime? _runStartedUtc;
+    private readonly AgentStateStore? _stateStore;
+    // Read lazily — RunStartedUtc may be updated by StartProjectAsync after DI construction
+    private DateTime? _runStartedUtc => _stateStore?.RunStartedUtc;
 
     /// <summary>Label automatically added to every issue and PR created by the agent system.</summary>
     internal const string AiGeneratedLabel = "AI-Generated";
@@ -86,7 +88,7 @@ public class GitHubService : IGitHubService
     {
         _logger = logger;
         _rl = rateLimitManager;
-        _runStartedUtc = stateStore?.RunStartedUtc;
+        _stateStore = stateStore;
 
         var projectConfig = config.Value.Project;
         var repoValue = projectConfig.GitHubRepo ?? "";

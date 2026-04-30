@@ -374,6 +374,24 @@ public class AgentStateStore : IDisposable
     /// </summary>
     public DateTime RunStartedUtc { get; private set; }
 
+    /// <summary>
+    /// Reset RunStartedUtc to now. Call when starting a NEW project (not on crash-recovery restart).
+    /// This ensures that queries scoped by CreatedAt >= RunStartedUtc only see the new project's items,
+    /// not leftover items from a prior project in the same database.
+    /// </summary>
+    public void ResetRunStartedUtc()
+    {
+        var now = DateTime.UtcNow;
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = """
+            INSERT INTO run_metadata (key, value) VALUES ('run_started_utc', @val)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+            """;
+        cmd.Parameters.AddWithValue("@val", now.ToString("O"));
+        cmd.ExecuteNonQuery();
+        RunStartedUtc = now;
+    }
+
     /// <summary>The UTC timestamp of the most recent runner boot.</summary>
     public DateTime LastBootUtc { get; private set; }
 
