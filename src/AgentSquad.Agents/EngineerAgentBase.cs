@@ -51,6 +51,9 @@ public abstract class EngineerAgentBase : AgentBase
     // Track issues explicitly assigned to THIS agent via message bus.
     // Prevents multiple same-name agents from racing on the same PR via Priority 5 recovery.
     protected readonly HashSet<int> BusAssignedIssues = new();
+    // Track retry attempts for issue assignments that fail during WorkOnIssueAsync
+    private readonly Dictionary<int, int> _issueRetryAttempts = new();
+    private const int MaxIssueRetries = 3;
     protected readonly List<IDisposable> Subscriptions = new();
     // Track rework attempts per PR per reviewer to enforce per-reviewer MaxReworkCycles.
     // Key: (prNumber, reviewerName) → attempt count.
@@ -250,7 +253,39 @@ public abstract class EngineerAgentBase : AgentBase
                 // Priority 2: Process new issue assignments
                 if (AssignmentQueue.TryDequeue(out var assignment))
                 {
-                    await WorkOnIssueAsync(assignment, ct);
+                    try
+                    {
+                        await WorkOnIssueAsync(assignment, ct);
+                        _issueRetryAttempts.Remove(assignment.IssueNumber);
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        _issueRetryAttempts.TryGetValue(assignment.IssueNumber, out var attempts);
+                        attempts++;
+                        if (attempts < MaxIssueRetries)
+                        {
+                            _issueRetryAttempts[assignment.IssueNumber] = attempts;
+                            Logger.LogWarning(ex,
+                                "{Role} {Name} failed issue #{Number} (attempt {Attempt}/{Max}), re-enqueuing",
+                                Identity.Role, Identity.DisplayName, assignment.IssueNumber, attempts, MaxIssueRetries);
+                            RecordError($"Issue #{assignment.IssueNumber} attempt {attempts} failed: {ex.Message}",
+                                Microsoft.Extensions.Logging.LogLevel.Warning, ex);
+                            AssignmentQueue.Enqueue(assignment);
+                            await Task.Delay(TimeSpan.FromSeconds(30), ct);
+                        }
+                        else
+                        {
+                            Logger.LogError(ex,
+                                "{Role} {Name} permanently failed issue #{Number} after {Max} attempts",
+                                Identity.Role, Identity.DisplayName, assignment.IssueNumber, MaxIssueRetries);
+                            RecordError($"Issue #{assignment.IssueNumber} permanently failed: {ex.Message}",
+                                Microsoft.Extensions.Logging.LogLevel.Error, ex);
+                            _issueRetryAttempts.Remove(assignment.IssueNumber);
+                            CurrentIssueNumber = null;
+                            await Task.Delay(TimeSpan.FromSeconds(10), ct);
+                        }
+                    }
                     continue;
                 }
 
@@ -548,6 +583,15 @@ public abstract class EngineerAgentBase : AgentBase
         var taskId = $"issue-{assignment.IssueNumber}";
         try
         {
+            // Guard: services must be available (ActivatorUtilities should resolve them from DI)
+            if (WorkItemService is null)
+            {
+                Logger.LogError("{Role} {Name} cannot work on issue #{Number}: WorkItemService is null (DI misconfiguration)",
+                    Identity.Role, Identity.DisplayName, assignment.IssueNumber);
+                CurrentIssueNumber = null;
+                return;
+            }
+
             // Clear any previous PR tracking from prior task
             CurrentPrNumber = null;
             Identity.AssignedPullRequest = null;
@@ -699,6 +743,15 @@ public abstract class EngineerAgentBase : AgentBase
                 "PMSpec.md",
                 branchName,
                 ct);
+
+            if (pr is null)
+            {
+                Logger.LogError("{Role} {Name} PR creation returned null for issue #{Number}",
+                    Identity.Role, Identity.DisplayName, issue.Number);
+                _taskTracker.CompleteStep(createPrStepId);
+                CurrentIssueNumber = null;
+                return;
+            }
 
             CurrentPrNumber = pr.Number;
             Identity.AssignedPullRequest = pr.Number.ToString();

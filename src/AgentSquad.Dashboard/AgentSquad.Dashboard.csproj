@@ -15,6 +15,8 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>b0bc835e-6076-417b-8f54-56cce568d9c7</UserSecretsId>
+    <!-- Serve Dashboard static assets at root (not _content/AgentSquad.Dashboard/) when hosted by Runner -->
+    <StaticWebAssetBasePath>/</StaticWebAssetBasePath>
   </PropertyGroup>
 
 </Project>

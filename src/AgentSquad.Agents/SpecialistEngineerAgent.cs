@@ -49,11 +49,16 @@ public class SpecialistEngineerAgent : EngineerAgentBase
         PlaywrightRunner? playwrightRunner = null,
         DecisionGateService? decisionGate = null,
         IAgentTaskTracker? taskTracker = null,
-        IBranchService? branchService = null)
+        IPullRequestService? prService = null,
+        IWorkItemService? workItemService = null,
+        IRepositoryContentService? repoContent = null,
+        IReviewService? reviewService = null,
+        IBranchService? branchService = null,
+        IRunBranchProvider? branchProvider = null)
         : base(identity, messageBus, prWorkflow, issueWorkflow,
                projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
                promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
-               branchService: branchService)
+               prService, workItemService, repoContent, reviewService, branchService, branchProvider)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
     }
