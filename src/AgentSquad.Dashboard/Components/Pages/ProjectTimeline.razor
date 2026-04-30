@@ -1127,12 +1127,19 @@ else
             winnerKey = bodyMatch.Groups[1].Value.ToLowerInvariant();
 
         // Try to find in-memory screenshot data from the CandidateStateStore.
+        // Filter by linked issue to avoid showing screenshots from unrelated tasks.
         var storeScreenshots = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (CandidateStore is not null)
+        if (CandidateStore is not null && bodyMatch.Success)
         {
+            // Correlate this PR to its strategy task via linked issue number
+            var linkedIssue = PullRequestWorkflow.ParseLinkedIssueNumber(pr.Body ?? "");
+            var linkedIssueStr = linkedIssue?.ToString();
+
             foreach (var task in CandidateStore.GetRecentTasks(20))
             {
                 if (task?.Candidates is null) continue;
+                // Only use screenshots from the task matching this PR's linked issue
+                if (linkedIssueStr is not null && task.TaskId != linkedIssueStr) continue;
                 foreach (var (stratId, snap) in task.Candidates)
                 {
                     if (!string.IsNullOrEmpty(snap?.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))
@@ -1144,6 +1151,7 @@ else
             foreach (var task in CandidateStore.GetActiveTasks())
             {
                 if (task?.Candidates is null) continue;
+                if (linkedIssueStr is not null && task.TaskId != linkedIssueStr) continue;
                 foreach (var (stratId, snap) in task.Candidates)
                 {
                     if (!string.IsNullOrEmpty(snap?.ScreenshotBase64) && !storeScreenshots.ContainsKey(stratId))

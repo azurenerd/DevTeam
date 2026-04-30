@@ -2,15 +2,16 @@
 @page "/repository/files/{*FilePath}"
 @using AgentSquad.Core.DevPlatform.Models
 @using AgentSquad.Dashboard.Services
+@using Markdig
 @inject IDashboardDataService DataService
 @inject NavigationManager Navigation
 @rendermode InteractiveServer
 @implements IDisposable
 
-<PageTitle>Virtual Dev Team — Files</PageTitle>
+<PageTitle>Virtual Dev Team — Code</PageTitle>
 
 <div class="page-header" data-testid="page-repository-files">
-    <h1 class="page-title">📁 Repository Files</h1>
+    <h1 class="page-title">💻 Code</h1>
     <div class="header-badges">
         <span class="badge badge-info">@_effectiveBranch</span>
         @if (_fileTree is not null)
@@ -29,7 +30,7 @@
         📋 Issues
     </button>
     <button class="repo-tab active">
-        📁 Files
+        💻 Code
     </button>
 </div>
 
@@ -94,20 +95,40 @@ else if (_viewingFile)
             {
                 <span class="files-content-truncated">⚠️ Truncated (showing first 100KB)</span>
             }
+            @if (IsMarkdownFile(_fileContent.FileName) && !_fileContent.WasTruncated)
+            {
+                <div class="files-view-toggle">
+                    <button class="files-toggle-btn @(!_previewMarkdown ? "active" : "")" @onclick="() => _previewMarkdown = false">
+                        &lt;/&gt; Code
+                    </button>
+                    <button class="files-toggle-btn @(_previewMarkdown ? "active" : "")" @onclick="() => _previewMarkdown = true">
+                        👁️ Preview
+                    </button>
+                </div>
+            }
         </div>
-        <div class="files-content-viewer">
-            <table class="files-code-table">
-                @{ var lines = (_fileContent.Content ?? "").Split('\n'); }
-                @for (var i = 0; i < lines.Length; i++)
-                {
-                    var lineNum = i + 1;
-                    <tr class="files-code-line">
-                        <td class="files-line-number">@lineNum</td>
-                        <td class="files-line-content"><pre>@lines[i]</pre></td>
-                    </tr>
-                }
-            </table>
-        </div>
+        @if (_previewMarkdown && IsMarkdownFile(_fileContent.FileName))
+        {
+            <div class="files-markdown-preview">
+                @((MarkupString)RenderMarkdownSafe(_fileContent.Content ?? ""))
+            </div>
+        }
+        else
+        {
+            <div class="files-content-viewer">
+                <table class="files-code-table">
+                    @{ var lines = (_fileContent.Content ?? "").Split('\n'); }
+                    @for (var i = 0; i < lines.Length; i++)
+                    {
+                        var lineNum = i + 1;
+                        <tr class="files-code-line">
+                            <td class="files-line-number">@lineNum</td>
+                            <td class="files-line-content"><pre>@lines[i]</pre></td>
+                        </tr>
+                    }
+                </table>
+            </div>
+        }
     }
 }
 else
@@ -164,7 +185,13 @@ else
     private bool _loading = true;
     private bool _configured = true;
     private bool _viewingFile;
+    private bool _previewMarkdown;
     private string? _error;
+
+    private static readonly MarkdownPipeline _markdownPipeline = new MarkdownPipelineBuilder()
+        .UseAdvancedExtensions()
+        .DisableHtml()
+        .Build();
 
     protected override async Task OnInitializedAsync()
     {
@@ -224,6 +251,7 @@ else
         {
             _viewingFile = true;
             _fileContent = null;
+            _previewMarkdown = IsMarkdownFile(normalizedPath); // Default to preview for .md files
             StateHasChanged();
             _fileContent = await DataService.GetFileContentWithMetadataAsync(normalizedPath, _effectiveBranch);
             StateHasChanged();
@@ -232,6 +260,7 @@ else
         {
             _viewingFile = false;
             _fileContent = null;
+            _previewMarkdown = false;
         }
     }
 
@@ -328,6 +357,18 @@ else
             < 1024 * 1024 => $"{bytes / 1024.0:F1} KB",
             _ => $"{bytes / (1024.0 * 1024.0):F1} MB"
         };
+    }
+
+    private static bool IsMarkdownFile(string fileName)
+    {
+        return fileName.EndsWith(".md", StringComparison.OrdinalIgnoreCase) ||
+               fileName.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase) ||
+               fileName.EndsWith(".mdx", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string RenderMarkdownSafe(string markdown)
+    {
+        return Markdown.ToHtml(markdown, _markdownPipeline);
     }
 
     public void Dispose() { }

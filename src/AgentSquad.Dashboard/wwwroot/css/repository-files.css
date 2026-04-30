@@ -221,6 +221,155 @@
     background: var(--bg-hover, rgba(177, 186, 196, 0.04));
 }
 
+/* ── View Toggle (Code / Preview) ── */
+.files-view-toggle {
+    display: flex;
+    gap: 2px;
+    margin-left: auto;
+    background: var(--bg-tertiary, #0d1117);
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 6px;
+    padding: 2px;
+}
+
+.files-toggle-btn {
+    padding: 4px 10px;
+    border: none;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary, #8b949e);
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.files-toggle-btn:hover {
+    color: var(--text-primary, #c9d1d9);
+}
+
+.files-toggle-btn.active {
+    background: var(--bg-secondary, #161b22);
+    color: var(--text-primary, #c9d1d9);
+    font-weight: 600;
+}
+
+/* ── Markdown Preview ── */
+.files-markdown-preview {
+    padding: 1.5rem 2rem;
+    background: var(--bg-primary, #0d1117);
+    border: 1px solid var(--border-color, #30363d);
+    border-top: none;
+    border-bottom-left-radius: 6px;
+    border-bottom-right-radius: 6px;
+    color: var(--text-primary, #c9d1d9);
+    font-size: 0.9rem;
+    line-height: 1.7;
+    overflow-x: auto;
+}
+
+.files-markdown-preview h1,
+.files-markdown-preview h2,
+.files-markdown-preview h3,
+.files-markdown-preview h4,
+.files-markdown-preview h5,
+.files-markdown-preview h6 {
+    color: var(--text-primary, #c9d1d9);
+    margin-top: 1.5em;
+    margin-bottom: 0.5em;
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-color, #30363d);
+    padding-bottom: 0.3em;
+}
+
+.files-markdown-preview h1 { font-size: 1.75rem; }
+.files-markdown-preview h2 { font-size: 1.4rem; }
+.files-markdown-preview h3 { font-size: 1.15rem; border-bottom: none; }
+.files-markdown-preview h4,
+.files-markdown-preview h5,
+.files-markdown-preview h6 { font-size: 1rem; border-bottom: none; }
+
+.files-markdown-preview p {
+    margin: 0.75em 0;
+}
+
+.files-markdown-preview code {
+    background: var(--bg-secondary, #161b22);
+    padding: 0.2em 0.4em;
+    border-radius: 4px;
+    font-family: var(--font-mono, 'Cascadia Code', 'Fira Code', monospace);
+    font-size: 0.85em;
+}
+
+.files-markdown-preview pre {
+    background: var(--bg-secondary, #161b22);
+    border: 1px solid var(--border-color, #30363d);
+    border-radius: 6px;
+    padding: 1rem;
+    overflow-x: auto;
+    margin: 1em 0;
+}
+
+.files-markdown-preview pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+}
+
+.files-markdown-preview blockquote {
+    border-left: 3px solid var(--accent-primary, #58a6ff);
+    padding-left: 1rem;
+    margin-left: 0;
+    color: var(--text-secondary, #8b949e);
+}
+
+.files-markdown-preview ul,
+.files-markdown-preview ol {
+    padding-left: 1.5rem;
+    margin: 0.5em 0;
+}
+
+.files-markdown-preview li {
+    margin: 0.25em 0;
+}
+
+.files-markdown-preview a {
+    color: var(--accent-primary, #58a6ff);
+    text-decoration: none;
+}
+
+.files-markdown-preview a:hover {
+    text-decoration: underline;
+}
+
+.files-markdown-preview table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+.files-markdown-preview th,
+.files-markdown-preview td {
+    border: 1px solid var(--border-color, #30363d);
+    padding: 0.5em 0.75em;
+    text-align: left;
+}
+
+.files-markdown-preview th {
+    background: var(--bg-secondary, #161b22);
+    font-weight: 600;
+}
+
+.files-markdown-preview img {
+    max-width: 100%;
+    border-radius: 6px;
+}
+
+.files-markdown-preview hr {
+    border: none;
+    border-top: 1px solid var(--border-color, #30363d);
+    margin: 1.5em 0;
+}
+
 .files-line-number {
     padding: 0 0.75rem;
     text-align: right;

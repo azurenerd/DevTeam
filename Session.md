@@ -337,4 +337,12 @@ Key settings:
 Note: Don't do any long pauses that are more than 1 minute long in the Copilot chat, as that makes it so you ignore me for X minutes--always keep checking back no more than a minute so the chat
 thread isn't blocked to get instructions from me. 
 
+## 8. Working Preferences
+
+1. **Rubber-duck validation is MANDATORY**: Every TODO plan and implementation must go through rubber-duck agent validation before executing. No exceptions — even for "simple" changes. Call the rubber-duck agent after planning your approach but before implementing it.
+2. **Never sleep > 60 seconds**: Keep checking back within 1 minute.
+3. **Never kill by process name**: Always use `Stop-Process -Id <PID>` with a specific PID.
+4. **Never use Tee-Object**: It causes issues in this environment.
+5. **Never approve gates without user permission**: Gates require explicit user sign-off.
+
 *Last updated: 2026-05 (Develop wizard, platform abstraction layer, task/step card display, Pipelines page, 18 dashboard pages. ADO end-to-end validated.)*
