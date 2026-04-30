@@ -56,6 +56,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private readonly IOptionsMonitor<StrategyFrameworkConfig>? _strategyConfig;
     private readonly StrategyTaskStepBridge? _strategyStepBridge;
 
+    /// <summary>
+    /// When a strategy winner is chosen but apply/build fails, store its patch here
+    /// so the legacy codegen path can use it as reference context instead of starting from scratch.
+    /// </summary>
+    private string? _failedWinnerPatchContext;
+
     private bool _planningComplete;
     // Guards against repeatedly logging the same tracker steps and status messages
     // while the SE is idling waiting for PM to create Enhancement issues. Without this
@@ -2419,6 +2425,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var pmSpecDoc = await ProjectFiles.GetPMSpecAsync(ct);
             var techStack = Config.Project.TechStack;
 
+            // If the strategy framework chose a winner but apply/build failed, pass it as reference
+            string? winnerReference = _failedWinnerPatchContext;
+            _failedWinnerPatchContext = null; // consume once
+
             // Build a synthetic issue for the step generation
             AgentIssue? sourceIssue = null;
             if (task.IssueNumber.HasValue)
@@ -2432,6 +2442,19 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 State = "open",
                 Labels = new List<string>()
             };
+
+            // Enrich the issue body with the failed winner's patch as reference code
+            if (!string.IsNullOrEmpty(winnerReference))
+            {
+                var referenceNote =
+                    "\n\n## Reference Implementation (from strategy framework — failed to apply cleanly)\n" +
+                    "Use this as a strong starting point. Fix any issues that prevented it from building:\n\n" +
+                    $"```diff\n{(winnerReference.Length > 8000 ? winnerReference[..8000] + "\n...(truncated)" : winnerReference)}\n```";
+                syntheticIssue = syntheticIssue with { Body = (syntheticIssue.Body ?? "") + referenceNote };
+                Logger.LogInformation(
+                    "Injecting failed strategy winner patch ({Length} chars) as reference for legacy codegen on task {TaskId}",
+                    winnerReference.Length, task.Id);
+            }
 
             // SinglePassMode: skip step generation, produce complete implementation in one prompt
             var useSinglePass = Config.CopilotCli.SinglePassMode;
@@ -2982,8 +3005,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogWarning(
-                    "Strategy framework: winner {Strategy} apply failed for task {TaskId}: {Reason}; falling back",
+                    "Strategy framework: winner {Strategy} apply failed for task {TaskId}: {Reason}; falling back with winner context",
                     winner.StrategyId, task.Id, apply.FailureReason);
+                _failedWinnerPatchContext = winner.Patch;
                 return false;
             }
 
@@ -2995,8 +3019,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             {
                 _strategyStepBridge?.UnregisterTask(taskCtx.RunId, task.Id, succeeded: false);
                 Logger.LogWarning(
-                    "Strategy framework: winner {Strategy} build failed for task {TaskId}; reverting and falling back",
+                    "Strategy framework: winner {Strategy} build failed for task {TaskId}; reverting and falling back with winner context",
                     winner.StrategyId, task.Id);
+                _failedWinnerPatchContext = winner.Patch;
                 await Workspace.RevertUncommittedChangesAsync(ct);
                 return false;
             }
@@ -4931,6 +4956,28 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         if (nonIntegrationTasks.Count == 0 || !nonIntegrationTasks.All(EngineeringTaskIssueManager.IsTaskDone))
             return;
 
+        // Gate: all task PRs must be MERGED before starting integration.
+        // Tasks are marked Done when PRs get approval labels (for restart recovery),
+        // but integration requires the code to actually be on the target branch.
+        var openPRs = await PrService.ListOpenAsync(ct);
+        var agentPrefix = $"{Identity.DisplayName}:";
+        var unmergerdTaskPRs = openPRs
+            .Where(pr => pr.Title.StartsWith(agentPrefix, StringComparison.OrdinalIgnoreCase)
+                         && !pr.Title.Contains("Final Integration", StringComparison.OrdinalIgnoreCase)
+                         && PullRequestWorkflow.Labels.IsPastImplementation(pr.Labels))
+            .ToList();
+
+        if (unmergerdTaskPRs.Count > 0)
+        {
+            Logger.LogInformation(
+                "All tasks marked Done but {Count} task PR(s) still awaiting merge: {PRs}",
+                unmergerdTaskPRs.Count,
+                string.Join(", ", unmergerdTaskPRs.Select(p => $"#{p.Number}")));
+            UpdateStatus(AgentStatus.Working,
+                $"Waiting for {unmergerdTaskPRs.Count} PR(s) to merge before integration");
+            return;
+        }
+
         _allTasksComplete = true;
         Logger.LogInformation("🎉 All {Count} engineering tasks are complete! Starting final integration.",
             nonIntegrationTasks.Count);
@@ -5062,9 +5109,31 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         var outcome = await _strategyOrchestrator.RunCandidatesAsync(taskCtx, ct);
 
-        // No winner → fall back to legacy (don't assume "no fixes needed")
+        // No winner → check if all strategies legitimately found "no fixes needed"
         if (!outcome.HasWinner)
         {
+            // If ALL candidates that executed successfully produced empty patches,
+            // this means integration is clean — no fixes needed. This is the common
+            // case for T-FINAL when all task PRs merged without conflicts.
+            var allCandidatesEmpty = outcome.Evaluation.Candidates
+                .All(c => !c.Survived || string.IsNullOrWhiteSpace(c.Patch));
+            var anyExecutionSucceeded = outcome.Evaluation.Candidates
+                .Any(c => c.Execution.Succeeded);
+
+            if (allCandidatesEmpty && anyExecutionSucceeded)
+            {
+                _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
+                    succeeded: true, winnerStrategy: null);
+                Logger.LogInformation(
+                    "Strategy framework: all T-FINAL candidates produced empty patches — no integration fixes needed");
+                LogActivity("task", "✅ No integration fixes needed (all strategies confirmed clean integration)");
+                _integrationPrCreated = true;
+                _taskTracker.CompleteStep(integrationStepId);
+                await CloseIntegrationIssueAsync("✅ No integration fixes needed — all strategy candidates confirmed clean integration.", ct);
+                await SignalEngineeringCompleteAsync(ct);
+                return true;
+            }
+
             _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
                 succeeded: false, winnerStrategy: null);
             Logger.LogInformation(
