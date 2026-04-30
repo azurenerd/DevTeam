@@ -1364,8 +1364,8 @@
 
     private static string FormatBytes(int bytes) => bytes switch
     {
-        < 1024 => $"{bytes} B",
-        < 1024 * 1024 => $"{bytes / 1024.0:0.1} KB",
+        var b when b < 1024 => $"{bytes} B",
+        var b when b < 1024 * 1024 => $"{bytes / 1024.0:0.1} KB",
         _ => $"{bytes / (1024.0 * 1024.0):0.1} MB",
     };
 

@@ -581,8 +581,8 @@ else
 
     private static string FormatStepCost(decimal cost) => cost switch
     {
-        < 0.01m => "< $0.01",
-        < 1m => cost.ToString("$0.00"),
+        var c when c < 0.01m => "< $0.01",
+        var c when c < 1m => cost.ToString("$0.00"),
         _ => cost.ToString("$#,##0.00")
     };
 
