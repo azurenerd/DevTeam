@@ -364,8 +364,18 @@ public class ResearcherAgent : AgentBase
                 RecordError($"Research error: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
                 if (currentDirective is not null)
                 {
-                    Logger.LogInformation("Re-enqueueing failed research directive: {Topic}", currentDirective.Topic);
-                    _researchQueue.Enqueue(currentDirective);
+                    const int maxRetries = 3;
+                    if (currentDirective.RetryCount < maxRetries)
+                    {
+                        Logger.LogInformation("Re-enqueueing failed research directive (attempt {Attempt}/{Max}): {Topic}",
+                            currentDirective.RetryCount + 1, maxRetries, currentDirective.Topic);
+                        _researchQueue.Enqueue(currentDirective with { RetryCount = currentDirective.RetryCount + 1 });
+                    }
+                    else
+                    {
+                        Logger.LogError("Research directive '{Topic}' failed after {Max} retries, giving up", currentDirective.Topic, maxRetries);
+                        RecordError($"Research gave up after {maxRetries} retries: {currentDirective.Topic}");
+                    }
                 }
                 UpdateStatus(AgentStatus.Working, $"Recovering from error, will retry");
                 try { await Task.Delay(15000, ct); } // Wait 15s before retry
@@ -1276,6 +1286,8 @@ internal record ResearchDirective
     public string Description { get; init; } = "";
     /// <summary>Issue number passed from PM's TaskAssignment for direct linking.</summary>
     public int? IssueNumber { get; init; }
+    /// <summary>Number of times this directive has been retried after failure.</summary>
+    public int RetryCount { get; init; }
 }
 
 internal record ResearchResult

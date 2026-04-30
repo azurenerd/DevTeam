@@ -138,7 +138,14 @@ public sealed class DevelopSettingsService : IDisposable
             config.DevPlatform.Platform = DevPlatformType.GitHub;
 
             if (!string.IsNullOrWhiteSpace(settings.GitHub.Repo))
+            {
                 config.Project.GitHubRepo = settings.GitHub.Repo;
+                // Derive project name from repo (e.g., "azurenerd/FieldRunners" → "FieldRunners")
+                var repoName = settings.GitHub.Repo.Contains('/')
+                    ? settings.GitHub.Repo.Split('/')[1]
+                    : settings.GitHub.Repo;
+                config.Project.Name = repoName;
+            }
 
             if (!string.IsNullOrWhiteSpace(settings.GitHub.DefaultBranch))
                 config.Project.DefaultBranch = settings.GitHub.DefaultBranch;
@@ -155,7 +162,11 @@ public sealed class DevelopSettingsService : IDisposable
                 config.DevPlatform.AzureDevOps.Project = settings.AzureDevOps.Project;
 
             if (!string.IsNullOrWhiteSpace(settings.AzureDevOps.Repository))
+            {
                 config.DevPlatform.AzureDevOps.Repository = settings.AzureDevOps.Repository;
+                // Derive project name from repository name
+                config.Project.Name = settings.AzureDevOps.Repository;
+            }
 
             if (!string.IsNullOrWhiteSpace(settings.AzureDevOps.DefaultBranch))
                 config.DevPlatform.AzureDevOps.DefaultBranch = settings.AzureDevOps.DefaultBranch;

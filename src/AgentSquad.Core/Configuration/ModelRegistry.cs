@@ -241,14 +241,14 @@ public class ModelRegistry
                 builder.AddOpenAIChatCompletion(
                     modelId: config.Model,
                     apiKey: config.ApiKey,
-                    endpoint: new Uri(config.Endpoint ?? "https://api.anthropic.com/v1"));
+                    endpoint: new Uri(string.IsNullOrWhiteSpace(config.Endpoint) ? "https://api.anthropic.com/v1" : config.Endpoint));
                 break;
 
             case "ollama":
                 builder.AddOpenAIChatCompletion(
                     modelId: config.Model,
                     apiKey: "ollama",
-                    endpoint: new Uri(config.Endpoint ?? "http://localhost:11434/v1"));
+                    endpoint: new Uri(string.IsNullOrWhiteSpace(config.Endpoint) ? "http://localhost:11434/v1" : config.Endpoint));
                 break;
 
             default:
