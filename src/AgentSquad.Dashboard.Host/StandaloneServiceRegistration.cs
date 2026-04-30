@@ -68,6 +68,10 @@ public static class StandaloneServiceRegistration
         // IRepositoryManagementService — proxies to Runner's /api/develop/repo/create
         services.AddSingleton<IRepositoryManagementService, HttpRepositoryManagementProxy>();
 
+        // Preview & Artifacts services
+        services.AddSingleton<AgentSquad.Core.Preview.PreviewBuildService>();
+        services.AddSingleton<AgentSquad.Core.Preview.TestArtifactIndexService>();
+
         // Platform capability stubs — DashboardDataService needs these for PR/work item fetching
         services.AddSingleton<IPullRequestService, NullPullRequestService>();
         services.AddSingleton<IWorkItemService, NullWorkItemService>();

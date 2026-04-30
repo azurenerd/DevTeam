@@ -187,6 +187,8 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DashboardDataServi
 builder.Services.AddSingleton<ConfigurationService>();
 builder.Services.AddSingleton<IConfigurationService>(sp => sp.GetRequiredService<ConfigurationService>());
 builder.Services.AddSingleton<DevelopSettingsService>();
+builder.Services.AddSingleton<AgentSquad.Core.Preview.PreviewBuildService>();
+builder.Services.AddSingleton<AgentSquad.Core.Preview.TestArtifactIndexService>();
 builder.Services.AddSingleton<DirectorCliService>();
 builder.Services.AddSingleton(new DashboardMode(IsStandalone: false));
 builder.Services.AddSingleton<IStrategiesDataService, InProcessStrategiesDataService>();
@@ -757,6 +759,79 @@ developApi.MapGet("/work-items/search", async (string q, IWorkItemSearchService 
     if (string.IsNullOrWhiteSpace(q)) return Results.Ok(Array.Empty<WorkItemSearchResult>());
     var results = await searchSvc.SearchAsync(q, maxResults: 15, ct);
     return Results.Ok(results);
+});
+
+// === Preview Build API ===
+var previewApi = app.MapGroup("/api/preview").WithTags("Preview");
+
+previewApi.MapGet("/settings", async (AgentSquad.Core.Preview.PreviewBuildService svc, CancellationToken ct) =>
+    Results.Ok(await svc.LoadSettingsAsync(ct)));
+
+previewApi.MapPost("/settings", async (AgentSquad.Core.Preview.PreviewSettings settings,
+    AgentSquad.Core.Preview.PreviewBuildService svc, CancellationToken ct) =>
+{
+    await svc.SaveSettingsAsync(settings, ct);
+    return Results.Ok();
+});
+
+previewApi.MapPost("/start", async (AgentSquad.Core.Preview.PreviewBuildService svc, CancellationToken ct) =>
+{
+    var settings = await svc.LoadSettingsAsync(ct);
+    if (string.IsNullOrWhiteSpace(settings.ClonePath))
+        return Results.BadRequest(new { error = "Clone path must be configured first." });
+
+    // Start in background — client streams output via SSE
+    _ = Task.Run(async () =>
+    {
+        try { await svc.StartAsync(settings, ct); }
+        catch { /* errors surfaced via state/output */ }
+    }, ct);
+
+    return Results.Ok(new { started = true });
+});
+
+previewApi.MapPost("/stop", (AgentSquad.Core.Preview.PreviewBuildService svc) =>
+{
+    svc.Stop();
+    return Results.Ok(new { stopped = true });
+});
+
+previewApi.MapGet("/status", async (AgentSquad.Core.Preview.PreviewBuildService svc, CancellationToken ct) =>
+{
+    var settings = await svc.LoadSettingsAsync(ct);
+    var status = await svc.GetStatusAsync(settings, ct);
+    return Results.Ok(status);
+});
+
+// === Test Artifacts API ===
+previewApi.MapGet("/artifacts", (AgentSquad.Core.Preview.TestArtifactIndexService svc,
+    string? pr, string? agent, bool? refresh) =>
+{
+    var artifacts = svc.GetArtifacts(forceRefresh: refresh == true);
+
+    if (!string.IsNullOrWhiteSpace(pr))
+        artifacts = svc.GetArtifactsByPR(pr);
+    else if (!string.IsNullOrWhiteSpace(agent))
+        artifacts = svc.GetArtifactsByAgent(agent);
+
+    return Results.Ok(artifacts);
+});
+
+previewApi.MapGet("/artifacts/{id}", (string id, AgentSquad.Core.Preview.TestArtifactIndexService svc) =>
+{
+    var artifact = svc.GetArtifactById(id);
+    if (artifact is null || !File.Exists(artifact.FullPath))
+        return Results.NotFound();
+
+    var contentType = artifact.Type switch
+    {
+        AgentSquad.Core.Preview.TestArtifactType.Screenshot => "image/png",
+        AgentSquad.Core.Preview.TestArtifactType.Video => "video/webm",
+        AgentSquad.Core.Preview.TestArtifactType.Trace => "application/zip",
+        _ => "application/octet-stream"
+    };
+
+    return Results.File(artifact.FullPath, contentType, artifact.FileName);
 });
 
 // SignalR hub for real-time dashboard updates
