@@ -5112,24 +5112,30 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // No winner → check if all strategies legitimately found "no fixes needed"
         if (!outcome.HasWinner)
         {
-            // If ALL candidates that executed successfully produced empty patches,
-            // this means integration is clean — no fixes needed. This is the common
-            // case for T-FINAL when all task PRs merged without conflicts.
-            var allCandidatesEmpty = outcome.Evaluation.Candidates
-                .All(c => !c.Survived || string.IsNullOrWhiteSpace(c.Patch));
-            var anyExecutionSucceeded = outcome.Evaluation.Candidates
-                .Any(c => c.Execution.Succeeded);
+            // Only count candidates that actually EXECUTED successfully and produced an empty patch
+            // as evidence of clean integration. Candidates that failed to start (framework-not-ready)
+            // or produced garbage (parser failures) are NOT evidence — they simply didn't run.
+            var successfullyRanButEmpty = outcome.Evaluation.Candidates
+                .Where(c => c.Execution.Succeeded && string.IsNullOrWhiteSpace(c.Patch))
+                .ToList();
+            var totalSuccessfullyRan = outcome.Evaluation.Candidates
+                .Count(c => c.Execution.Succeeded);
 
-            if (allCandidatesEmpty && anyExecutionSucceeded)
+            // Require at least ONE candidate that ran successfully and found nothing to fix.
+            // Require that ALL candidates that ran successfully produced empty patches (no disagreement).
+            if (successfullyRanButEmpty.Count > 0 && successfullyRanButEmpty.Count == totalSuccessfullyRan)
             {
                 _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
                     succeeded: true, winnerStrategy: null);
                 Logger.LogInformation(
-                    "Strategy framework: all T-FINAL candidates produced empty patches — no integration fixes needed");
-                LogActivity("task", "✅ No integration fixes needed (all strategies confirmed clean integration)");
+                    "Strategy framework: {Count}/{Total} candidates that executed successfully produced empty patches — no integration fixes needed",
+                    successfullyRanButEmpty.Count, outcome.Evaluation.Candidates.Count);
+                LogActivity("task", $"✅ No integration fixes needed ({successfullyRanButEmpty.Count} of {outcome.Evaluation.Candidates.Count} strategies ran successfully and found nothing to fix)");
                 _integrationPrCreated = true;
                 _taskTracker.CompleteStep(integrationStepId);
-                await CloseIntegrationIssueAsync("✅ No integration fixes needed — all strategy candidates confirmed clean integration.", ct);
+                await CloseIntegrationIssueAsync(
+                    $"✅ No integration fixes needed — {successfullyRanButEmpty.Count} strategy candidate(s) examined the code and found no issues " +
+                    $"({outcome.Evaluation.Candidates.Count - totalSuccessfullyRan} candidate(s) failed to execute).", ct);
                 await SignalEngineeringCompleteAsync(ct);
                 return true;
             }
