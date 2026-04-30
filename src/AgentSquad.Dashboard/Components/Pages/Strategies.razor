@@ -233,6 +233,10 @@
                                     }
                                     <div class="cd-tabs">
                                         <button class="cd-tab @(activeTab == "overview" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "overview"))" @onclick:stopPropagation="true" title="Scores, metrics, and screenshot preview">Overview</button>
+                                        @if (candidate.InitialAcScore.HasValue || candidate.InitialDesignScore.HasValue || candidate.InitialReadabilityScore.HasValue)
+                                        {
+                                        <button class="cd-tab @(activeTab == "prelim" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "prelim"))" @onclick:stopPropagation="true" title="Preliminary judge scoring before revision round">Prelim</button>
+                                        }
                                         <button class="cd-tab @(activeTab == "activity" ? "active" : "")" @onclick="@(() => SetTab(tabKey, "activity"))" @onclick:stopPropagation="true" title="Real-time activity log showing what the framework did step by step">
                                             Activity @if (candidate.ActivityLog.Count > 0) { <span class="cd-tab-badge">@candidate.ActivityLog.Count</span> }
                                         </button>
@@ -249,66 +253,90 @@
                                         {
                                             @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
                                             {
-                                                <div class="cd-scores">
-                                                    <div class="cd-score-row" title="Does the generated code satisfy all acceptance criteria?">
+                                                var finalFbKey = $"final_{task.TaskId}_{candidate.StrategyId}";
+                                                var finalFbExpanded = _expandedScoreFeedback.Contains(finalFbKey);
+                                                <div class="cd-scores cd-scores-clickable" @onclick="() => ToggleScoreFeedback(finalFbKey)" @onclick:stopPropagation="true"
+                                                     title="Click to @(finalFbExpanded ? "collapse" : "expand") judge feedback">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Acceptance</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%; @ScoreBarGradient(candidate.AcScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
                                                     </div>
-                                                    <div class="cd-score-row" title="Code architecture, patterns, and structural quality">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Design</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%; @ScoreBarGradient(candidate.DesignScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
                                                     </div>
-                                                    <div class="cd-score-row" title="Code clarity, naming, and maintainability">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Readability</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%; @ScoreBarGradient(candidate.ReadabilityScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
                                                     </div>
                                                     @if (candidate.VisualsScore.HasValue)
                                                     {
                                                     <div class="cd-score-row">
                                                         <span class="cd-score-label">Visuals</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar cd-score-bar-visuals" style="width: @(candidate.VisualsScore.Value * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @(candidate.VisualsScore.Value * 10)%; @ScoreBarGradient(candidate.VisualsScore.Value)"></div></div>
                                                         <span class="cd-score-val">@candidate.VisualsScore.Value/10</span>
                                                     </div>
                                                     }
                                                     <div class="cd-score-total" title="Combined score (max @MaxScore(candidate))">Total: <strong>@TotalScore(candidate)</strong>/@MaxScore(candidate)</div>
                                                 </div>
+                                                @if (finalFbExpanded)
+                                                {
+                                                    <div class="cd-score-feedback-expand">
+                                                        @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
+                                                        {
+                                                            <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="judge-feedback-text judge-feedback-perfect">No feedback — perfect score</div>
+                                                        }
+                                                    </div>
+                                                }
                                             }
                                             else if (candidate.InitialAcScore.HasValue || candidate.InitialDesignScore.HasValue || candidate.InitialReadabilityScore.HasValue)
                                             {
-                                                <div class="cd-scores initial-scores">
+                                                var initFbKey = $"init_{task.TaskId}_{candidate.StrategyId}";
+                                                var initFbExpanded = _expandedScoreFeedback.Contains(initFbKey);
+                                                <div class="cd-scores initial-scores cd-scores-clickable" @onclick="() => ToggleScoreFeedback(initFbKey)" @onclick:stopPropagation="true"
+                                                     title="Click to @(initFbExpanded ? "collapse" : "expand") judge feedback">
                                                     <div class="cd-score-label-note">Initial Scores (revision in progress)</div>
-                                                    <div class="cd-score-row" title="Acceptance Criteria (initial)">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Acceptance</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialAcScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialAcScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialAcScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.InitialAcScore ?? 0)/10</span>
                                                     </div>
-                                                    <div class="cd-score-row" title="Design (initial)">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Design</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialDesignScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialDesignScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialDesignScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.InitialDesignScore ?? 0)/10</span>
                                                     </div>
-                                                    <div class="cd-score-row" title="Readability (initial)">
+                                                    <div class="cd-score-row">
                                                         <span class="cd-score-label">Readability</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialReadabilityScore ?? 0) * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialReadabilityScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialReadabilityScore ?? 0)"></div></div>
                                                         <span class="cd-score-val">@(candidate.InitialReadabilityScore ?? 0)/10</span>
                                                     </div>
                                                     @if (candidate.InitialVisualsScore.HasValue)
                                                     {
                                                     <div class="cd-score-row">
                                                         <span class="cd-score-label">Visuals</span>
-                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar cd-score-bar-visuals" style="width: @(candidate.InitialVisualsScore.Value * 10)%"></div></div>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @(candidate.InitialVisualsScore.Value * 10)%; @ScoreBarGradient(candidate.InitialVisualsScore.Value)"></div></div>
                                                         <span class="cd-score-val">@candidate.InitialVisualsScore.Value/10</span>
                                                     </div>
                                                     }
                                                 </div>
-                                                @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
+                                                @if (initFbExpanded && !string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
                                                 {
-                                                    <div class="candidate-judge-feedback" title="Judge's recommendations for improvement">
-                                                        <div class="judge-feedback-label">🧑‍⚖️ Judge Feedback:</div>
+                                                    <div class="cd-score-feedback-expand">
                                                         <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                                    </div>
+                                                }
+                                                else if (initFbExpanded)
+                                                {
+                                                    <div class="cd-score-feedback-expand">
+                                                        <div class="judge-feedback-text judge-feedback-perfect">No feedback — perfect score</div>
                                                     </div>
                                                 }
                                             }
@@ -346,6 +374,55 @@
                                                     <img src="data:image/png;base64,@expandedScreenshot" alt="@candidate.StrategyId preview" class="cd-screenshot-img"
                                                          @onclick="() => OpenLightbox(expandedScreenshot, candidate.StrategyId)" @onclick:stopPropagation="true" />
                                                 </div>
+                                            }
+                                        }
+                                        else if (activeTab == "prelim")
+                                        {
+                                            @if (candidate.InitialAcScore.HasValue || candidate.InitialDesignScore.HasValue || candidate.InitialReadabilityScore.HasValue)
+                                            {
+                                                <div class="cd-scores">
+                                                    <div class="cd-score-label-note">Preliminary Scores (before revision)</div>
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Acceptance</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialAcScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialAcScore ?? 0)"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialAcScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Design</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialDesignScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialDesignScore ?? 0)"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialDesignScore ?? 0)/10</span>
+                                                    </div>
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Readability</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.InitialReadabilityScore ?? 0) * 10)%; @ScoreBarGradient(candidate.InitialReadabilityScore ?? 0)"></div></div>
+                                                        <span class="cd-score-val">@(candidate.InitialReadabilityScore ?? 0)/10</span>
+                                                    </div>
+                                                    @if (candidate.InitialVisualsScore.HasValue)
+                                                    {
+                                                    <div class="cd-score-row">
+                                                        <span class="cd-score-label">Visuals</span>
+                                                        <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @(candidate.InitialVisualsScore.Value * 10)%; @ScoreBarGradient(candidate.InitialVisualsScore.Value)"></div></div>
+                                                        <span class="cd-score-val">@candidate.InitialVisualsScore.Value/10</span>
+                                                    </div>
+                                                    }
+                                                </div>
+                                                @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
+                                                {
+                                                    <div class="cd-score-feedback-expand" style="margin-top: .5rem;">
+                                                        <div class="judge-feedback-label" style="font-size: .75em; font-weight: 600; opacity: .7; margin-bottom: .25rem;">🧑‍⚖️ Revision Feedback:</div>
+                                                        <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                                    </div>
+                                                }
+                                                else
+                                                {
+                                                    <div class="cd-score-feedback-expand" style="margin-top: .5rem;">
+                                                        <div class="judge-feedback-text judge-feedback-perfect">No revision feedback — all scores met threshold</div>
+                                                    </div>
+                                                }
+                                            }
+                                            else
+                                            {
+                                                <div class="cd-no-scores">No preliminary scores available</div>
                                             }
                                         }
                                         else if (activeTab == "activity")
@@ -561,27 +638,30 @@
                                                     @* Scores *@
                                                     @if (candidate.AcScore.HasValue || candidate.DesignScore.HasValue || candidate.ReadabilityScore.HasValue)
                                                     {
-                                                        <div class="cd-scores">
-                                                            <div class="cd-score-row" title="Does the generated code satisfy all acceptance criteria from the task?">
+                                                        var recentFbKey = $"recent_{task.TaskId}_{candidate.StrategyId}";
+                                                        var recentFbExpanded = _expandedScoreFeedback.Contains(recentFbKey);
+                                                        <div class="cd-scores cd-scores-clickable" @onclick="() => ToggleScoreFeedback(recentFbKey)" @onclick:stopPropagation="true"
+                                                             title="Click to @(recentFbExpanded ? "collapse" : "expand") judge feedback">
+                                                            <div class="cd-score-row">
                                                                 <span class="cd-score-label">Acceptance</span>
-                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%"></div></div>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.AcScore ?? 0) * 10)%; @ScoreBarGradient(candidate.AcScore ?? 0)"></div></div>
                                                                 <span class="cd-score-val">@(candidate.AcScore ?? 0)/10</span>
                                                             </div>
-                                                            <div class="cd-score-row" title="Code architecture, patterns, separation of concerns, and structural quality">
+                                                            <div class="cd-score-row">
                                                                 <span class="cd-score-label">Design</span>
-                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%"></div></div>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.DesignScore ?? 0) * 10)%; @ScoreBarGradient(candidate.DesignScore ?? 0)"></div></div>
                                                                 <span class="cd-score-val">@(candidate.DesignScore ?? 0)/10</span>
                                                             </div>
-                                                            <div class="cd-score-row" title="Code clarity, naming conventions, comments, and long-term maintainability">
+                                                            <div class="cd-score-row">
                                                                 <span class="cd-score-label">Readability</span>
-                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%"></div></div>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @((candidate.ReadabilityScore ?? 0) * 10)%; @ScoreBarGradient(candidate.ReadabilityScore ?? 0)"></div></div>
                                                                 <span class="cd-score-val">@(candidate.ReadabilityScore ?? 0)/10</span>
                                                             </div>
                                                             @if (candidate.VisualsScore.HasValue)
                                                             {
-                                                            <div class="cd-score-row" title="Visual quality of the application screenshot (0–10)">
+                                                            <div class="cd-score-row">
                                                                 <span class="cd-score-label">Visuals</span>
-                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar cd-score-bar-visuals" style="width: @(candidate.VisualsScore.Value * 10)%"></div></div>
+                                                                <div class="cd-score-bar-bg"><div class="cd-score-bar" style="width: @(candidate.VisualsScore.Value * 10)%; @ScoreBarGradient(candidate.VisualsScore.Value)"></div></div>
                                                                 <span class="cd-score-val">@candidate.VisualsScore.Value/10</span>
                                                             </div>
                                                             }
@@ -589,6 +669,19 @@
                                                                 Total: <strong>@TotalScore(candidate)</strong>/@MaxScore(candidate)
                                                             </div>
                                                         </div>
+                                                        @if (recentFbExpanded)
+                                                        {
+                                                            <div class="cd-score-feedback-expand">
+                                                                @if (!string.IsNullOrWhiteSpace(candidate.JudgeFeedback))
+                                                                {
+                                                                    <div class="judge-feedback-text">@candidate.JudgeFeedback</div>
+                                                                }
+                                                                else
+                                                                {
+                                                                    <div class="judge-feedback-text judge-feedback-perfect">No feedback — perfect score</div>
+                                                                }
+                                                            </div>
+                                                        }
                                                     }
                                                     else if (candidate.Survived == false && candidate.State >= CandidateState.Evaluated)
                                                     {
@@ -891,15 +984,21 @@
 
     /* Score bars */
     .cd-scores { margin-bottom: .5rem; }
+    .cd-scores-clickable { cursor: pointer; padding: .35rem; border-radius: 6px; transition: background .15s; }
+    .cd-scores-clickable:hover { background: rgba(255,255,255,.04); }
     .cd-score-row { display: flex; align-items: center; gap: .5rem; margin-bottom: .3rem; }
     .cd-score-label { width: 5.5rem; font-size: .75em; opacity: .65; text-align: right; }
     .cd-score-bar-bg { flex: 1; height: 6px; background: rgba(255,255,255,.06); border-radius: 3px; overflow: hidden; }
-    .cd-score-bar { height: 100%; background: linear-gradient(90deg, #4dabf7, #51cf66); border-radius: 3px; transition: width .3s; }
-    .cd-score-bar-visuals { background: linear-gradient(90deg, #fab005, #ff922b); }
+    .cd-score-bar { height: 100%; border-radius: 3px; transition: width .3s; }
     .cd-score-val { font-size: .75em; font-family: monospace; width: 2.5rem; opacity: .8; }
     .cd-score-total { text-align: right; font-size: .8em; margin-top: .25rem; opacity: .8; }
     .cd-no-scores { font-size: .8em; opacity: .4; font-style: italic; margin-bottom: .5rem; }
     .cd-judge-skipped { opacity: .6; color: #ffd43b; font-style: normal; }
+    .cd-score-feedback-expand { margin-top: .35rem; padding: .5rem .65rem; background: rgba(255,255,255,.03); border-radius: 6px; border-left: 3px solid rgba(79,172,254,.4); animation: fadeIn .2s; }
+    .cd-score-feedback-expand .judge-feedback-text { font-size: .8em; line-height: 1.5; white-space: pre-wrap; opacity: .85; }
+    .cd-score-feedback-expand .judge-feedback-perfect { opacity: .5; font-style: italic; }
+    .cd-score-label-note { font-size: .7em; opacity: .5; margin-bottom: .25rem; font-style: italic; }
+    @@keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: translateY(0); } }
 
     /* Metrics */
     .cd-metrics { display: flex; gap: .75rem; font-size: .8em; opacity: .7; margin-bottom: .35rem; }
@@ -1061,6 +1160,7 @@
     private bool _refreshing;
     private readonly HashSet<string> _expandedTasks = new();
     private readonly HashSet<string> _expandedActiveCandidates = new();
+    private readonly HashSet<string> _expandedScoreFeedback = new();
     private readonly Dictionary<string, string> _activeTabs = new();
     private string? _lightboxImage;
     private string? _lightboxTitle;
@@ -1106,6 +1206,25 @@
     private void SetTab(string key, string tab)
     {
         _activeTabs[key] = tab;
+    }
+
+    private void ToggleScoreFeedback(string key)
+    {
+        if (!_expandedScoreFeedback.Remove(key))
+            _expandedScoreFeedback.Add(key);
+    }
+
+    private static string ScoreBarGradient(int score)
+    {
+        // Low scores: orange/yellow, high scores: blue/green
+        return score switch
+        {
+            >= 9 => "background: linear-gradient(90deg, #10b981, #06d6a0)",
+            >= 7 => "background: linear-gradient(90deg, #3b82f6, #10b981)",
+            >= 5 => "background: linear-gradient(90deg, #f59e0b, #3b82f6)",
+            >= 3 => "background: linear-gradient(90deg, #f97316, #f59e0b)",
+            _ => "background: linear-gradient(90deg, #ef4444, #f97316)",
+        };
     }
 
     private static int TotalScore(CandidateSnapshot c)

@@ -184,14 +184,6 @@ else if (_config is not null)
                     </p>
 
                     <div class="config-field-row">
-                        <div class="config-field" title="LEGACY single-pass generator (first of three options). Builds a prompt from PM spec + architecture + design context, calls the premium model once, parses FILE: markers, and commits the output. No tool use, no autonomy. Fastest and cheapest but weakest at integration.">
-                            <label>Baseline (single-pass LLM)</label>
-                            <label class="config-toggle">
-                                <input type="checkbox" checked="@IsStrategyEnabled(StrategyBaseline)"
-                                    @onchange="e => SetStrategyEnabled(StrategyBaseline, (bool)(e.Value ?? false))" />
-                                <span class="config-toggle-slider"></span>
-                            </label>
-                        </div>
                         <div class="config-field" title="Single-pass generator PLUS an MCP (Model Context Protocol) server that exposes repo-aware tools to the model. Second of three options. Better than baseline because the model can read files before writing, but still one-shot — cannot iterate on build failures.">
                             <label>MCP-Enhanced</label>
                             <label class="config-toggle">

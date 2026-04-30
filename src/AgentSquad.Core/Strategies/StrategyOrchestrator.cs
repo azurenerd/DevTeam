@@ -89,6 +89,7 @@ public class StrategyOrchestrator
         // can't fully recover from cleanup file locks). Distinct() here is the
         // surgical fix; root cause is in StrategyFrameworkConfig's default init.
         var enabled = StrategyIdNormalizer.NormalizeAll(cfg.EnabledStrategies)
+            .Where(id => !string.Equals(id, "baseline", StringComparison.OrdinalIgnoreCase)) // Baseline removed from UI — never compete
             .Where(id => _strategies.ContainsKey(id) || _externalAdapters.ContainsKey(id))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();

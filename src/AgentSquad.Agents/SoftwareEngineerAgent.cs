@@ -481,6 +481,20 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     if (Config.Workspace.IsInlineTestWorkflow)
                         await MergeTestedPRsAsync(ct);
 
+                    // If we have no active work but are tracking past-implementation PRs
+                    // (waiting for review/test/merge), show Idle instead of Working.
+                    if (CurrentPrNumber is null && _pastImplementationPrs.Count > 0
+                        && Status == AgentStatus.Working)
+                    {
+                        UpdateStatus(AgentStatus.Idle,
+                            $"Waiting for PR(s) to complete review/test/merge ({_pastImplementationPrs.Count} pending)");
+                    }
+                    else if (CurrentPrNumber is null && _allTasksComplete && _integrationPrCreated
+                        && Status == AgentStatus.Working)
+                    {
+                        UpdateStatus(AgentStatus.Idle, "Waiting for integration PR to merge");
+                    }
+
                 }
 
                 await Task.Delay(

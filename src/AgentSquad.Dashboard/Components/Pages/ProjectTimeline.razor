@@ -334,9 +334,11 @@ else
                     }
                 </div>
             }
+            @{ var candidates = GetScreenshotCandidates(spr); }
+            @if (candidates.Count > 0)
+            {
             <div class="ntl-detail-prs ntl-detail-gallery-row" style="margin-top: 8px;">
                 <span class="ntl-detail-section-title">Ready-for-Review Previews</span>
-                @{ var candidates = GetScreenshotCandidates(spr); }
                 <div class="ntl-screenshot-gallery">
                     @foreach (var cand in candidates)
                     {
@@ -372,6 +374,7 @@ else
                     }
                 </div>
             </div>
+            }
             @{ var parentIssueNumber = PullRequestWorkflow.ParseLinkedIssueNumber(spr.Body); }
             @if (parentIssueNumber.HasValue && _groupLookup.ContainsKey(parentIssueNumber.Value))
             {
