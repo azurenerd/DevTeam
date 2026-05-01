@@ -80,7 +80,18 @@ else
                     </div>
                     <div class="agent-info">
                         <div class="agent-name" title="@agent.DisplayName">@agent.DisplayName</div>
-                        <div class="agent-role">@FormatRole(agent.Role)</div>
+                        <div class="agent-role-wrapper" @onclick:stopPropagation="true">
+                            <button class="agent-role-btn" @onclick="() => ToggleRolePopup(agent.Id)">
+                                @FormatRole(agent.Role) <span class="role-info-icon">ⓘ</span>
+                            </button>
+                            @if (_rolePopupAgentId == agent.Id)
+                            {
+                                <div class="role-popup">
+                                    <div class="role-popup-header">@FormatRole(agent.Role)</div>
+                                    <div class="role-popup-body">@GetRoleDescription(agent.Role)</div>
+                                </div>
+                            }
+                        </div>
                     </div>
                     <span class="status-badge @statusClass">
                         <span class="status-dot"></span>
@@ -280,6 +291,9 @@ else
     private string? _errorModalAgentName;
     private List<AgentLogEntry> _errorEntries = [];
 
+    // Role popup state
+    private string? _rolePopupAgentId;
+
     // Model editing state
     private string? _editingModelAgentId;
     private IReadOnlyList<string> _availableModels = [];
@@ -353,6 +367,38 @@ else
         AgentRole.JuniorEngineer => "Junior Engineer",
         AgentRole.TestEngineer => "Test Engineer",
         _ => role.ToString()
+    };
+
+    private void ToggleRolePopup(string agentId)
+    {
+        _rolePopupAgentId = _rolePopupAgentId == agentId ? null : agentId;
+    }
+
+    private static string GetRoleDescription(AgentRole role) => role switch
+    {
+        AgentRole.ProgramManager =>
+            "Coordinates the project lifecycle. Creates the PM Specification from research findings, " +
+            "extracts user stories into GitHub issues, assigns work to engineers, and reviews all PRs " +
+            "for business alignment.",
+        AgentRole.Researcher =>
+            "Conducts technology research and competitive analysis. Produces Research.md with findings " +
+            "on frameworks, libraries, and best practices that inform the PM Specification and architecture decisions.",
+        AgentRole.Architect =>
+            "Designs the system architecture from the PM Specification. Creates Architecture.md covering " +
+            "component structure, data flow, API contracts, and technology stack decisions.",
+        AgentRole.PrincipalEngineer =>
+            "Creates the Engineering Plan from the architecture. Breaks down the system into implementable " +
+            "tasks with dependencies, assigns complexity, and coordinates the parallel development phase.",
+        AgentRole.SeniorEngineer =>
+            "Implements feature tasks by writing production code. Creates PRs with complete implementations " +
+            "following the engineering plan, architecture, and PM Specification requirements.",
+        AgentRole.JuniorEngineer =>
+            "Implements simpler tasks under guidance. Creates PRs for lower-complexity work items, " +
+            "following established patterns from the architecture and engineering plan.",
+        AgentRole.TestEngineer =>
+            "Validates implementations through testing. Reviews PRs for correctness, writes and runs tests, " +
+            "and ensures code meets acceptance criteria defined in user stories.",
+        _ => "Unknown role."
     };
 
     private static string FormatDuration(TimeSpan ts) => ts.TotalHours >= 1
