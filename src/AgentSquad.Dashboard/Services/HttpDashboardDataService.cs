@@ -399,6 +399,36 @@ public sealed class HttpDashboardDataService : IDashboardDataService, IHostedSer
         }
     }
 
+    // ── Agent Role Description (HTTP) ──
+
+    public AgentRoleDescriptionInfo? GetAgentRoleDescription(string agentId)
+    {
+        try
+        {
+            return _http.GetFromJsonAsync<AgentRoleDescriptionInfo>($"api/agents/{agentId}/role-description").Result;
+        }
+        catch { return null; }
+    }
+
+    public void SaveAgentRoleOverride(string agentId, string description)
+    {
+        try
+        {
+            _http.PutAsJsonAsync($"api/agents/{agentId}/role-description", new { description }).Wait(TimeSpan.FromSeconds(5));
+        }
+        catch { /* best effort */ }
+    }
+
+    public bool ClearAgentRoleOverride(string agentId)
+    {
+        try
+        {
+            _http.DeleteAsync($"api/agents/{agentId}/role-description").Wait(TimeSpan.FromSeconds(5));
+            return true;
+        }
+        catch { return false; }
+    }
+
     // DTOs for deserialization
     private record DeadlockResponse(bool HasDeadlock, List<string>? Cycle);
     private record RateLimitResponse(bool IsRateLimited);

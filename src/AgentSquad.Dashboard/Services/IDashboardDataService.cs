@@ -63,6 +63,14 @@ public interface IDashboardDataService
     decimal GetTotalEstimatedCost();
     int GetTotalAiCalls();
 
+    // Agent role description (run-scoped overrides)
+    /// <summary>Get role description info for an agent (effective, override, configured, hasOverride).</summary>
+    AgentRoleDescriptionInfo? GetAgentRoleDescription(string agentId);
+    /// <summary>Save a run-scoped role description override for an agent.</summary>
+    void SaveAgentRoleOverride(string agentId, string description);
+    /// <summary>Clear a run-scoped role description override, reverting to default.</summary>
+    bool ClearAgentRoleOverride(string agentId);
+
     // Repository file browsing
     /// <summary>Get the file tree for the effective branch. Returns flat file paths.</summary>
     Task<RepositoryFileTreeResult> GetRepositoryFileTreeAsync(string? branch = null, CancellationToken ct = default);
@@ -72,3 +80,13 @@ public interface IDashboardDataService
     // Change notification
     event Action? OnChange;
 }
+
+/// <summary>DTO for agent role description information returned by the dashboard service.</summary>
+public record AgentRoleDescriptionInfo(
+    string AgentId,
+    string DisplayName,
+    string Role,
+    string? EffectiveDescription,
+    string? OverrideDescription,
+    string? ConfiguredDescription,
+    bool HasOverride);

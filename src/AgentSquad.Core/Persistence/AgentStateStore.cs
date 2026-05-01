@@ -860,6 +860,7 @@ public class AgentStateStore : IDisposable
             DELETE FROM gate_approvals;
             DELETE FROM gate_notifications;
             DELETE FROM run_metadata WHERE key = 'project_complete_notified';
+            DELETE FROM run_metadata WHERE key LIKE 'role_override:%';
             """;
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -1078,6 +1079,30 @@ public class AgentStateStore : IDisposable
             """;
         cmd.Parameters.AddWithValue("@key", key);
         cmd.Parameters.AddWithValue("@value", value);
+        cmd.ExecuteNonQuery();
+    }
+
+    /// <summary>Get all run_metadata entries whose key starts with the given prefix.</summary>
+    public Dictionary<string, string> GetRunMetadataByPrefix(string prefix)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT key, value FROM run_metadata WHERE key LIKE @prefix;";
+        cmd.Parameters.AddWithValue("@prefix", prefix + "%");
+        var result = new Dictionary<string, string>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            result[reader.GetString(0)] = reader.GetString(1);
+        }
+        return result;
+    }
+
+    /// <summary>Delete a specific key from run_metadata.</summary>
+    public void DeleteRunMetadata(string key)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "DELETE FROM run_metadata WHERE key = @key;";
+        cmd.Parameters.AddWithValue("@key", key);
         cmd.ExecuteNonQuery();
     }
 

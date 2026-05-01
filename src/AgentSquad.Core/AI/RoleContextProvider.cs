@@ -95,9 +95,57 @@ public class RoleContextProvider
     /// </summary>
     public void SetRoleDescriptionOverride(AgentRole role, string roleDescription)
     {
-        var cacheKey = GetCacheKey(role, customAgentName: null);
+        SetRoleDescriptionOverride(role, roleDescription, customAgentName: null);
+    }
+
+    /// <summary>
+    /// Sets a runtime role description override for a specific agent (built-in or SME).
+    /// For SME agents, pass their display name as <paramref name="customAgentName"/>.
+    /// Takes effect immediately for subsequent calls to <see cref="GetRoleSystemContext"/>.
+    /// </summary>
+    public void SetRoleDescriptionOverride(AgentRole role, string roleDescription, string? customAgentName)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
         _roleDescriptionOverrides[cacheKey] = roleDescription;
-        _logger.LogInformation("Set runtime role description override for {Role}", role);
+        _logger.LogInformation("Set runtime role description override for {CacheKey}", cacheKey);
+    }
+
+    /// <summary>
+    /// Tries to get the raw override text for a specific agent role (not the composed context).
+    /// Returns true if an override exists, false if using config/defaults.
+    /// </summary>
+    public bool TryGetRoleDescriptionOverride(AgentRole role, string? customAgentName, out string? overrideText)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
+        if (_roleDescriptionOverrides.TryGetValue(cacheKey, out var text))
+        {
+            overrideText = text;
+            return true;
+        }
+        overrideText = null;
+        return false;
+    }
+
+    /// <summary>
+    /// Removes a runtime role description override, reverting to config/defaults.
+    /// </summary>
+    public bool ClearRoleDescriptionOverride(AgentRole role, string? customAgentName)
+    {
+        var cacheKey = GetCacheKey(role, customAgentName);
+        var removed = _roleDescriptionOverrides.TryRemove(cacheKey, out _);
+        if (removed)
+            _logger.LogInformation("Cleared runtime role description override for {CacheKey}", cacheKey);
+        return removed;
+    }
+
+    /// <summary>
+    /// Returns the configured (non-override) role description for a specific agent.
+    /// Used as the "default" description when no override is active.
+    /// </summary>
+    public string? GetConfiguredRoleDescription(AgentRole role, string? customAgentName = null)
+    {
+        var config = GetAgentConfig(role, customAgentName);
+        return config.RoleDescription?.Trim();
     }
 
     /// <summary>
@@ -178,10 +226,15 @@ public class RoleContextProvider
         _initialized.TryRemove(cacheKey, out _);
     }
 
-    private static string GetCacheKey(AgentRole role, string? customAgentName)
+    /// <summary>
+    /// Builds a stable cache key from role and optional custom agent name.
+    /// Any non-empty customAgentName produces a name-qualified key (supports SME agents
+    /// that use Role=SoftwareEngineer with a custom display name).
+    /// </summary>
+    internal static string GetCacheKey(AgentRole role, string? customAgentName)
     {
-        if (role == AgentRole.Custom && !string.IsNullOrWhiteSpace(customAgentName))
-            return $"custom:{customAgentName}";
+        if (!string.IsNullOrWhiteSpace(customAgentName))
+            return $"{role}:{customAgentName}";
         return role.ToString();
     }
 
@@ -348,4 +401,52 @@ public class RoleContextProvider
         new MarkdownContentExtractor(),
         new HtmlContentExtractor()
     ];
+
+    // ── Persistence (run_metadata) ────────────────────────────────────────
+
+    private const string RoleOverridePrefix = "role_override:";
+
+    /// <summary>
+    /// Loads persisted role description overrides from the state store.
+    /// Call during startup to restore overrides from previous runner sessions.
+    /// </summary>
+    public void LoadPersistedOverrides(Persistence.AgentStateStore stateStore)
+    {
+        ArgumentNullException.ThrowIfNull(stateStore);
+
+        var entries = stateStore.GetRunMetadataByPrefix(RoleOverridePrefix);
+        var loaded = 0;
+        foreach (var (key, value) in entries)
+        {
+            var cacheKey = key[RoleOverridePrefix.Length..];
+            if (!string.IsNullOrWhiteSpace(cacheKey) && !string.IsNullOrWhiteSpace(value))
+            {
+                _roleDescriptionOverrides[cacheKey] = value;
+                loaded++;
+            }
+        }
+
+        if (loaded > 0)
+            _logger.LogInformation("Loaded {Count} persisted role description overrides", loaded);
+    }
+
+    /// <summary>
+    /// Persists a role description override to the state store (survives restarts).
+    /// </summary>
+    public void PersistOverride(Persistence.AgentStateStore stateStore, AgentRole role, string? customAgentName, string description)
+    {
+        ArgumentNullException.ThrowIfNull(stateStore);
+        var cacheKey = GetCacheKey(role, customAgentName);
+        stateStore.SetRunMetadata($"{RoleOverridePrefix}{cacheKey}", description);
+    }
+
+    /// <summary>
+    /// Removes a persisted role description override from the state store.
+    /// </summary>
+    public void ClearPersistedOverride(Persistence.AgentStateStore stateStore, AgentRole role, string? customAgentName)
+    {
+        ArgumentNullException.ThrowIfNull(stateStore);
+        var cacheKey = GetCacheKey(role, customAgentName);
+        stateStore.DeleteRunMetadata($"{RoleOverridePrefix}{cacheKey}");
+    }
 }

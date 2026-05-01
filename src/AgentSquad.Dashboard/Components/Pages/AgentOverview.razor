@@ -381,6 +381,7 @@ else
                         </div>
                     }
                     <div class="agent-actions" @onclick:stopPropagation="true">
+                        <button class="action-btn role-btn" @onclick="() => OpenRoleEditor(agent.Id)" title="View/edit role description" data-testid="agent-card-role-btn">📝 Role</button>
                         <button class="action-btn chat-btn" @onclick="() => OpenChat(agent.Id)" title="Chat with this agent" data-testid="agent-card-chat-btn">💬 Chat</button>
                     </div>
                 </div>
@@ -501,6 +502,45 @@ else
     </div>
 }
 
+@* Role Editor Modal *@
+@if (_showRoleModal && _roleAgentId is not null)
+{
+    <div class="modal-overlay" @onclick="CloseRoleEditor" data-testid="modal-role-editor">
+        <div class="role-modal" @onclick:stopPropagation="true">
+            <div class="role-modal-header">
+                <h3>📝 @_roleAgentName — Role Description</h3>
+                <button class="modal-close" @onclick="CloseRoleEditor" data-testid="modal-role-close">✕</button>
+            </div>
+            <div class="role-modal-body">
+                <div class="role-warning-banner">
+                    <span class="role-warning-icon">⚠️</span>
+                    <span>Changes here are <strong>temporary (run-scoped)</strong>. They persist across restarts but reset when a new project begins. For permanent changes, use the <a href="/configuration">Configuration page</a>.</span>
+                </div>
+                @if (_roleHasOverride)
+                {
+                    <div class="role-override-indicator" data-testid="role-override-active">
+                        ✦ Run-scoped override active
+                    </div>
+                }
+                <textarea class="role-textarea" rows="12" @bind="_roleDescription" @bind:event="oninput"
+                          placeholder="Enter role description for this agent…"
+                          data-testid="role-textarea"></textarea>
+            </div>
+            <div class="role-modal-footer">
+                <button class="btn-reset" @onclick="ResetRoleToDefault" disabled="@(!_roleHasOverride)"
+                        title="Remove run-scoped override and revert to default" data-testid="role-reset-btn">
+                    🔄 Reset to Default
+                </button>
+                <button class="btn-save" @onclick="SaveRoleOverride"
+                        disabled="@(string.IsNullOrWhiteSpace(_roleDescription))"
+                        data-testid="role-save-btn">
+                    💾 Save for This Run
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
 @code {
     private List<AgentSnapshot> _agents = [];
     private HashSet<string> _hiddenAgentIds = [];
@@ -540,6 +580,13 @@ else
     private bool _chatSending;
     private bool _refreshing;
     private bool _isProjectComplete;
+
+    // Role editor modal state
+    private bool _showRoleModal;
+    private string? _roleAgentId;
+    private string? _roleAgentName;
+    private string _roleDescription = "";
+    private bool _roleHasOverride;
 
     // Team composition state
     private string? _teamComposition;
@@ -768,6 +815,55 @@ else
     {
         _showChatModal = false;
         _chatAgentId = null;
+    }
+
+    // ── Role Editor ──
+
+    private void OpenRoleEditor(string agentId)
+    {
+        var agent = _agents.FirstOrDefault(a => a.Id == agentId);
+        if (agent is null) return;
+
+        _roleAgentId = agentId;
+        _roleAgentName = agent.DisplayName;
+
+        var info = DataService.GetAgentRoleDescription(agentId);
+        if (info is not null)
+        {
+            _roleDescription = info.EffectiveDescription ?? "";
+            _roleHasOverride = info.HasOverride;
+        }
+        else
+        {
+            _roleDescription = "";
+            _roleHasOverride = false;
+        }
+
+        _showRoleModal = true;
+    }
+
+    private void CloseRoleEditor()
+    {
+        _showRoleModal = false;
+        _roleAgentId = null;
+    }
+
+    private void SaveRoleOverride()
+    {
+        if (_roleAgentId is null || string.IsNullOrWhiteSpace(_roleDescription)) return;
+        DataService.SaveAgentRoleOverride(_roleAgentId, _roleDescription.Trim());
+        _roleHasOverride = true;
+    }
+
+    private void ResetRoleToDefault()
+    {
+        if (_roleAgentId is null) return;
+        DataService.ClearAgentRoleOverride(_roleAgentId);
+        _roleHasOverride = false;
+
+        // Reload the configured default description
+        var info = DataService.GetAgentRoleDescription(_roleAgentId);
+        _roleDescription = info?.ConfiguredDescription ?? "";
     }
 
     private void SetChatInput(string text)

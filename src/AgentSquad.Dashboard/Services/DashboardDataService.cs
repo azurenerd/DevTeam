@@ -130,6 +130,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly RateLimitManager _rateLimitManager;
     private readonly IRepositoryContentService? _repositoryContentService;
     private readonly IRunBranchProvider? _branchProvider;
+    private readonly AgentSquad.Core.AI.RoleContextProvider? _roleContextProvider;
     private readonly ILogger<DashboardDataService> _logger;
 
     private IReadOnlyList<PlatformPullRequest> _cachedPullRequests = Array.Empty<PlatformPullRequest>();
@@ -153,7 +154,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         RateLimitManager rateLimitManager,
         ILogger<DashboardDataService> logger,
         IRepositoryContentService? repositoryContentService = null,
-        IRunBranchProvider? branchProvider = null)
+        IRunBranchProvider? branchProvider = null,
+        AgentSquad.Core.AI.RoleContextProvider? roleContextProvider = null)
     {
         _snapshots = snapshots;
         _diagnostics = diagnostics;
@@ -170,6 +172,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _logger = logger;
         _repositoryContentService = repositoryContentService;
         _branchProvider = branchProvider;
+        _roleContextProvider = roleContextProvider;
     }
 
     // ── BackgroundService lifecycle ──
@@ -299,6 +302,71 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
 
         _timeline.RecordMilestone("🔄", "Project Reset", "Repository cleaned and agents restarted", "phase");
         _logger.LogInformation("Dashboard caches reset");
+    }
+
+    // ── IDashboardDataService: Agent Role Description ──
+
+    public AgentRoleDescriptionInfo? GetAgentRoleDescription(string agentId)
+    {
+        if (_roleContextProvider is null) return null;
+
+        var agent = _registry.GetAgent(agentId);
+        if (agent is null) return null;
+
+        var identity = agent.Identity;
+        var customName = ResolveCustomAgentName(identity);
+
+        var hasOverride = _roleContextProvider.TryGetRoleDescriptionOverride(identity.Role, customName, out var overrideText);
+        var configuredDescription = _roleContextProvider.GetConfiguredRoleDescription(identity.Role, customName);
+        var effectiveDescription = hasOverride ? overrideText : configuredDescription;
+
+        return new AgentRoleDescriptionInfo(
+            identity.Id, identity.DisplayName, identity.Role.ToString(),
+            effectiveDescription, overrideText, configuredDescription, hasOverride);
+    }
+
+    public void SaveAgentRoleOverride(string agentId, string description)
+    {
+        if (_roleContextProvider is null) return;
+
+        var agent = _registry.GetAgent(agentId);
+        if (agent is null) return;
+
+        var identity = agent.Identity;
+        var customName = ResolveCustomAgentName(identity);
+
+        _roleContextProvider.SetRoleDescriptionOverride(identity.Role, description, customName);
+        _roleContextProvider.PersistOverride(_stateStore, identity.Role, customName, description);
+    }
+
+    public bool ClearAgentRoleOverride(string agentId)
+    {
+        if (_roleContextProvider is null) return false;
+
+        var agent = _registry.GetAgent(agentId);
+        if (agent is null) return false;
+
+        var identity = agent.Identity;
+        var customName = ResolveCustomAgentName(identity);
+
+        var cleared = _roleContextProvider.ClearRoleDescriptionOverride(identity.Role, customName);
+        _roleContextProvider.ClearPersistedOverride(_stateStore, identity.Role, customName);
+        return cleared;
+    }
+
+    /// <summary>
+    /// Resolves the stable custom agent name for cache key derivation.
+    /// For Custom role agents, uses CustomAgentName. For SME agents with a
+    /// display name different from the role, uses DisplayName.
+    /// </summary>
+    private static string? ResolveCustomAgentName(AgentIdentity identity)
+    {
+        if (identity.Role == AgentSquad.Core.Agents.AgentRole.Custom)
+            return identity.CustomAgentName;
+        // SME agents have Role=SoftwareEngineer but a custom DisplayName
+        if (identity.DisplayName != identity.Role.ToString())
+            return identity.DisplayName;
+        return null;
     }
 
     // ── Event handlers (facade owns all event subscriptions) ──

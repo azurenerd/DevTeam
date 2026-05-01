@@ -238,6 +238,14 @@ builder.Services.AddCors(o => o.AddPolicy("DashboardApi", p =>
 
 var app = builder.Build();
 
+// Load persisted role description overrides from previous sessions
+var roleProvider = app.Services.GetService<AgentSquad.Core.AI.RoleContextProvider>();
+var stateStore = app.Services.GetService<AgentSquad.Core.Persistence.AgentStateStore>();
+if (roleProvider is not null && stateStore is not null)
+{
+    roleProvider.LoadPersistedOverrides(stateStore);
+}
+
 // Configure HTTP pipeline
 if (!app.Environment.IsDevelopment())
 {
@@ -465,6 +473,84 @@ promptApi.MapPost("/reset/{**templatePath}", async (string templatePath, IPrompt
     var defaultContent = await File.ReadAllTextAsync(defaultFile, ct);
     await svc.SaveRawContentAsync(templatePath, defaultContent, ct);
     return Results.Ok();
+});
+
+// ── Agent Role Description REST API (run-scoped overrides) ──
+var roleApi = app.MapGroup("/api/agents").WithTags("AgentRoles");
+
+roleApi.MapGet("/{agentId}/role-description", (string agentId,
+    AgentSquad.Orchestrator.AgentRegistry registry,
+    AgentSquad.Core.AI.RoleContextProvider roleContext) =>
+{
+    var agent = registry.GetAgent(agentId);
+    if (agent is null) return Results.NotFound(new { error = "Agent not found" });
+
+    var identity = agent.Identity;
+    var customName = identity.Role == AgentSquad.Core.Agents.AgentRole.Custom
+        ? identity.CustomAgentName
+        : (identity.DisplayName != identity.Role.ToString() ? identity.DisplayName : null);
+
+    var hasOverride = roleContext.TryGetRoleDescriptionOverride(identity.Role, customName, out var overrideText);
+    var configuredDescription = roleContext.GetConfiguredRoleDescription(identity.Role, customName);
+    var effectiveDescription = hasOverride ? overrideText : configuredDescription;
+
+    return Results.Ok(new
+    {
+        agentId = identity.Id,
+        displayName = identity.DisplayName,
+        role = identity.Role.ToString(),
+        effectiveDescription,
+        overrideDescription = overrideText,
+        configuredDescription,
+        hasOverride
+    });
+});
+
+roleApi.MapPut("/{agentId}/role-description", (string agentId, HttpContext ctx,
+    AgentSquad.Orchestrator.AgentRegistry registry,
+    AgentSquad.Core.AI.RoleContextProvider roleContext,
+    AgentStateStore stateStoreForRole) =>
+{
+    var agent = registry.GetAgent(agentId);
+    if (agent is null) return Results.NotFound(new { error = "Agent not found" });
+
+    var body = ctx.Request.ReadFromJsonAsync<RoleDescriptionRequest>().GetAwaiter().GetResult();
+    var description = body?.Description?.Trim();
+
+    var identity = agent.Identity;
+    var customName = identity.Role == AgentSquad.Core.Agents.AgentRole.Custom
+        ? identity.CustomAgentName
+        : (identity.DisplayName != identity.Role.ToString() ? identity.DisplayName : null);
+
+    // Blank/whitespace normalizes to a clear (revert to default)
+    if (string.IsNullOrWhiteSpace(description))
+    {
+        roleContext.ClearRoleDescriptionOverride(identity.Role, customName);
+        roleContext.ClearPersistedOverride(stateStoreForRole, identity.Role, customName);
+        return Results.Ok(new { cleared = true });
+    }
+
+    roleContext.SetRoleDescriptionOverride(identity.Role, description, customName);
+    roleContext.PersistOverride(stateStoreForRole, identity.Role, customName, description);
+    return Results.Ok(new { saved = true });
+});
+
+roleApi.MapDelete("/{agentId}/role-description", (string agentId,
+    AgentSquad.Orchestrator.AgentRegistry registry,
+    AgentSquad.Core.AI.RoleContextProvider roleContext,
+    AgentStateStore stateStoreForRole) =>
+{
+    var agent = registry.GetAgent(agentId);
+    if (agent is null) return Results.NotFound(new { error = "Agent not found" });
+
+    var identity = agent.Identity;
+    var customName = identity.Role == AgentSquad.Core.Agents.AgentRole.Custom
+        ? identity.CustomAgentName
+        : (identity.DisplayName != identity.Role.ToString() ? identity.DisplayName : null);
+
+    var cleared = roleContext.ClearRoleDescriptionOverride(identity.Role, customName);
+    roleContext.ClearPersistedOverride(stateStoreForRole, identity.Role, customName);
+    return Results.Ok(new { cleared });
 });
 
 // ── Reasoning Log REST API (consumed by standalone Dashboard.Host) ──
@@ -886,3 +972,4 @@ record ValidatePatRequest(string? Token, string? RepoFullName);
 record CleanupExecuteRequest(string? Caveats);
 record PromptSaveRequest(string? Content);
 record RepoCreateRequest(string Name);
+record RoleDescriptionRequest(string? Description);
