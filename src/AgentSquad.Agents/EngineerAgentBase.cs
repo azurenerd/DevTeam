@@ -26,23 +26,31 @@ namespace AgentSquad.Agents;
 /// </summary>
 public abstract class EngineerAgentBase : AgentBase
 {
-    protected readonly IMessageBus MessageBus;
-    protected readonly IPullRequestService PrService;
-    protected readonly IWorkItemService WorkItemService;
-    protected readonly IRepositoryContentService RepoContent;
-    protected readonly IReviewService ReviewService;
-    protected readonly IBranchService BranchService;
-    protected readonly PullRequestWorkflow PrWorkflow;
-    protected readonly IssueWorkflow IssueWf;
-    protected readonly ProjectFileManager ProjectFiles;
-    protected readonly ModelRegistry Models;
-    protected readonly AgentSquadConfig Config;
-    protected readonly AgentStateStore StateStore;
-    protected readonly IPromptTemplateService PromptService;
-    private readonly IGateCheckService _gateCheck;
+    protected readonly AgentPlatformServices Platform;
+    protected readonly AgentWorkspaceServices WorkspaceServices;
     protected readonly DecisionGateService? DecisionGate;
-    protected readonly IAgentTaskTracker _taskTracker;
-    protected readonly IRunBranchProvider? BranchProvider;
+
+    // Protected accessors — preserve subclass compatibility with old field names
+    protected IMessageBus MessageBus => Core!.MessageBus;
+    protected IPullRequestService PrService => Platform.PrService;
+    protected IWorkItemService WorkItemService => Platform.WorkItemService;
+    protected IRepositoryContentService RepoContent => Platform.RepoContent;
+    protected IReviewService ReviewService => Platform.ReviewService;
+    protected IBranchService BranchService => Platform.BranchService!;
+    protected PullRequestWorkflow PrWorkflow => Platform.PrWorkflow;
+    protected IssueWorkflow IssueWf => Platform.IssueWorkflow!;
+    protected ProjectFileManager ProjectFiles => Core!.ProjectFiles;
+    protected ModelRegistry Models => Core!.ModelRegistry;
+    protected AgentSquadConfig Config => Core!.Config;
+    protected AgentStateStore StateStore => Core!.StateStore!;
+    protected IPromptTemplateService PromptService => Core!.PromptService!;
+    protected IGateCheckService GateCheck => Core!.GateCheck;
+    protected IAgentTaskTracker TaskTracker => Core!.TaskTracker!;
+    protected IRunBranchProvider? BranchProvider => Platform.BranchProvider;
+    protected BuildRunner? BuildRunnerSvc => WorkspaceServices.BuildRunner;
+    protected TestRunner? TestRunnerSvc => WorkspaceServices.TestRunner;
+    protected Core.Metrics.BuildTestMetrics? Metrics => WorkspaceServices.Metrics;
+    protected PlaywrightRunner? ScreenshotRunner => WorkspaceServices.PlaywrightRunner;
 
     protected readonly HashSet<int> ProcessedIssueIds = new();
     protected readonly ConcurrentQueue<ReworkItem> ReworkQueue = new();
@@ -72,66 +80,26 @@ public abstract class EngineerAgentBase : AgentBase
     private DateTime _repoTreeCacheExpiry = DateTime.MinValue;
     // Local workspace for real build/test verification (null when disabled)
     protected LocalWorkspace? Workspace;
-    protected readonly BuildRunner? BuildRunnerSvc;
-    protected readonly TestRunner? TestRunnerSvc;
-    protected readonly Core.Metrics.BuildTestMetrics? Metrics;
-    protected readonly PlaywrightRunner? ScreenshotRunner;
     private bool _pendingWorkspaceCleanup;
     protected int? CurrentIssueNumber;
     protected int? CurrentPrNumber;
 
     protected EngineerAgentBase(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        PullRequestWorkflow prWorkflow,
-        IssueWorkflow issueWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentStateStore stateStore,
-        AgentSquadConfig config,
-        AgentMemoryStore memoryStore,
-        IGateCheckService gateCheck,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        AgentWorkspaceServices workspace,
         ILogger<AgentBase> logger,
-        IPromptTemplateService? promptService = null,
-        RoleContextProvider? roleContextProvider = null,
-        BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null,
-        Core.Metrics.BuildTestMetrics? metrics = null,
-        PlaywrightRunner? playwrightRunner = null,
-        DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null,
-        IPullRequestService? prService = null,
-        IWorkItemService? workItemService = null,
-        IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null,
-        IBranchService? branchService = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        DecisionGateService? decisionGate = null)
+        : base(identity, core, logger)
     {
-        MessageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        PrWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        IssueWf = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
-        ProjectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        Models = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
-        StateStore = stateStore ?? throw new ArgumentNullException(nameof(stateStore));
-        Config = config ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        PromptService = promptService!; // null-safe: fallback pattern handles null
-        BuildRunnerSvc = buildRunner;
-        TestRunnerSvc = testRunner;
-        Metrics = metrics;
-        ScreenshotRunner = playwrightRunner;
+        Platform = platform ?? throw new ArgumentNullException(nameof(platform));
+        WorkspaceServices = workspace ?? throw new ArgumentNullException(nameof(workspace));
         DecisionGate = decisionGate;
-        _taskTracker = taskTracker!;
-        PrService = prService!;
-        WorkItemService = workItemService!;
-        RepoContent = repoContent!;
-        ReviewService = reviewService!;
-        BranchService = branchService!;
-        BranchProvider = branchProvider;
     }
 
     protected string EffectiveBranch => BranchProvider?.EffectiveBranch ?? Config.Project.DefaultBranch;
+
 
     #region Lifecycle
 
@@ -628,7 +596,7 @@ public abstract class EngineerAgentBase : AgentBase
             UpdateStatus(AgentStatus.Working, $"Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
             LogActivity("task", $"📋 Starting issue #{assignment.IssueNumber}: {assignment.IssueTitle}");
 
-            var claimStepId = _taskTracker.BeginStep(Identity.Id, taskId, "Claim issue",
+            var claimStepId = TaskTracker.BeginStep(Identity.Id, taskId, "Claim issue",
                 $"Claiming issue #{assignment.IssueNumber}: {assignment.IssueTitle}", Identity.ModelTier);
             var issue = (await WorkItemService.GetAsync(assignment.IssueNumber, ct))?.ToAgentIssue();
             if (issue is null)
@@ -646,7 +614,7 @@ public abstract class EngineerAgentBase : AgentBase
                     "{Role} {Name}: Issue #{Number} has unmet dependencies ({Deps}) — deferring",
                     Identity.Role, Identity.DisplayName, assignment.IssueNumber,
                     string.Join(", ", deps.Select(d => $"#{d}")));
-                _taskTracker.CompleteStep(claimStepId);
+                TaskTracker.CompleteStep(claimStepId);
                 CurrentIssueNumber = null;
                 return;
             }
@@ -688,7 +656,7 @@ public abstract class EngineerAgentBase : AgentBase
                             $"already exist in merged PRs. Closing as duplicate to avoid overlapping work.",
                             ct);
                         await WorkItemService.CloseAsync(assignment.IssueNumber, ct);
-                        _taskTracker.CompleteStep(claimStepId);
+                        TaskTracker.CompleteStep(claimStepId);
                         CurrentIssueNumber = null;
                         return;
                     }
@@ -755,14 +723,14 @@ public abstract class EngineerAgentBase : AgentBase
 
             var planResponse = await chat.GetChatMessageContentAsync(planHistory, cancellationToken: ct);
             var planContent = planResponse.Content?.Trim() ?? "";
-            _taskTracker.RecordLlmCall(claimStepId);
+            TaskTracker.RecordLlmCall(claimStepId);
 
             // Clarification loop (if the engineer has questions)
             planContent = await RunClarificationLoopAsync(planHistory, planContent, issue, ct);
-            _taskTracker.CompleteStep(claimStepId);
+            TaskTracker.CompleteStep(claimStepId);
 
             // Create PR linking to the Issue — include Implementation Steps
-            var createPrStepId = _taskTracker.BeginStep(Identity.Id, taskId, "Create PR",
+            var createPrStepId = TaskTracker.BeginStep(Identity.Id, taskId, "Create PR",
                 $"Creating PR for issue #{issue.Number}", Identity.ModelTier);
             var prDescription = $"Closes #{issue.Number}\n\n" +
                 $"<!-- agent-id: {Identity.Id} -->\n" +
@@ -789,7 +757,7 @@ public abstract class EngineerAgentBase : AgentBase
             {
                 Logger.LogError("{Role} {Name} PR creation returned null for issue #{Number}",
                     Identity.Role, Identity.DisplayName, issue.Number);
-                _taskTracker.CompleteStep(createPrStepId);
+                TaskTracker.CompleteStep(createPrStepId);
                 CurrentIssueNumber = null;
                 return;
             }
@@ -803,7 +771,7 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogInformation("{Role} {Name} created PR #{PrNumber} for issue #{IssueNumber}",
                 Identity.Role, Identity.DisplayName, pr.Number, issue.Number);
             LogActivity("github", $"Created PR #{pr.Number} for issue #{issue.Number}: {issue.Title}");
-            _taskTracker.CompleteStep(createPrStepId);
+            TaskTracker.CompleteStep(createPrStepId);
 
             await RememberAsync(MemoryType.Action,
                 $"Created PR #{pr.Number} for issue #{issue.Number}: {issue.Title}",
@@ -849,11 +817,11 @@ public abstract class EngineerAgentBase : AgentBase
         }
 
         UpdateStatus(AgentStatus.Working, $"PR #{pr.Number} generating implementation steps");
-        var genStepsStepId = _taskTracker.BeginStep(Identity.Id, implTaskId, "Generate implementation steps",
+        var genStepsStepId = TaskTracker.BeginStep(Identity.Id, implTaskId, "Generate implementation steps",
             $"Breaking PR #{pr.Number} into discrete implementation steps", Identity.ModelTier);
         var steps = await GenerateImplementationStepsAsync(chat, pr, issue, pmSpecDoc, architectureDoc, techStack, ct);
-        _taskTracker.RecordLlmCall(genStepsStepId);
-        _taskTracker.CompleteStep(genStepsStepId);
+        TaskTracker.RecordLlmCall(genStepsStepId);
+        TaskTracker.CompleteStep(genStepsStepId);
 
         if (steps.Count == 0)
         {
@@ -889,7 +857,7 @@ public abstract class EngineerAgentBase : AgentBase
             var step = steps[i];
             var stepNumber = i + 1;
 
-            var execStepId = _taskTracker.BeginStep(Identity.Id, implTaskId,
+            var execStepId = TaskTracker.BeginStep(Identity.Id, implTaskId,
                 $"Execute step {stepNumber}: {Truncate(step, 60)}",
                 $"Step {stepNumber}/{steps.Count} for PR #{pr.Number}", Identity.ModelTier);
 
@@ -980,13 +948,13 @@ public abstract class EngineerAgentBase : AgentBase
 
             var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
             var stepImpl = stepResponse.Content?.Trim() ?? "";
-            _taskTracker.RecordLlmCall(execStepId);
-            _taskTracker.RecordSubStep(execStepId, $"Implementation for step {stepNumber}");
+            TaskTracker.RecordLlmCall(execStepId);
+            TaskTracker.RecordSubStep(execStepId, $"Implementation for step {stepNumber}");
 
             // Optional self-review for this step
             stepHistory.AddAssistantMessage(stepImpl);
             var finalStepOutput = await RunSelfReviewAsync(stepHistory, stepImpl, ct);
-            _taskTracker.RecordSubStep(execStepId, $"Self-review for step {stepNumber}");
+            TaskTracker.RecordSubStep(execStepId, $"Self-review for step {stepNumber}");
 
             var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(finalStepOutput);
             if (codeFiles.Count == 0)
@@ -1035,21 +1003,21 @@ public abstract class EngineerAgentBase : AgentBase
 
                     // Checkpoint progress so we can resume after a crash
                     await CheckpointTaskProgressAsync(pr.Number, CurrentIssueNumber, stepNumber, ct);
-                    _taskTracker.CompleteStep(execStepId);
+                    TaskTracker.CompleteStep(execStepId);
                 }
                 else
                 {
                     Logger.LogWarning("{Role} {Name} step {Step}/{Total} blocked by build errors, skipping",
                         Identity.Role, Identity.DisplayName, stepNumber, steps.Count);
                     LogActivity("task", $"⛔ Step {stepNumber}/{steps.Count} blocked by build errors: {Truncate(step, 80)}");
-                    _taskTracker.FailStep(execStepId, "Blocked by build errors");
+                    TaskTracker.FailStep(execStepId, "Blocked by build errors");
                 }
             }
             else
             {
                 Logger.LogWarning("{Role} {Name} step {Step}/{Total} produced no parseable files, skipping commit",
                     Identity.Role, Identity.DisplayName, stepNumber, steps.Count);
-                _taskTracker.CompleteStep(execStepId, AgentTaskStepStatus.Skipped);
+                TaskTracker.CompleteStep(execStepId, AgentTaskStepStatus.Skipped);
             }
 
             completedSteps.Add(step);
@@ -1060,11 +1028,11 @@ public abstract class EngineerAgentBase : AgentBase
         }
 
         // Mark PR ready for review after all steps complete
-        var markReadyStepId = _taskTracker.BeginStep(Identity.Id, implTaskId, "Mark ready for review",
+        var markReadyStepId = TaskTracker.BeginStep(Identity.Id, implTaskId, "Mark ready for review",
             $"Marking PR #{pr.Number} ready for review", Identity.ModelTier);
-        _taskTracker.SetStepWaiting(markReadyStepId);
+        TaskTracker.SetStepWaiting(markReadyStepId);
         await MarkPrCompleteAsync(pr, issue, ct);
-        _taskTracker.CompleteStep(markReadyStepId);
+        TaskTracker.CompleteStep(markReadyStepId);
     }
 
     /// <summary>
@@ -1291,7 +1259,7 @@ public abstract class EngineerAgentBase : AgentBase
         await SyncBranchWithMainAsync(pr.Number, ct);
 
         // === Gate: PRCodeComplete — human reviews code before marking ready ===
-        await _gateCheck.WaitForGateAsync(
+        await GateCheck.WaitForGateAsync(
             GateIds.PRCodeComplete,
             $"Engineer code complete on PR #{pr.Number}, ready for human review before marking ready-for-review",
             pr.Number, ct: ct);
@@ -1508,7 +1476,7 @@ public abstract class EngineerAgentBase : AgentBase
         await SyncBranchWithMainAsync(pr.Number, ct);
 
         // === Gate: PRCodeComplete — human reviews code before marking ready ===
-        await _gateCheck.WaitForGateAsync(
+        await GateCheck.WaitForGateAsync(
             GateIds.PRCodeComplete,
             $"Engineer code complete on PR #{pr.Number}, ready for human review before marking ready-for-review",
             pr.Number, ct: ct);
@@ -1564,13 +1532,13 @@ public abstract class EngineerAgentBase : AgentBase
         var rework = reworkBatch[0]; // Use first item for PR number/title
         var reworkTaskId = $"rework-pr-{rework.PrNumber}";
 
-        var reworkStepId = _taskTracker.BeginStep(Identity.Id, reworkTaskId, "Address review feedback",
+        var reworkStepId = TaskTracker.BeginStep(Identity.Id, reworkTaskId, "Address review feedback",
             $"Reworking PR #{rework.PrNumber} based on reviewer feedback", Identity.ModelTier);
 
         var pr = (await PrService.GetAsync(rework.PrNumber, ct))?.ToAgentPR();
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
         {
-            _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Skipped);
+            TaskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Skipped);
             return;
         }
 
@@ -1630,7 +1598,7 @@ public abstract class EngineerAgentBase : AgentBase
                 Identity.Role, Identity.DisplayName, cycleType, maxCycles, rework.PrNumber);
 
             // === Gate: ReworkExhaustion — human decides on exhausted rework cycles ===
-            await _gateCheck.WaitForGateAsync(
+            await GateCheck.WaitForGateAsync(
                 GateIds.ReworkExhaustion,
                 $"PR #{rework.PrNumber} has exhausted rework cycles, human decision needed",
                 rework.PrNumber, ct: ct);
@@ -1786,9 +1754,9 @@ public abstract class EngineerAgentBase : AgentBase
 
                     if (committed)
                     {
-                        _taskTracker.CompleteStep(reworkStepId);
+                        TaskTracker.CompleteStep(reworkStepId);
 
-                        var screenshotStepId = _taskTracker.BeginStep(Identity.Id, reworkTaskId, "Capture screenshot & re-request review",
+                        var screenshotStepId = TaskTracker.BeginStep(Identity.Id, reworkTaskId, "Capture screenshot & re-request review",
                             $"Taking screenshot and marking PR #{pr.Number} ready for re-review", Identity.ModelTier);
 
                         var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {allReviewers}.\n\n";
@@ -1804,7 +1772,7 @@ public abstract class EngineerAgentBase : AgentBase
                         await SyncBranchWithMainAsync(pr.Number, ct);
                         await MarkReadyForReviewWithScreenshotAsync(pr, ct);
 
-                        _taskTracker.CompleteStep(screenshotStepId);
+                        TaskTracker.CompleteStep(screenshotStepId);
 
                         await MessageBus.PublishAsync(new ReviewRequestMessage
                         {
@@ -1828,7 +1796,7 @@ public abstract class EngineerAgentBase : AgentBase
                     {
                         // Build-blocked rework — notify on PR but don't re-request review.
                         // Re-enqueue so next loop iteration retries (or hits max cycles for force-approval).
-                        _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
+                        TaskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
                         Logger.LogWarning("{Role} {Name} rework for PR #{PrNumber} blocked by build errors",
                             Identity.Role, Identity.DisplayName, pr.Number);
                         _ = Metrics?.RecordReworkBuildBlockedAsync(Identity.Id, ct);
@@ -1843,7 +1811,7 @@ public abstract class EngineerAgentBase : AgentBase
                 else
                 {
                     // AI failed to produce FILE: blocks — re-enqueue so retry/force-approval can proceed.
-                    _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
+                    TaskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
                     Logger.LogWarning(
                         "{Role} {Name} rework on PR #{PrNumber} produced no FILE: blocks — no code changes committed. " +
                         "Skipping ready-for-review to avoid pointless re-review of unchanged code",
@@ -1859,7 +1827,7 @@ public abstract class EngineerAgentBase : AgentBase
         }
         catch (Exception ex)
         {
-            _taskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
+            TaskTracker.CompleteStep(reworkStepId, AgentTaskStepStatus.Failed);
             Logger.LogError(ex, "{Role} {Name} failed rework on PR #{PrNumber}",
                 Identity.Role, Identity.DisplayName, rework.PrNumber);
 
@@ -2324,7 +2292,7 @@ public abstract class EngineerAgentBase : AgentBase
             await SyncBranchWithMainAsync(pr.Number, ct);
 
             // === Gate: PRCodeComplete — human reviews code before marking ready ===
-            await _gateCheck.WaitForGateAsync(
+            await GateCheck.WaitForGateAsync(
                 GateIds.PRCodeComplete,
                 $"Engineer code complete on PR #{pr.Number}, ready for human review before marking ready-for-review",
                 pr.Number, ct: ct);

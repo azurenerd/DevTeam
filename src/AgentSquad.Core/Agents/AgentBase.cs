@@ -30,6 +30,19 @@ public abstract class AgentBase : IAgent, IDisposable
     /// </summary>
     private string _cliSessionId = Guid.NewGuid().ToString();
 
+    protected AgentBase(AgentIdentity identity, AgentCoreServices core, ILogger<AgentBase> logger)
+    {
+        Identity = identity ?? throw new ArgumentNullException(nameof(identity));
+        Core = core ?? throw new ArgumentNullException(nameof(core));
+        Logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        MemoryStore = core.MemoryStore;
+        RoleContext = core.RoleContextProvider;
+        LifetimeCts = new CancellationTokenSource();
+    }
+
+    /// <summary>
+    /// Legacy constructor for tests and minimal agent creation without full service bundles.
+    /// </summary>
     protected AgentBase(AgentIdentity identity, ILogger<AgentBase> logger, AgentMemoryStore? memoryStore = null, RoleContextProvider? roleContextProvider = null)
     {
         Identity = identity ?? throw new ArgumentNullException(nameof(identity));
@@ -40,6 +53,9 @@ public abstract class AgentBase : IAgent, IDisposable
     }
 
     public AgentIdentity Identity { get; }
+
+    /// <summary>Core services bundle (null when created via legacy constructor for tests).</summary>
+    protected AgentCoreServices? Core { get; }
 
     public AgentStatus Status
     {

@@ -1,16 +1,13 @@
+using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Reasoning;
-using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
-using AgentSquad.Core.DevPlatform.Capabilities;
-using AgentSquad.Core.GitHub;
+using AgentSquad.Core.DevPlatform.Models;
+using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Prompts;
-using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 
@@ -18,73 +15,30 @@ namespace AgentSquad.Agents;
 
 public class ResearcherAgent : AgentBase
 {
-    private readonly IMessageBus _messageBus;
-    private readonly IPullRequestService _prService;
-    private readonly IWorkItemService _workItemService;
-    private readonly IRepositoryContentService _repoContent;
-    private readonly IReviewService _reviewService;
-    private readonly PullRequestWorkflow _prWorkflow;
-    private readonly ProjectFileManager _projectFiles;
-    private readonly ModelRegistry _modelRegistry;
-    private readonly AgentSquadConfig _config;
-    private readonly PlaywrightRunner? _playwrightRunner;
-    private readonly IGateCheckService _gateCheck;
-    private readonly SelfAssessmentService _selfAssessment;
-    private readonly IAgentReasoningLog _reasoningLog;
-    private readonly IPromptTemplateService _promptService;
-    private readonly IAgentTaskTracker _taskTracker;
-    private readonly IRunBranchProvider? _branchProvider;
+    private readonly AgentPlatformServices _platform;
+    private readonly AgentWorkspaceServices _workspace;
 
     private readonly Queue<ResearchDirective> _researchQueue = new();
     private readonly List<IDisposable> _subscriptions = new();
-    private string? _lastDesignSection; // Cached from ScanForDesignReferencesAsync
+    private string? _lastDesignSection;
 
     public ResearcherAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
-        SelfAssessmentService selfAssessment,
-        IAgentReasoningLog reasoningLog,
-        ILogger<ResearcherAgent> logger,
-        IPromptTemplateService promptService,
-        IAgentTaskTracker taskTracker,
-        IPullRequestService prService,
-        IWorkItemService workItemService,
-        IRepositoryContentService repoContent,
-        IReviewService reviewService,
-        RoleContextProvider? roleContextProvider = null,
-        PlaywrightRunner? playwrightRunner = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        AgentWorkspaceServices workspace,
+        ILogger<ResearcherAgent> logger)
+        : base(identity, core, logger)
     {
-        _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
-        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
-        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
-        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
-        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
-        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
-        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
-        _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
-        _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
-        _playwrightRunner = playwrightRunner;
-        _branchProvider = branchProvider;
+        _platform = platform ?? throw new ArgumentNullException(nameof(platform));
+        _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
     }
 
-    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
+    private string EffectiveBranch => _platform.BranchProvider?.EffectiveBranch ?? Core!.Config.Project.DefaultBranch;
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(_messageBus.Subscribe<TaskAssignmentMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<TaskAssignmentMessage>(
             Identity.Id, HandleTaskAssignmentAsync));
 
         Logger.LogInformation("Researcher agent initialized, awaiting research directives");
@@ -124,7 +78,7 @@ public class ResearcherAgent : AgentBase
                     currentDirective = directive;
 
                     // Idempotency: check if this topic was already researched
-                    var existingDoc = await _projectFiles.GetResearchDocAsync(ct);
+                    var existingDoc = await Core.ProjectFiles.GetResearchDocAsync(ct);
                     if (existingDoc.Contains($"## {directive.Topic}", StringComparison.OrdinalIgnoreCase) ||
                         existingDoc.Contains($"# {directive.Topic}", StringComparison.OrdinalIgnoreCase))
                     {
@@ -133,7 +87,7 @@ public class ResearcherAgent : AgentBase
                             directive.Topic);
                         currentDirective = null; // Don't re-enqueue on success
 
-                        _reasoningLog.Log(new AgentReasoningEvent
+                        Core.ReasoningLog!.Log(new AgentReasoningEvent
                         {
                             AgentId = Identity.Id,
                             AgentDisplayName = Identity.DisplayName,
@@ -149,7 +103,7 @@ public class ResearcherAgent : AgentBase
                         catch (Exception ex) { Logger.LogDebug(ex, "EnsureDesignScreenshotsPresentAsync failed (non-fatal)"); }
 
                         // Still signal completion so downstream agents aren't stuck
-                        await _messageBus.PublishAsync(new StatusUpdateMessage
+                        await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                         {
                             FromAgentId = Identity.Id,
                             ToAgentId = "*",
@@ -168,7 +122,7 @@ public class ResearcherAgent : AgentBase
                             // Fallback: search by title if PM didn't pass the number
                             try
                             {
-                                var issues = await _workItemService.ListOpenAsync(ct);
+                                var issues = await _platform.WorkItemService.ListOpenAsync(ct);
                                 var matchingIssue = issues.FirstOrDefault(i =>
                                     i.Title.Contains("Research", StringComparison.OrdinalIgnoreCase) &&
                                     i.Title.Contains(directive.Topic, StringComparison.OrdinalIgnoreCase));
@@ -183,19 +137,19 @@ public class ResearcherAgent : AgentBase
                         // Create the PR upfront so it's visible immediately
                         UpdateStatus(AgentStatus.Working, "Creating PR for Research.md");
                         string? createPrStepId = null;
-                        try { createPrStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Create research PR", "Opening PR for Research.md", Identity.ModelTier); } catch { }
-                        var researchPath = _projectFiles.ResolvePath("Research.md");
-                        var pr = await _prWorkflow.OpenDocumentPRAsync(
+                        try { createPrStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Create research PR", "Opening PR for Research.md", Identity.ModelTier); } catch { }
+                        var researchPath = Core.ProjectFiles.ResolvePath("Research.md");
+                        var pr = await _platform.PrWorkflow.OpenDocumentPRAsync(
                             Identity.DisplayName,
                             researchPath,
                             $"Research findings for {directive.Topic}",
                             $"Research findings covering: {directive.Topic}",
                             relatedIssue,
                             ct);
-                        try { if (createPrStepId is not null) _taskTracker.CompleteStep(createPrStepId); } catch { }
+                        try { if (createPrStepId is not null) Core.TaskTracker!.CompleteStep(createPrStepId); } catch { }
 
                         // Resume-aware: check if gate is already pending/approved from a prior run
-                        var gateStatus = await _gateCheck.GetGateStatusAsync(
+                        var gateStatus = await Core.GateCheck.GetGateStatusAsync(
                             GateIds.ResearchFindings, pr.Number, ct);
 
                         string? updatedDoc = null;
@@ -220,12 +174,12 @@ public class ResearcherAgent : AgentBase
                             LogActivity("task", $"🔬 Starting research on: {directive.Topic}");
 
                             string? researchStepId = null;
-        try { researchStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "AI research", $"Conducting research on: {directive.Topic}", Identity.ModelTier); } catch { }
+        try { researchStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "AI research", $"Conducting research on: {directive.Topic}", Identity.ModelTier); } catch { }
                             var research = await ConductResearchAsync(directive, researchStepId, ct);
-                            try { if (researchStepId is not null) _taskTracker.CompleteStep(researchStepId); } catch { }
+                            try { if (researchStepId is not null) Core.TaskTracker!.CompleteStep(researchStepId); } catch { }
 
                             // Build the full Research.md content (design section was cached during research)
-                            var existingContent = await _projectFiles.GetResearchDocAsync(ct);
+                            var existingContent = await Core.ProjectFiles.GetResearchDocAsync(ct);
                             var newSection = FormatResearchSection(directive.Topic, research);
                             updatedDoc = existingContent.TrimEnd() + "\n\n" + newSection;
                             if (!string.IsNullOrWhiteSpace(_lastDesignSection))
@@ -239,25 +193,25 @@ public class ResearcherAgent : AgentBase
                             LogActivity("task", "📝 Committing Research.md to PR");
                             UpdateStatus(AgentStatus.Working, "Committing Research.md for review");
                             string? commitStepId = null;
-                            try { commitStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Commit Research.md", "Committing research findings to PR"); } catch { }
-                            await _prWorkflow.CommitDocumentToPRAsync(
+                            try { commitStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Commit Research.md", "Committing research findings to PR"); } catch { }
+                            await _platform.PrWorkflow.CommitDocumentToPRAsync(
                                 pr, researchPath, updatedDoc,
                                 $"Add research findings: {directive.Topic}", ct);
-                            try { if (commitStepId is not null) _taskTracker.CompleteStep(commitStepId); } catch { }
+                            try { if (commitStepId is not null) Core.TaskTracker!.CompleteStep(commitStepId); } catch { }
                         }
 
                         // === Gate: ResearchFindings — human reviews before merge ===
                         if (gateStatus != GateStatus.Approved)
                         {
                             string? gateStepId = null;
-                            try { gateStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Human gate review", $"Awaiting human approval on PR #{pr.Number}"); } catch { }
-                            try { if (gateStepId is not null) _taskTracker.SetStepWaiting(gateStepId); } catch { }
+                            try { gateStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Human gate review", $"Awaiting human approval on PR #{pr.Number}"); } catch { }
+                            try { if (gateStepId is not null) Core.TaskTracker!.SetStepWaiting(gateStepId); } catch { }
                             var maxRevisions = 3;
                             for (var revision = 0; revision < maxRevisions; revision++)
                             {
-                                if (_gateCheck.RequiresHuman(GateIds.ResearchFindings))
+                                if (Core.GateCheck.RequiresHuman(GateIds.ResearchFindings))
                                     UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{pr.Number}");
-                                var gateWait = await _gateCheck.WaitForGateAsync(
+                                var gateWait = await Core.GateCheck.WaitForGateAsync(
                                     GateIds.ResearchFindings,
                                     $"Research findings for '{directive.Topic}' ready for review",
                                     pr.Number, ct: ct);
@@ -277,26 +231,26 @@ public class ResearcherAgent : AgentBase
 
                                 if (revisedDoc is not null && !pr.IsMerged)
                                 {
-                                    await _prWorkflow.CommitDocumentToPRAsync(
+                                    await _platform.PrWorkflow.CommitDocumentToPRAsync(
                                         pr, researchPath, revisedDoc,
                                         $"Revise research based on reviewer feedback (attempt {revision + 2})", ct);
                                 }
 
                                 // Remove human-approved label if present (reset the gate)
-                                var currentPr = await _prService.GetAsync(pr.Number, ct);
+                                var currentPr = await _platform.PrService.GetAsync(pr.Number, ct);
                                 if (currentPr is not null)
                                 {
                                     var labels = currentPr.Labels?.ToList() ?? [];
                                     labels.Remove("human-approved");
                                     if (!labels.Contains("awaiting-human-review"))
                                         labels.Add("awaiting-human-review");
-                                    await _prService.UpdateAsync(pr.Number, labels: labels, ct: ct);
+                                    await _platform.PrService.UpdateAsync(pr.Number, labels: labels, ct: ct);
                                 }
 
-                                await _reviewService.AddCommentAsync(pr.Number,
+                                await _platform.ReviewService.AddCommentAsync(pr.Number,
                                     $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated Research.md.", ct);
                             }
-                            try { if (gateStepId is not null) _taskTracker.CompleteStep(gateStepId); } catch { }
+                            try { if (gateStepId is not null) Core.TaskTracker!.CompleteStep(gateStepId); } catch { }
                         }
 
                         // Merge after gate approval (skip if PR already merged)
@@ -304,7 +258,7 @@ public class ResearcherAgent : AgentBase
                         {
                             LogActivity("task", "🔗 Merging Research.md PR");
                             UpdateStatus(AgentStatus.Working, "Merging Research.md PR");
-                            await _prWorkflow.MergeDocumentPRAsync(
+                            await _platform.PrWorkflow.MergeDocumentPRAsync(
                                 pr, Identity.DisplayName, researchPath, ct);
                         }
 
@@ -320,7 +274,7 @@ public class ResearcherAgent : AgentBase
                         {
                             try
                             {
-                                await _workItemService.CloseAsync(relatedIssue.Value, ct);
+                                await _platform.WorkItemService.CloseAsync(relatedIssue.Value, ct);
                                 Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
                             }
                             catch (Exception ex)
@@ -330,8 +284,8 @@ public class ResearcherAgent : AgentBase
                         }
 
                         string? signalStepId = null;
-                        try { signalStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Signal PM", "Broadcasting ResearchComplete to all agents"); } catch { }
-                        await _messageBus.PublishAsync(new StatusUpdateMessage
+                        try { signalStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Signal PM", "Broadcasting ResearchComplete to all agents"); } catch { }
+                        await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                         {
                             FromAgentId = Identity.Id,
                             ToAgentId = "*",
@@ -340,7 +294,7 @@ public class ResearcherAgent : AgentBase
                             CurrentTask = directive.TaskId,
                             Details = $"Research complete: {directive.Topic}"
                         }, ct);
-                        try { if (signalStepId is not null) _taskTracker.CompleteStep(signalStepId); } catch { }
+                        try { if (signalStepId is not null) Core.TaskTracker!.CompleteStep(signalStepId); } catch { }
 
                         Logger.LogInformation(
                             "Research complete for task {TaskId}: {Topic}",
@@ -421,27 +375,27 @@ public class ResearcherAgent : AgentBase
         ResearchDirective directive, string? trackingStepId, CancellationToken ct)
     {
         // Quick mode: produce a minimal 1-paragraph research summary for fast testing
-        if (_config.Project.QuickDocumentCreation)
+        if (Core.Config.Project.QuickDocumentCreation)
         {
             LogActivity("research", "🤖 Quick-mode research generation");
             Logger.LogInformation("QuickDocumentCreation: producing minimal Research.md for '{Topic}'", directive.Topic);
-            var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var qKernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var qChat = qKernel.GetRequiredService<IChatCompletionService>();
             var qHistory = CreateChatHistory();
 
             var quickVars = new Dictionary<string, string>
             {
-                ["project_description"] = _config.Project.Description,
-                ["tech_stack"] = _config.Project.TechStack,
+                ["project_description"] = Core.Config.Project.Description,
+                ["tech_stack"] = Core.Config.Project.TechStack,
                 ["topic"] = directive.Topic
             };
 
-            var quickSys = await _promptService.RenderAsync("researcher/quick-system", quickVars, ct)
+            var quickSys = await Core.PromptService!.RenderAsync("researcher/quick-system", quickVars, ct)
                 ?? "You are a technical researcher. Produce a brief, 1-paragraph research summary.";
             qHistory.AddSystemMessage(quickSys);
 
-            var quickUser = await _promptService.RenderAsync("researcher/quick-user", quickVars, ct)
-                ?? $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n" +
+            var quickUser = await Core.PromptService!.RenderAsync("researcher/quick-user", quickVars, ct)
+                ?? $"Project: {Core.Config.Project.Description}\nTech Stack: {Core.Config.Project.TechStack}\n" +
                    $"Topic: {directive.Topic}\n\n" +
                    "Write ONE concise paragraph summarizing the key technology recommendations for this project. " +
                    "Be specific about libraries and patterns. Keep it under 150 words.";
@@ -456,7 +410,7 @@ public class ResearcherAgent : AgentBase
             };
         }
 
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Scan for design reference files FIRST so we can include them in research context
@@ -470,7 +424,7 @@ public class ResearcherAgent : AgentBase
         // Build system prompt from template with fallback
         var sysVars = new Dictionary<string, string>
         {
-            ["tech_stack"] = _config.Project.TechStack,
+            ["tech_stack"] = Core.Config.Project.TechStack,
             ["memory_context"] = string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}",
             ["design_context"] = ""
         };
@@ -478,12 +432,12 @@ public class ResearcherAgent : AgentBase
         // If we found design files, add them via the design-reference template
         if (!string.IsNullOrWhiteSpace(designContext))
         {
-            var designPrompt = await _promptService.RenderAsync("researcher/design-reference",
+            var designPrompt = await Core.PromptService!.RenderAsync("researcher/design-reference",
                 new Dictionary<string, string> { ["design_context"] = designContext }, ct);
             sysVars["design_context"] = designPrompt ?? $"\n\n## VISUAL DESIGN REFERENCE\n{designContext}";
         }
 
-        var systemPrompt = await _promptService.RenderAsync("researcher/full-system", sysVars, ct);
+        var systemPrompt = await Core.PromptService!.RenderAsync("researcher/full-system", sysVars, ct);
         if (systemPrompt is null)
         {
             // Hardcoded fallback during migration
@@ -493,7 +447,7 @@ public class ResearcherAgent : AgentBase
                 "Go beyond surface-level recommendations — provide specific tools, version numbers, " +
                 "architecture patterns, trade-offs, and real-world considerations. " +
                 "Focus on practical, opinionated recommendations backed by reasoning.\n\n" +
-                $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
+                $"IMPORTANT: The project's technology stack has already been decided: **{Core.Config.Project.TechStack}**. " +
                 "Your research MUST target this stack. Recommend libraries, patterns, and tools that are " +
                 "native to or compatible with this stack. Do NOT recommend alternative tech stacks — " +
                 "the decision is final." +
@@ -513,7 +467,7 @@ public class ResearcherAgent : AgentBase
 
         history.AddSystemMessage(systemPrompt);
 
-        var useSinglePass = _config.CopilotCli.SinglePassMode;
+        var useSinglePass = Core.Config.CopilotCli.SinglePassMode;
         string synthesisContent;
         string detailedAnalysis;
 
@@ -528,7 +482,7 @@ public class ResearcherAgent : AgentBase
             // Single-pass: one comprehensive prompt instead of 3 turns
             LogActivity("research", "🤖 Calling AI for research (single-pass)");
             UpdateStatus(AgentStatus.Working, "Researching (single-pass)");
-            var singlePassPrompt = await _promptService.RenderAsync("researcher/single-pass-research", researchVars, ct)
+            var singlePassPrompt = await Core.PromptService!.RenderAsync("researcher/single-pass-research", researchVars, ct)
                 ?? $"Research the following topic for our software project.\n\n" +
                    $"**Topic:** {directive.Topic}\n\n" +
                    $"**Context:**\n{directive.Description}\n\n" +
@@ -547,7 +501,7 @@ public class ResearcherAgent : AgentBase
             history.AddUserMessage(singlePassPrompt);
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
-            try { if (trackingStepId is not null) { _taskTracker.RecordLlmCall(trackingStepId); _taskTracker.RecordSubStep(trackingStepId, "Single-pass research"); } } catch { }
+            try { if (trackingStepId is not null) { Core.TaskTracker!.RecordLlmCall(trackingStepId); Core.TaskTracker!.RecordSubStep(trackingStepId, "Single-pass research"); } } catch { }
             synthesisContent = response.Content ?? "";
             detailedAnalysis = synthesisContent;
         }
@@ -556,7 +510,7 @@ public class ResearcherAgent : AgentBase
         // Turn 1: Break down the research topic into sub-questions
         LogActivity("research", "🤖 AI turn 1/3: Identifying sub-questions");
         UpdateStatus(AgentStatus.Working, "Researching (1/3): Identifying sub-questions");
-        var turn1Prompt = await _promptService.RenderAsync("researcher/multi-turn-subquestions", researchVars, ct)
+        var turn1Prompt = await Core.PromptService!.RenderAsync("researcher/multi-turn-subquestions", researchVars, ct)
             ?? $"I need you to research the following topic for our software project.\n\n" +
                $"**Topic:** {directive.Topic}\n\n" +
                $"**Context:**\n{directive.Description}\n\n" +
@@ -569,14 +523,14 @@ public class ResearcherAgent : AgentBase
         var subQuestionsResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(subQuestionsResponse.Content ?? "");
-        try { if (trackingStepId is not null) { _taskTracker.RecordLlmCall(trackingStepId); _taskTracker.RecordSubStep(trackingStepId, "Turn 1/3: Identifying sub-questions"); } } catch { }
+        try { if (trackingStepId is not null) { Core.TaskTracker!.RecordLlmCall(trackingStepId); Core.TaskTracker!.RecordSubStep(trackingStepId, "Turn 1/3: Identifying sub-questions"); } } catch { }
 
         Logger.LogDebug("Research sub-questions identified for {Topic}", directive.Topic);
 
         // Turn 2: Deep-dive analysis of each sub-question
         LogActivity("research", "🤖 AI turn 2/3: Deep-dive analysis");
         UpdateStatus(AgentStatus.Working, "Researching (2/3): Deep-dive analysis");
-        var turn2Prompt = await _promptService.RenderAsync("researcher/multi-turn-deepdive", new Dictionary<string, string>(), ct)
+        var turn2Prompt = await Core.PromptService!.RenderAsync("researcher/multi-turn-deepdive", new Dictionary<string, string>(), ct)
             ?? "Now provide a detailed, in-depth analysis for each sub-question you identified. " +
                "For each one, cover:\n" +
                "- **Key findings** — What did you discover? Be specific.\n" +
@@ -592,14 +546,14 @@ public class ResearcherAgent : AgentBase
         var analysisResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(analysisResponse.Content ?? "");
-        try { if (trackingStepId is not null) { _taskTracker.RecordLlmCall(trackingStepId); _taskTracker.RecordSubStep(trackingStepId, "Turn 2/3: Deep-dive analysis"); } } catch { }
+        try { if (trackingStepId is not null) { Core.TaskTracker!.RecordLlmCall(trackingStepId); Core.TaskTracker!.RecordSubStep(trackingStepId, "Turn 2/3: Deep-dive analysis"); } } catch { }
 
         Logger.LogDebug("Detailed analysis complete for {Topic}", directive.Topic);
 
         // Turn 3: Synthesize into structured Research.md output
         LogActivity("research", "🤖 AI turn 3/3: Synthesizing findings");
         UpdateStatus(AgentStatus.Working, "Researching (3/3): Synthesizing findings");
-        var turn3Prompt = await _promptService.RenderAsync("researcher/multi-turn-synthesis", new Dictionary<string, string>(), ct)
+        var turn3Prompt = await Core.PromptService!.RenderAsync("researcher/multi-turn-synthesis", new Dictionary<string, string>(), ct)
             ?? "Now synthesize all your research into a comprehensive, structured document with these sections:\n\n" +
                "1. **Executive Summary** — A concise overview of findings and primary recommendation (3-5 sentences).\n" +
                "2. **Key Findings** — The most important discoveries, one per bullet (prefixed with '- ').\n" +
@@ -618,14 +572,14 @@ public class ResearcherAgent : AgentBase
             history, cancellationToken: ct);
         synthesisContent = synthesisResponse.Content ?? "";
         detailedAnalysis = analysisResponse.Content ?? "";
-        try { if (trackingStepId is not null) { _taskTracker.RecordLlmCall(trackingStepId); _taskTracker.RecordSubStep(trackingStepId, "Turn 3/3: Synthesizing findings"); } } catch { }
+        try { if (trackingStepId is not null) { Core.TaskTracker!.RecordLlmCall(trackingStepId); Core.TaskTracker!.RecordSubStep(trackingStepId, "Turn 3/3: Synthesizing findings"); } } catch { }
 
         } // end else (multi-turn)
 
         // Self-assessment: assess and refine the research document
         string? assessStepId = null;
-        try { assessStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & refinement", "Assessing and refining research output", Identity.ModelTier); } catch { }
-        _reasoningLog.Log(new AgentReasoningEvent
+        try { assessStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & refinement", "Assessing and refining research output", Identity.ModelTier); } catch { }
+        Core.ReasoningLog!.Log(new AgentReasoningEvent
         {
             AgentId = Identity.Id,
             AgentDisplayName = Identity.DisplayName,
@@ -638,18 +592,18 @@ public class ResearcherAgent : AgentBase
         var criteria = AssessmentCriteria.GetForRole(Identity.Role);
         if (criteria is not null)
         {
-            synthesisContent = await _selfAssessment.AssessAndRefineAsync(
+            synthesisContent = await Core.SelfAssessment!.AssessAndRefineAsync(
                 Identity.Id,
                 Identity.DisplayName,
                 Identity.Role,
                 "Research",
                 synthesisContent,
                 criteria,
-                $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\nTopic: {directive.Topic}",
+                $"Project: {Core.Config.Project.Description}\nTech Stack: {Core.Config.Project.TechStack}\nTopic: {directive.Topic}",
                 chat,
                 ct);
         }
-        try { if (assessStepId is not null) _taskTracker.CompleteStep(assessStepId); } catch { }
+        try { if (assessStepId is not null) Core.TaskTracker!.CompleteStep(assessStepId); } catch { }
 
         Logger.LogDebug("Research synthesis complete for {Topic}", directive.Topic);
         await RememberAsync(MemoryType.Decision,
@@ -828,12 +782,12 @@ public class ResearcherAgent : AgentBase
     {
         try
         {
-            var existingDoc = await _projectFiles.GetResearchDocAsync(ct);
+            var existingDoc = await Core.ProjectFiles.GetResearchDocAsync(ct);
 
             var newSection = FormatResearchSection(topic, result);
             var updatedDoc = existingDoc.TrimEnd() + "\n\n" + newSection + "\n";
 
-            await _projectFiles.UpdateResearchDocAsync(updatedDoc, ct);
+            await Core.ProjectFiles.UpdateResearchDocAsync(updatedDoc, ct);
 
             Logger.LogInformation("Appended research section for '{Topic}' to Research.md", topic);
         }
@@ -851,10 +805,10 @@ public class ResearcherAgent : AgentBase
     private async Task<string?> ReviseResearchAsync(
         ResearchDirective directive, string feedback, CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-        var currentDoc = await _projectFiles.GetResearchDocAsync(ct);
+        var currentDoc = await Core.ProjectFiles.GetResearchDocAsync(ct);
         if (string.IsNullOrWhiteSpace(currentDoc))
         {
             Logger.LogWarning("No existing Research.md to revise");
@@ -863,15 +817,15 @@ public class ResearcherAgent : AgentBase
 
         var history = CreateChatHistory();
 
-        var revisionSys = await _promptService.RenderAsync("researcher/revision-system",
-            new Dictionary<string, string> { ["tech_stack"] = _config.Project.TechStack }, ct)
+        var revisionSys = await Core.PromptService!.RenderAsync("researcher/revision-system",
+            new Dictionary<string, string> { ["tech_stack"] = Core.Config.Project.TechStack }, ct)
             ?? "You are a senior technical researcher revising a research document based on human reviewer feedback. " +
                "Read the existing document and the reviewer's feedback carefully. " +
                "Make the specific changes requested while preserving the overall structure and any parts the reviewer didn't mention. " +
-               $"The project's technology stack is: **{_config.Project.TechStack}**.";
+               $"The project's technology stack is: **{Core.Config.Project.TechStack}**.";
         history.AddSystemMessage(revisionSys);
 
-        var revisionUser = await _promptService.RenderAsync("researcher/revision-user",
+        var revisionUser = await Core.PromptService!.RenderAsync("researcher/revision-user",
             new Dictionary<string, string> { ["current_doc"] = currentDoc, ["feedback"] = feedback }, ct)
             ?? $"## Current Research.md:\n\n{currentDoc}\n\n" +
                $"## Reviewer Feedback:\n\n{feedback}\n\n" +
@@ -959,7 +913,7 @@ public class ResearcherAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
             {
                 ".html", ".htm"
@@ -1009,7 +963,7 @@ public class ResearcherAgent : AgentBase
                 if (type.StartsWith("html"))
                 {
                     // Read HTML files to extract design details
-                    var content = await _repoContent.GetFileContentAsync(path, EffectiveBranch, ct);
+                    var content = await _platform.RepoContent.GetFileContentAsync(path, EffectiveBranch, ct);
                     if (!string.IsNullOrWhiteSpace(content))
                     {
                         // Extract key CSS patterns and layout structure
@@ -1067,10 +1021,10 @@ public class ResearcherAgent : AgentBase
     /// </summary>
     private async Task EnsureDesignScreenshotsPresentAsync(CancellationToken ct)
     {
-        if (_playwrightRunner is null) return;
+        if (_workspace.PlaywrightRunner is null) return;
 
         IReadOnlyList<string> tree;
-        try { tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct); }
+        try { tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct); }
         catch (Exception ex) { Logger.LogDebug(ex, "Could not read repo tree for design screenshot check"); return; }
 
         var htmlDesignFiles = tree
@@ -1090,7 +1044,7 @@ public class ResearcherAgent : AgentBase
         if (htmlDesignFiles.Count == 0) return;
 
         var existingScreenshots = new HashSet<string>(
-            tree.Where(f => f.StartsWith(_projectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
+            tree.Where(f => f.StartsWith(Core.ProjectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
                             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
                 .Select(f => Path.GetFileNameWithoutExtension(f)),
             StringComparer.OrdinalIgnoreCase);
@@ -1102,19 +1056,19 @@ public class ResearcherAgent : AgentBase
 
             try
             {
-                var htmlContent = await _repoContent.GetFileContentAsync(htmlPath, EffectiveBranch, ct);
+                var htmlContent = await _platform.RepoContent.GetFileContentAsync(htmlPath, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
-                var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
-                    htmlContent, _config.Workspace, ct: ct);
+                var screenshotBytes = await _workspace.PlaywrightRunner.CaptureHtmlScreenshotAsync(
+                    htmlContent, Core.Config.Workspace, ct: ct);
                 if (screenshotBytes is null || screenshotBytes.Length == 0)
                 {
                     Logger.LogWarning("B1: design screenshot capture returned empty for {Path}", htmlPath);
                     continue;
                 }
 
-                var screenshotPath = $"{_projectFiles.DesignScreenshotsPrefix}{stem}.png";
-                var imageUrl = await _repoContent.CommitBinaryFileAsync(
+                var screenshotPath = $"{Core.ProjectFiles.DesignScreenshotsPrefix}{stem}.png";
+                var imageUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {stem}.png (rendered from {htmlPath})",
                     EffectiveBranch, ct);
@@ -1141,7 +1095,7 @@ public class ResearcherAgent : AgentBase
         System.Text.StringBuilder sb,
         CancellationToken ct)
     {
-        if (_playwrightRunner is null)
+        if (_workspace.PlaywrightRunner is null)
         {
             Logger.LogDebug("PlaywrightRunner not available, skipping design screenshots");
             return;
@@ -1162,17 +1116,17 @@ public class ResearcherAgent : AgentBase
         {
             try
             {
-                var htmlContent = await _repoContent.GetFileContentAsync(path, EffectiveBranch, ct);
+                var htmlContent = await _platform.RepoContent.GetFileContentAsync(path, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(htmlContent)) continue;
 
-                var screenshotBytes = await _playwrightRunner.CaptureHtmlScreenshotAsync(
-                    htmlContent, _config.Workspace, ct: ct);
+                var screenshotBytes = await _workspace.PlaywrightRunner.CaptureHtmlScreenshotAsync(
+                    htmlContent, Core.Config.Workspace, ct: ct);
                 if (screenshotBytes is null || screenshotBytes.Length == 0) continue;
 
                 // Commit the screenshot to the repo
                 var fileName = Path.GetFileNameWithoutExtension(path);
-                var screenshotPath = $"{_projectFiles.DesignScreenshotsPrefix}{fileName}.png";
-                var imageUrl = await _repoContent.CommitBinaryFileAsync(
+                var screenshotPath = $"{Core.ProjectFiles.DesignScreenshotsPrefix}{fileName}.png";
+                var imageUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                     screenshotPath, screenshotBytes,
                     $"Add design screenshot: {fileName}.png (rendered from {path})",
                     EffectiveBranch, ct);

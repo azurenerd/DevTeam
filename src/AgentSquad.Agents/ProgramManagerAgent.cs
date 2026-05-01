@@ -24,29 +24,13 @@ namespace AgentSquad.Agents;
 
 public class ProgramManagerAgent : AgentBase
 {
-    private readonly IMessageBus _messageBus;
-    private readonly IPullRequestService _prService;
-    private readonly IWorkItemService? _workItemService;
-    private readonly IRepositoryContentService _repoContent;
-    private readonly IReviewService _reviewService;
-    private readonly IPlatformHostContext? _platformHost;
-    private readonly MergeCloseoutService? _mergeCloseout;
-    private readonly IssueWorkflow _issueWorkflow;
-    private readonly PullRequestWorkflow _prWorkflow;
-    private readonly ProjectFileManager _projectFiles;
-    private readonly ModelRegistry _modelRegistry;
+    private readonly AgentPlatformServices _platform;
     private readonly AgentSpawnManager _spawnManager;
     private readonly AgentRegistry _registry;
-    private readonly AgentSquadConfig _config;
-    private readonly IGateCheckService _gateCheck;
-    private readonly SelfAssessmentService _selfAssessment;
-    private readonly IAgentReasoningLog _reasoningLog;
-    private readonly IPromptTemplateService _promptService;
     private readonly DecisionGateService? _decisionGate;
     private readonly AgentTeamComposer? _teamComposer;
     private readonly SMEAgentDefinitionService? _definitionService;
-    private readonly IAgentTaskTracker _taskTracker;
-    private readonly IRunBranchProvider? _branchProvider;
+    private readonly MergeCloseoutService? _mergeCloseout;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
     private readonly HashSet<int> _processedIssueIds = new();
@@ -69,76 +53,43 @@ public class ProgramManagerAgent : AgentBase
 
     public ProgramManagerAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        IPullRequestService prService,
-        IssueWorkflow issueWorkflow,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
         AgentSpawnManager spawnManager,
         AgentRegistry registry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
-        SelfAssessmentService selfAssessment,
-        IAgentReasoningLog reasoningLog,
-        IPromptTemplateService promptService,
         ILogger<ProgramManagerAgent> logger,
-        IAgentTaskTracker taskTracker,
-        RoleContextProvider? roleContextProvider = null,
         AgentTeamComposer? teamComposer = null,
         SMEAgentDefinitionService? definitionService = null,
         DecisionGateService? decisionGate = null,
-        MergeCloseoutService? mergeCloseout = null,
-        IWorkItemService? workItemService = null,
-        IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null,
-        IPlatformHostContext? platformHost = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        MergeCloseoutService? mergeCloseout = null)
+        : base(identity, core, logger)
     {
-        _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
-        _workItemService = workItemService;
-        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
-        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
-        _platformHost = platformHost;
-        _mergeCloseout = mergeCloseout;
-        _issueWorkflow = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
-        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
+        _platform = platform ?? throw new ArgumentNullException(nameof(platform));
         _spawnManager = spawnManager ?? throw new ArgumentNullException(nameof(spawnManager));
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
-        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
-        _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
         _teamComposer = teamComposer;
         _definitionService = definitionService;
         _decisionGate = decisionGate;
-        _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
-        _branchProvider = branchProvider;
+        _mergeCloseout = mergeCloseout;
     }
 
-    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
+    private string EffectiveBranch => _platform.BranchProvider?.EffectiveBranch ?? Core!.Config.Project.DefaultBranch;
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(_messageBus.Subscribe<ResourceRequestMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<ResourceRequestMessage>(
             Identity.Id, HandleResourceRequestAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<StatusUpdateMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<StatusUpdateMessage>(
             Identity.Id, HandleStatusUpdateAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<HelpRequestMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<HelpRequestMessage>(
             Identity.Id, HandleHelpRequestAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<ReviewRequestMessage>(
             Identity.Id, HandleReviewRequestAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<ClarificationRequestMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<ClarificationRequestMessage>(
             Identity.Id, HandleClarificationRequestAsync));
 
         _currentPhase = "Research";
@@ -151,16 +102,16 @@ public class ProgramManagerAgent : AgentBase
         UpdateStatus(AgentStatus.Idle, "Initializing project oversight");
 
         // One-time kickoff: read project description and seed the Researcher
-        var kickoffStepId = _taskTracker.BeginStep(Identity.Id, "pm-kickoff", "Read project context",
+        var kickoffStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-kickoff", "Read project context",
             "Reading project description and kicking off research", Identity.ModelTier);
         try
         {
             await KickOffProjectAsync(ct);
-            _taskTracker.CompleteStep(kickoffStepId);
+            Core.TaskTracker!.CompleteStep(kickoffStepId);
         }
         catch (Exception ex)
         {
-            _taskTracker.FailStep(kickoffStepId, ex.Message);
+            Core.TaskTracker!.FailStep(kickoffStepId, ex.Message);
             throw;
         }
 
@@ -189,11 +140,11 @@ public class ProgramManagerAgent : AgentBase
                 // completed successfully — re-creating would cause an infinite
                 // create-close-recreate loop.
                 {
-                    var openEnhancements = await _workItemService!.ListByLabelAsync(
+                    var openEnhancements = await _platform.WorkItemService!.ListByLabelAsync(
                         IssueWorkflow.Labels.Enhancement, "open", ct);
                     if (openEnhancements.Count == 0 && _reviewedEnhancementIssues.Count == 0 && !_userStoryIssuesCreated)
                     {
-                        var specContent = await _projectFiles.GetPMSpecAsync(ct);
+                        var specContent = await Core.ProjectFiles.GetPMSpecAsync(ct);
                         if (!string.IsNullOrWhiteSpace(specContent) &&
                             !specContent.Contains("No PM specification has been created yet"))
                         {
@@ -224,7 +175,7 @@ public class ProgramManagerAgent : AgentBase
                 await RefreshDiagnosticWithMemoryAsync(ct);
 
                 await Task.Delay(
-                    TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds), ct);
+                    TimeSpan.FromSeconds(Core.Config.Limits.GitHubPollIntervalSeconds), ct);
             }
             catch (OperationCanceledException)
             {
@@ -264,8 +215,8 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var projectName = _config.Project.Name;
-            var projectDescription = _config.Project.Description;
+            var projectName = Core.Config.Project.Name;
+            var projectDescription = Core.Config.Project.Description;
 
             if (string.IsNullOrWhiteSpace(projectDescription))
             {
@@ -290,7 +241,7 @@ public class ProgramManagerAgent : AgentBase
             // Check if Research.md already has meaningful content — skip kickoff if so
             // Note: the placeholder "No research has been documented yet" may still appear at top
             // even after research is appended below it, so check for actual research section headings
-            var existingResearch = await _projectFiles.GetResearchDocAsync(ct);
+            var existingResearch = await Core.ProjectFiles.GetResearchDocAsync(ct);
             var hasResearchContent = !string.IsNullOrWhiteSpace(existingResearch) &&
                 (existingResearch.Contains("## Research technology stack", StringComparison.OrdinalIgnoreCase) ||
                  existingResearch.Contains("### Summary", StringComparison.OrdinalIgnoreCase) ||
@@ -302,7 +253,7 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogInformation(
                     "Research.md already exists with content — skipping research kickoff");
 
-                _reasoningLog.Log(new AgentReasoningEvent
+                Core.ReasoningLog!.Log(new AgentReasoningEvent
                 {
                     AgentId = Identity.Id,
                     AgentDisplayName = Identity.DisplayName,
@@ -313,7 +264,7 @@ public class ProgramManagerAgent : AgentBase
                 });
 
                 // Still signal downstream agents so they can proceed
-                await _messageBus.PublishAsync(new StatusUpdateMessage
+                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = "*",
@@ -332,7 +283,7 @@ public class ProgramManagerAgent : AgentBase
             // 1. Create a GitHub Issue for tracking and visibility (idempotent)
             var issueTitle = $"Researcher: Research technology stack for {projectName}";
 
-            var existingIssues = await _workItemService!.ListOpenAsync(ct);
+            var existingIssues = await _platform.WorkItemService!.ListOpenAsync(ct);
             var existingKickoff = existingIssues.FirstOrDefault(i =>
                 i.Title.Equals(issueTitle, StringComparison.OrdinalIgnoreCase));
 
@@ -359,7 +310,7 @@ public class ProgramManagerAgent : AgentBase
                     {researchGuidance}
                     """;
 
-                var issue = await _workItemService!.CreateAsync(
+                var issue = await _platform.WorkItemService!.CreateAsync(
                     issueTitle, issueBody,
                     [IssueWorkflow.Labels.AgentQuestion],
                     ct);
@@ -375,8 +326,8 @@ public class ProgramManagerAgent : AgentBase
             //    gets the full context even if it doesn't read the GitHub issue.
             //    Pass the issue number so the Researcher can link it directly.
             var taskId = $"kickoff-research-{Guid.NewGuid():N}";
-            _taskTracker.RegisterTaskDisplayName(taskId, "Research Kickoff");
-            await _messageBus.PublishAsync(new TaskAssignmentMessage
+            Core.TaskTracker!.RegisterTaskDisplayName(taskId, "Research Kickoff");
+            await Core.MessageBus.PublishAsync(new TaskAssignmentMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
@@ -391,7 +342,7 @@ public class ProgramManagerAgent : AgentBase
             Logger.LogInformation(
                 "Sent research kickoff task {TaskId} to Researcher via message bus", taskId);
 
-            _reasoningLog.Log(new AgentReasoningEvent
+            Core.ReasoningLog!.Log(new AgentReasoningEvent
             {
                 AgentId = Identity.Id,
                 AgentDisplayName = Identity.DisplayName,
@@ -418,12 +369,12 @@ public class ProgramManagerAgent : AgentBase
     /// </summary>
     private string GetResearchGuidance(string projectName, string projectDescription)
     {
-        var custom = _config.Project.ResearchPrompt;
+        var custom = Core.Config.Project.ResearchPrompt;
         if (!string.IsNullOrWhiteSpace(custom))
             return custom;
 
         // Generate a rich default prompt that drives deep, structured research
-        var techStack = _config.Project.TechStack;
+        var techStack = Core.Config.Project.TechStack;
         return $"""
             Conduct a thorough, multi-dimensional research analysis for the project "{projectName}".
             Go beyond surface-level recommendations — the engineering team needs depth and specificity.
@@ -487,7 +438,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var content = await _projectFiles.GetTeamMembersAsync(ct);
+            var content = await Core.ProjectFiles.GetTeamMembersAsync(ct);
 
             // Get all core agents that should be listed
             var coreAgents = _registry.GetAllAgents()
@@ -515,7 +466,7 @@ public class ProgramManagerAgent : AgentBase
 
                 if (updated != content)
                 {
-                    await _projectFiles.SaveScopedFileAsync("TeamMembers.md", updated,
+                    await Core.ProjectFiles.SaveScopedFileAsync("TeamMembers.md", updated,
                         "Add missing core agents to TeamMembers.md", ct);
                 }
                 return;
@@ -537,7 +488,7 @@ public class ProgramManagerAgent : AgentBase
 
             doc += "\n";
 
-            await _projectFiles.SaveScopedFileAsync("TeamMembers.md", doc, "Initialize TeamMembers.md with core agents", ct);
+            await Core.ProjectFiles.SaveScopedFileAsync("TeamMembers.md", doc, "Initialize TeamMembers.md with core agents", ct);
             Logger.LogInformation("Created TeamMembers.md with {Count} core agents", coreAgents.Count);
         }
         catch (Exception ex)
@@ -555,7 +506,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var description = _config.Project.Description;
+            var description = Core.Config.Project.Description;
             if (string.IsNullOrWhiteSpace(description))
                 return;
 
@@ -567,7 +518,7 @@ public class ProgramManagerAgent : AgentBase
             IReadOnlyList<string> repoTree;
             try
             {
-                repoTree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+                repoTree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             }
             catch
             {
@@ -604,14 +555,14 @@ public class ProgramManagerAgent : AgentBase
                     if (isBinary)
                     {
                         var bytes = await File.ReadAllBytesAsync(localPath, ct);
-                        await _projectFiles.SaveScopedBinaryFileAsync(
+                        await Core.ProjectFiles.SaveScopedBinaryFileAsync(
                             fileName, bytes,
                             $"Add design input: {fileName}", ct);
                     }
                     else
                     {
                         var content = await File.ReadAllTextAsync(localPath, ct);
-                        await _projectFiles.SaveScopedFileAsync(
+                        await Core.ProjectFiles.SaveScopedFileAsync(
                             fileName, content,
                             $"Add design input: {fileName}", ct);
                     }
@@ -686,8 +637,8 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var teamDoc = await _projectFiles.GetTeamMembersAsync(ct);
-            var engineeringPlan = await _projectFiles.GetEngineeringPlanAsync(ct);
+            var teamDoc = await Core.ProjectFiles.GetTeamMembersAsync(ct);
+            var engineeringPlan = await Core.ProjectFiles.GetEngineeringPlanAsync(ct);
             var lines = teamDoc.Split('\n');
             var restoredCount = 0;
 
@@ -790,7 +741,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var issues = await _workItemService!.ListOpenAsync(ct);
+            var issues = await _platform.WorkItemService!.ListOpenAsync(ct);
 
             var executiveIssues = issues.Where(i =>
                 i.Labels.Contains(IssueWorkflow.Labels.ExecutiveRequest,
@@ -799,7 +750,7 @@ public class ProgramManagerAgent : AgentBase
             foreach (var issue in executiveIssues)
             {
                 // GitHub is source of truth: fetch actual comments
-                var comments = await _workItemService!.GetCommentsAsync(issue.Number, ct);
+                var comments = await _platform.WorkItemService!.GetCommentsAsync(issue.Number, ct);
                 if (comments.Count == 0)
                     continue;
 
@@ -843,25 +794,25 @@ public class ProgramManagerAgent : AgentBase
                             {
                                 _additionalEngineersHired++;
                                 spawned++;
-                                await _projectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
+                                await Core.ProjectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
                                 Logger.LogInformation(
                                     "Executive override: spawned {Role} '{Name}' ({N}/{Count})",
                                     AgentRole.SoftwareEngineer, spawnedIdentity.DisplayName, spawned, count);
                             }
                         }
 
-                        await _workItemService!.AddCommentAsync(issue.Number,
+                        await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                             $"✅ **Executive approval processed.** Spawned {spawned} additional engineer(s). " +
                             $"Team now has {_additionalEngineersHired} additional engineers.", ct);
                     }
                     else
                     {
-                        await _workItemService!.AddCommentAsync(issue.Number,
+                        await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                             "✅ **Executive approval acknowledged.** Request has been processed.", ct);
                     }
 
                     // Close this executive request issue
-                    await _workItemService!.CloseAsync(issue.Number, ct);
+                    await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
 
                     // Also close linked resource-request issues referenced in the title
                     var linkedNum = ParseLinkedIssueFromTitle(issue.Title);
@@ -869,9 +820,9 @@ public class ProgramManagerAgent : AgentBase
                     {
                         try
                         {
-                            await _workItemService!.AddCommentAsync(linkedNum.Value,
+                            await _platform.WorkItemService!.AddCommentAsync(linkedNum.Value,
                                 $"✅ Executive approved override via #{issue.Number}. Request fulfilled.", ct);
-                            await _workItemService!.CloseAsync(linkedNum.Value, ct);
+                            await _platform.WorkItemService!.CloseAsync(linkedNum.Value, ct);
                         }
                         catch (Exception ex)
                         {
@@ -885,9 +836,9 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation(
                         "Executive denied request on issue #{Number}", issue.Number);
 
-                    await _workItemService!.AddCommentAsync(issue.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                         "❌ **Executive denied this request.** Closing.", ct);
-                    await _workItemService!.CloseAsync(issue.Number, ct);
+                    await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                 }
             }
         }
@@ -921,7 +872,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var teamDoc = await _projectFiles.GetTeamMembersAsync(ct);
+            var teamDoc = await Core.ProjectFiles.GetTeamMembersAsync(ct);
             var lines = teamDoc.Split('\n');
 
             foreach (var line in lines)
@@ -951,7 +902,7 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // Check for stale agents that haven't reported in a while
-            var timeout = TimeSpan.FromMinutes(_config.Limits.AgentTimeoutMinutes);
+            var timeout = TimeSpan.FromMinutes(Core.Config.Limits.AgentTimeoutMinutes);
             foreach (var (agentId, tracking) in _trackedAgents)
             {
                 if (tracking.LastKnownStatus is AgentStatus.Working or AgentStatus.Online
@@ -973,7 +924,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var issues = await _workItemService!.ListOpenAsync(ct);
+            var issues = await _platform.WorkItemService!.ListOpenAsync(ct);
 
             var resourceIssues = issues.Where(i =>
                 i.Labels.Contains(IssueWorkflow.Labels.ResourceRequest,
@@ -982,7 +933,7 @@ public class ProgramManagerAgent : AgentBase
             foreach (var issue in resourceIssues)
             {
                 // GitHub is source of truth: fetch actual comments to determine state
-                var comments = await _workItemService!.GetCommentsAsync(issue.Number, ct);
+                var comments = await _platform.WorkItemService!.GetCommentsAsync(issue.Number, ct);
                 var lastComment = comments.Count > 0 ? comments[^1] : null;
 
                 // If the last comment is a ✅ or 🚀 (already fulfilled), close and skip
@@ -990,7 +941,7 @@ public class ProgramManagerAgent : AgentBase
                     (lastComment.Body.StartsWith("✅") || lastComment.Body.StartsWith("🚀")))
                 {
                     Logger.LogDebug("Resource request #{Number} already fulfilled, closing", issue.Number);
-                    await _workItemService!.CloseAsync(issue.Number, ct);
+                    await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                     continue;
                 }
 
@@ -1001,35 +952,35 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
-                if (_additionalEngineersHired >= _config.Limits.MaxAdditionalEngineers)
+                if (_additionalEngineersHired >= Core.Config.Limits.MaxAdditionalEngineers)
                 {
-                    var denyStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                    var denyStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-blockers",
                         $"Deny resource #{issue.Number}",
-                        $"At max engineers ({_config.Limits.MaxAdditionalEngineers})");
+                        $"At max engineers ({Core.Config.Limits.MaxAdditionalEngineers})");
 
                     Logger.LogInformation(
                         "Resource request #{Number} denied: at max additional engineers ({Max})",
-                        issue.Number, _config.Limits.MaxAdditionalEngineers);
+                        issue.Number, Core.Config.Limits.MaxAdditionalEngineers);
 
-                    await _workItemService!.AddCommentAsync(issue.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                         $"⚠️ **Resource request denied.** The team has already hired " +
-                        $"{_additionalEngineersHired}/{_config.Limits.MaxAdditionalEngineers} " +
+                        $"{_additionalEngineersHired}/{Core.Config.Limits.MaxAdditionalEngineers} " +
                         "additional engineers (the configured maximum). " +
                         "Escalating to Executive for override if needed.", ct);
 
-                    await _issueWorkflow.CreateExecutiveRequestAsync(
+                    await _platform.IssueWorkflow!.CreateExecutiveRequestAsync(
                         Identity.DisplayName,
                         $"Resource Limit Reached — request from issue #{issue.Number}",
                         $"A resource request was denied because the team has reached " +
-                        $"the max of {_config.Limits.MaxAdditionalEngineers} additional engineers. " +
+                        $"the max of {Core.Config.Limits.MaxAdditionalEngineers} additional engineers. " +
                         "Executive approval required to exceed this limit.",
                         ct);
 
-                    _taskTracker.CompleteStep(denyStepId);
+                    Core.TaskTracker!.CompleteStep(denyStepId);
                 }
                 else
                 {
-                    var approveStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                    var approveStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-blockers",
                         $"Approve resource #{issue.Number}",
                         "Spawning additional engineer");
 
@@ -1040,12 +991,12 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation(
                         "Resource request #{Number} approved. Spawning {Role}. Additional engineers: {Count}/{Max}",
                         issue.Number, requestedRole, _additionalEngineersHired,
-                        _config.Limits.MaxAdditionalEngineers);
+                        Core.Config.Limits.MaxAdditionalEngineers);
 
-                    await _workItemService!.AddCommentAsync(issue.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                         $"✅ **Resource request approved.** Spawning {requestedRole} " +
                         $"(additional engineer #{_additionalEngineersHired} " +
-                        $"of {_config.Limits.MaxAdditionalEngineers} maximum).", ct);
+                        $"of {Core.Config.Limits.MaxAdditionalEngineers} maximum).", ct);
 
                     // Actually spawn the engineer
                     var spawnedIdentity = await _spawnManager.SpawnAgentAsync(requestedRole, ct);
@@ -1056,16 +1007,16 @@ public class ProgramManagerAgent : AgentBase
                             requestedRole, spawnedIdentity.DisplayName, issue.Number);
 
                         // Track in TeamMembers.md for persistence across restarts
-                        await _projectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
+                        await Core.ProjectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
 
-                        await _workItemService!.AddCommentAsync(issue.Number,
+                        await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                             $"🚀 **{requestedRole} '{spawnedIdentity.DisplayName}' is now online** " +
                             "and ready for task assignment.", ct);
                         await RememberAsync(MemoryType.Action,
                             $"Hired {requestedRole} '{spawnedIdentity.DisplayName}' via resource request #{issue.Number}",
                             ct: ct);
 
-                        await _workItemService!.CloseAsync(issue.Number, ct);
+                        await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                     }
                     else
                     {
@@ -1073,11 +1024,11 @@ public class ProgramManagerAgent : AgentBase
                             "Failed to spawn {Role} for resource request #{Number} — spawn manager returned null",
                             requestedRole, issue.Number);
 
-                        await _workItemService!.AddCommentAsync(issue.Number,
+                        await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                             $"⚠️ Failed to spawn {requestedRole} — capacity limit may have been reached.", ct);
                     }
 
-                    _taskTracker.CompleteStep(approveStepId);
+                    Core.TaskTracker!.CompleteStep(approveStepId);
                 }
             }
         }
@@ -1091,7 +1042,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var issues = await _workItemService!.ListOpenAsync(ct);
+            var issues = await _platform.WorkItemService!.ListOpenAsync(ct);
 
             var blockers = issues.Where(i =>
                 i.Labels.Contains(IssueWorkflow.Labels.Blocker,
@@ -1107,32 +1058,32 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogWarning("Blocker detected: #{Number} — {Title}",
                     blocker.Number, blocker.Title);
 
-                var blockerStepId = _taskTracker.BeginStep(Identity.Id, "pm-blockers",
+                var blockerStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-blockers",
                     $"Triage blocker #{blocker.Number}",
                     $"Blocker: {blocker.Title}", Identity.ModelTier);
 
                 // Try to triage the blocker using AI
                 var resolution = await TriageBlockerAsync(blocker.ToAgentIssue(), ct);
-                _taskTracker.RecordLlmCall(blockerStepId);
+                Core.TaskTracker!.RecordLlmCall(blockerStepId);
 
                 if (resolution is not null)
                 {
-                    await _workItemService!.AddCommentAsync(blocker.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(blocker.Number,
                         $"🔍 **PM Triage:**\n\n{resolution}", ct);
-                    _taskTracker.RecordSubStep(blockerStepId, $"Triaged blocker #{blocker.Number}");
+                    Core.TaskTracker!.RecordSubStep(blockerStepId, $"Triaged blocker #{blocker.Number}");
                 }
                 else
                 {
                     // Escalate to Executive
-                    await _issueWorkflow.CreateExecutiveRequestAsync(
+                    await _platform.IssueWorkflow!.CreateExecutiveRequestAsync(
                         Identity.DisplayName,
                         $"Blocker Escalation — issue #{blocker.Number}",
                         $"A blocker issue needs Executive attention:\n\n" +
                         $"**Title:** {blocker.Title}\n\n{blocker.Body}",
                         ct);
-                    _taskTracker.RecordSubStep(blockerStepId, $"Escalated blocker #{blocker.Number} to Executive");
+                    Core.TaskTracker!.RecordSubStep(blockerStepId, $"Escalated blocker #{blocker.Number} to Executive");
                 }
-                _taskTracker.CompleteStep(blockerStepId);
+                Core.TaskTracker!.CompleteStep(blockerStepId);
             }
         }
         catch (Exception ex)
@@ -1151,9 +1102,9 @@ public class ProgramManagerAgent : AgentBase
                 prNumbersToReview.Add(prNumber);
 
             // Phase 3 polling: also scan for PRs with tests-added that PM hasn't reviewed yet
-            if (_config.Workspace.IsInlineTestWorkflow)
+            if (Core.Config.Workspace.IsInlineTestWorkflow)
             {
-                var openPRs = await _prService.ListOpenAsync(ct);
+                var openPRs = await _platform.PrService.ListOpenAsync(ct);
                 foreach (var openPr in openPRs)
                 {
                     if (_reviewedPrHeadShas.TryGetValue(openPr.Number, out var reviewedSha)
@@ -1182,7 +1133,7 @@ public class ProgramManagerAgent : AgentBase
 
             foreach (var prNumber in prNumbersToReview)
             {
-                var platformPr = await _prService.GetAsync(prNumber, ct);
+                var platformPr = await _platform.PrService.GetAsync(prNumber, ct);
                 if (platformPr is null)
                     continue;
                 var pr = platformPr.ToAgentPR();
@@ -1207,7 +1158,7 @@ public class ProgramManagerAgent : AgentBase
                 // approve before TE finishes testing, regardless of rework cycle count.
                 // This applies in both SinglePRMode and multi-PR mode when inline test
                 // workflow is enabled and TE is registered.
-                if (_config.Workspace.IsInlineTestWorkflow &&
+                if (Core.Config.Workspace.IsInlineTestWorkflow &&
                     !pr.Labels.Contains(PullRequestWorkflow.Labels.TestsAdded, StringComparer.OrdinalIgnoreCase))
                 {
                     Logger.LogDebug("PM skipping PR #{Number} — waiting for TE to add tests (Phase 2)", prNumber);
@@ -1218,9 +1169,9 @@ public class ProgramManagerAgent : AgentBase
                 // completion comment. This prevents the PM from reviewing before TE finishes
                 // posting results (label and comment are separate API calls).
                 // NOTE: This check also applies for force-approval PRs.
-                if (_config.Workspace.IsInlineTestWorkflow)
+                if (Core.Config.Workspace.IsInlineTestWorkflow)
                 {
-                    var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
+                    var comments = await _platform.ReviewService.GetCommentsAsync(prNumber, ct);
                     var hasTeCompletionComment = comments.Any(c =>
                         (c.Body.Contains("Test Engineer", StringComparison.OrdinalIgnoreCase) &&
                          (c.Body.Contains("Test Results", StringComparison.OrdinalIgnoreCase) ||
@@ -1252,7 +1203,7 @@ public class ProgramManagerAgent : AgentBase
                     pr.Number, pr.Title);
                 UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
 
-                var reviewStepId = _taskTracker.BeginStep(Identity.Id, "pm-review", $"Review PR #{pr.Number}",
+                var reviewStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-review", $"Review PR #{pr.Number}",
                     $"Reviewing: {pr.Title}", Identity.ModelTier);
 
                 bool approved;
@@ -1288,7 +1239,7 @@ public class ProgramManagerAgent : AgentBase
                 }
                 else
                 {
-                    var hasNewCommits = await _prWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "ProgramManager", ct);
+                    var hasNewCommits = await _platform.PrWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "ProgramManager", ct);
                     if (!hasNewCommits)
                     {
                         // A2 fix #1: do NOT auto-approve same SHA if the UI gate still blocks.
@@ -1316,7 +1267,7 @@ public class ProgramManagerAgent : AgentBase
                     {
                         // Run rubber-duck critique if configured (different model tier, adversarial persona)
                         string? critiqueFindings = null;
-                        if (!string.IsNullOrWhiteSpace(_config.Agents.CritiqueTier))
+                        if (!string.IsNullOrWhiteSpace(Core.Config.Agents.CritiqueTier))
                         {
                             try
                             {
@@ -1324,11 +1275,11 @@ public class ProgramManagerAgent : AgentBase
                                 var critiqueIssueContext = "";
                                 if (issueNumber.HasValue)
                                 {
-                                    var issue = await _workItemService!.GetAsync(issueNumber.Value, ct);
+                                    var issue = await _platform.WorkItemService!.GetAsync(issueNumber.Value, ct);
                                     if (issue is not null)
                                         critiqueIssueContext = $"## Issue #{issue.Number}: {issue.Title}\n{issue.Body}";
                                 }
-                                var critiqueCode = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+                                var critiqueCode = await _platform.PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
                                 // Gather TE test results from PR comments
                                 string? testResults = null;
@@ -1364,7 +1315,7 @@ public class ProgramManagerAgent : AgentBase
 
                 if (reviewBody is null)
                 {
-                    _taskTracker.CompleteStep(reviewStepId);
+                    Core.TaskTracker!.CompleteStep(reviewStepId);
                     continue;
                 }
 
@@ -1374,14 +1325,14 @@ public class ProgramManagerAgent : AgentBase
                     var approvalComment = string.IsNullOrWhiteSpace(reviewBody)
                         ? "**[ProgramManager] APPROVED**"
                         : $"**[ProgramManager] APPROVED**\n\n{reviewBody}";
-                    await _reviewService.AddCommentAsync(pr.Number, approvalComment, ct);
+                    await _platform.ReviewService.AddCommentAsync(pr.Number, approvalComment, ct);
 
                     // Submit formal GitHub APPROVE only if agents have separate accounts
-                    if (_config.Review.EnableFormalReviews)
+                    if (Core.Config.Review.EnableFormalReviews)
                     {
                         try
                         {
-                            await _reviewService.AddReviewAsync(pr.Number,
+                            await _platform.ReviewService.AddReviewAsync(pr.Number,
                                 $"**[ProgramManager] APPROVED** — Final PM review passed.", "APPROVE", ct);
                         }
                         catch (Exception ex)
@@ -1400,18 +1351,18 @@ public class ProgramManagerAgent : AgentBase
                     // Add pm-approved label — this is the final gate before merge
                     // Uses AddLabelAsync to re-fetch fresh labels, avoiding race conditions
                     // where concurrent label updates by other agents could be lost.
-                    await _prService.AddLabelAsync(pr.Number, PullRequestWorkflow.Labels.PmApproved, ct);
+                    await _platform.PrService.AddLabelAsync(pr.Number, PullRequestWorkflow.Labels.PmApproved, ct);
 
                     LogActivity("task", $"✅ PM final approval on PR #{pr.Number}: {pr.Title} — ready to merge");
-                    _taskTracker.RecordLlmCall(reviewStepId);
-                    _taskTracker.RecordSubStep(reviewStepId, $"Approved PR #{pr.Number}");
-                    _taskTracker.CompleteStep(reviewStepId);
+                    Core.TaskTracker!.RecordLlmCall(reviewStepId);
+                    Core.TaskTracker!.RecordSubStep(reviewStepId, $"Approved PR #{pr.Number}");
+                    Core.TaskTracker!.CompleteStep(reviewStepId);
                     await RememberAsync(MemoryType.Decision,
                         $"PM final approval on PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reviewBody), ct);
 
                     // Notify PE to merge
-                    await _messageBus.PublishAsync(new StatusUpdateMessage
+                    await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = "*",
@@ -1427,11 +1378,11 @@ public class ProgramManagerAgent : AgentBase
                     // post them as inline review comments on the Files-changed tab.
                     // Otherwise fall back to the plain conversation-tab comment.
                     var pmInlineComments = ExtractInlineCommentsFromText(reviewBody);
-                    if (pmInlineComments.Count > 0 && _config.Review.EnableInlineComments)
+                    if (pmInlineComments.Count > 0 && Core.Config.Review.EnableInlineComments)
                     {
                         try
                         {
-                            var maxInline = _config.Review.MaxInlineCommentsPerReview;
+                            var maxInline = Core.Config.Review.MaxInlineCommentsPerReview;
                             var truncated = pmInlineComments.Take(maxInline).ToList();
                             var inlineBody =
                                 $"**[ProgramManager] CHANGES REQUESTED**\n\n{reviewBody}\n\n" +
@@ -1444,7 +1395,7 @@ public class ProgramManagerAgent : AgentBase
                                 Body = c.Body
                             }).ToList();
 
-                            await _reviewService.CreateReviewWithInlineCommentsAsync(
+                            await _platform.ReviewService.CreateReviewWithInlineCommentsAsync(
                                 pr.Number, inlineBody, "REQUEST_CHANGES", platformComments, ct: ct);
 
                             Logger.LogInformation(
@@ -1456,25 +1407,25 @@ public class ProgramManagerAgent : AgentBase
                             Logger.LogWarning(inlineEx,
                                 "PM inline review failed on PR #{Number} — falling back to plain comment",
                                 pr.Number);
-                            await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
+                            await _platform.PrWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
                         }
                     }
                     else
                     {
-                        await _prWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
+                        await _platform.PrWorkflow.RequestChangesAsync(pr.Number, "ProgramManager", reviewBody, ct);
                     }
 
                     Logger.LogInformation("PM requested changes on PR #{Number}", pr.Number);
                     LogActivity("task", $"❌ Requested changes on PR #{pr.Number}: {pr.Title}");
-                    _taskTracker.RecordLlmCall(reviewStepId);
-                    _taskTracker.RecordSubStep(reviewStepId, $"Requested changes on PR #{pr.Number}");
-                    _taskTracker.CompleteStep(reviewStepId);
+                    Core.TaskTracker!.RecordLlmCall(reviewStepId);
+                    Core.TaskTracker!.RecordSubStep(reviewStepId, $"Requested changes on PR #{pr.Number}");
+                    Core.TaskTracker!.CompleteStep(reviewStepId);
                     await RememberAsync(MemoryType.Decision,
                         $"Requested changes on PR #{pr.Number}: {pr.Title}",
                         TruncateForMemory(reviewBody), ct);
 
                     // Notify the author engineer to rework
-                    await _messageBus.PublishAsync(new ChangesRequestedMessage
+                    await Core.MessageBus.PublishAsync(new ChangesRequestedMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = "*",
@@ -1509,7 +1460,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var openPRs = await _prService.ListOpenAsync(ct);
+            var openPRs = await _platform.PrService.ListOpenAsync(ct);
 
             // Only consider engineering PRs (SE/TE), not doc PRs from Researcher/PM/Architect
             var engineeringOpen = openPRs.Where(IsEngineeringPr).ToList();
@@ -1534,7 +1485,7 @@ public class ProgramManagerAgent : AgentBase
             else
             {
                 // Only declare "all merged" if at least one engineering PR was actually merged.
-                var mergedPRs = await _prService.ListMergedAsync(ct);
+                var mergedPRs = await _platform.PrService.ListMergedAsync(ct);
                 var engineeringMerged = mergedPRs.Where(IsEngineeringPr).ToList();
                 if (engineeringMerged.Count > 0)
                 {
@@ -1583,7 +1534,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var threads = await _reviewService.GetThreadsAsync(prNumber, ct);
+            var threads = await _platform.ReviewService.GetThreadsAsync(prNumber, ct);
             // Only resolve threads authored by the PM (identified by [ProgramManager] tag in body)
             var ownThreads = threads
                 .Where(t => !t.IsResolved && t.Body.Contains("[ProgramManager]", StringComparison.OrdinalIgnoreCase))
@@ -1598,7 +1549,7 @@ public class ProgramManagerAgent : AgentBase
             foreach (var thread in ownThreads)
             {
                 var replyBody = $"✅ **[ProgramManager] Resolved** — Rework addressed this feedback. Approved.";
-                await _reviewService.ResolveThreadAsync(
+                await _platform.ReviewService.ResolveThreadAsync(
                     prNumber, thread.ThreadId, replyBody, ct);
             }
 
@@ -1620,7 +1571,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var openIssues = await _workItemService!.ListOpenAsync(ct);
+            var openIssues = await _platform.WorkItemService!.ListOpenAsync(ct);
             var enhancementIssues = openIssues
                 .Where(i => i.Labels.Any(l => string.Equals(l, "enhancement", StringComparison.OrdinalIgnoreCase)))
                 .Where(i => !_reviewedEnhancementIssues.Contains(i.Number))
@@ -1632,20 +1583,20 @@ public class ProgramManagerAgent : AgentBase
             foreach (var issue in enhancementIssues)
             {
                 // Check sub-issues via GitHub's Sub-Issues API
-                var subIssues = await _workItemService!.GetChildrenAsync(issue.Number, ct);
+                var subIssues = await _platform.WorkItemService!.GetChildrenAsync(issue.Number, ct);
 
                 if (subIssues.Count == 0)
                 {
                     // In SinglePRMode, enhancement issues won't have sub-issues.
                     // Close them only when ALL engineering tasks are done AND no open code PRs remain.
-                    if (_config.Limits.SinglePRMode)
+                    if (Core.Config.Limits.SinglePRMode)
                     {
                         // Guard: don't close until engineering tasks have been created AND all are done.
                         // Without this, the PM would close stories as soon as a doc PR merges (e.g.,
                         // Architecture.md) because "no open tasks" is trivially true when no tasks exist.
                         // NOTE: Must query with state="all" because closed tasks won't appear in
                         // the default (open-only) query — causing the PM to think engineering never started.
-                        var allEngineeringTasks = await _workItemService!.ListByLabelAsync(
+                        var allEngineeringTasks = await _platform.WorkItemService!.ListByLabelAsync(
                             EngineeringTaskIssueManager.TaskLabel, "all", ct);
                         if (allEngineeringTasks.Count == 0)
                         {
@@ -1668,8 +1619,8 @@ public class ProgramManagerAgent : AgentBase
                             continue;
                         }
 
-                        var mergedPRs = await _prService.ListMergedAsync(ct);
-                        var openPRs = await _prService.ListOpenAsync(ct);
+                        var mergedPRs = await _platform.PrService.ListMergedAsync(ct);
+                        var openPRs = await _platform.PrService.ListOpenAsync(ct);
 
                         // If code has been merged but some PRs remain open (e.g., approved but
                         // TE build failed so tests-added never applied), abandon the stale PRs
@@ -1683,7 +1634,7 @@ public class ProgramManagerAgent : AgentBase
                                     stalePr.Number);
                                 try
                                 {
-                                    await _prService.CloseAsync(stalePr.Number, ct);
+                                    await _platform.PrService.CloseAsync(stalePr.Number, ct);
                                 }
                                 catch (Exception ex)
                                 {
@@ -1708,10 +1659,10 @@ public class ProgramManagerAgent : AgentBase
                                 foreach (var mergedPr in mergedPRs)
                                     await _mergeCloseout.CloseLinkedWorkItemsAsync(mergedPr.Number, ct);
                             }
-                            await _workItemService!.AddCommentAsync(issue.Number,
+                            await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                                 $"✅ **PM Final Review — APPROVED (SinglePRMode)**\n\n" +
                                 "All engineering tasks are complete and all PRs have been merged. Closing as complete.", ct);
-                            await _workItemService!.CloseAsync(issue.Number, ct);
+                            await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                             _reviewedEnhancementIssues.Add(issue.Number);
                             Logger.LogInformation("PM closed enhancement issue #{Number} (SinglePRMode, all tasks done + merged): {Title}",
                                 issue.Number, issue.Title);
@@ -1732,7 +1683,7 @@ public class ProgramManagerAgent : AgentBase
                     "All {Count} sub-issues for enhancement #{Number} are closed. Starting final acceptance review.",
                     subIssues.Count, issue.Number);
 
-                var completionStepId = _taskTracker.BeginStep(Identity.Id, "pm-completion",
+                var completionStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-completion",
                     $"Review enhancement #{issue.Number}",
                     $"Final acceptance review: {issue.Title}", Identity.ModelTier);
 
@@ -1744,8 +1695,8 @@ public class ProgramManagerAgent : AgentBase
                 var mergedPrSummary = "";
                 try
                 {
-                    repoTree = (await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct)).ToList();
-                    var mergedPRs = await _prService.ListMergedAsync(ct);
+                    repoTree = (await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct)).ToList();
+                    var mergedPRs = await _platform.PrService.ListMergedAsync(ct);
                     var relevantMerged = mergedPRs
                         .Where(p => p.HeadBranch.StartsWith("agent/", StringComparison.OrdinalIgnoreCase))
                         .OrderByDescending(p => p.Number)
@@ -1780,12 +1731,12 @@ public class ProgramManagerAgent : AgentBase
                     evidenceSection += $"\n### Recently Merged PRs\n{mergedPrSummary}\n";
                 }
 
-                var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+                var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier);
                 var chat = kernel.GetRequiredService<IChatCompletionService>();
                 var history = CreateChatHistory();
 
                 history.AddSystemMessage(
-                    await _promptService.RenderAsync("pm/story-review-system", new Dictionary<string, string>(), ct)
+                    await Core.PromptService!.RenderAsync("pm/story-review-system", new Dictionary<string, string>(), ct)
                     ?? "You are a Program Manager reviewing whether a user story has been fully delivered. " +
                        "All engineering tasks have been completed and merged. Review the ACTUAL repository " +
                        "state provided below — do NOT guess or invent PR numbers. If the repository contains " +
@@ -1794,7 +1745,7 @@ public class ProgramManagerAgent : AgentBase
                        "IMPORTANT: Base your decision on the verified file tree and merged PRs, not assumptions.");
 
                 history.AddUserMessage(
-                    await _promptService.RenderAsync("pm/story-review-user", new Dictionary<string, string>
+                    await Core.PromptService!.RenderAsync("pm/story-review-user", new Dictionary<string, string>
                     {
                         ["issue_number"] = issue.Number.ToString(),
                         ["issue_title"] = issue.Title,
@@ -1812,7 +1763,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var responseText = response.Content ?? "";
-                _taskTracker.RecordLlmCall(completionStepId);
+                Core.TaskTracker!.RecordLlmCall(completionStepId);
 
                 if (responseText.Contains("APPROVED", StringComparison.OrdinalIgnoreCase))
                 {
@@ -1821,20 +1772,20 @@ public class ProgramManagerAgent : AgentBase
                         .Replace("APPROVED", "").Replace("approved", "")
                         .Trim().TrimStart('-', ':', ' ', '\n');
 
-                    await _workItemService!.AddCommentAsync(issue.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                         $"✅ **PM Final Review — APPROVED**\n\n" +
                         $"All {subIssues.Count} engineering tasks have been delivered and merged.\n\n" +
                         $"{summaryText}\n\n" +
                         $"Closing this user story as complete.",
                         ct);
-                    await _workItemService!.CloseAsync(issue.Number, ct);
+                    await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                     _reviewedEnhancementIssues.Add(issue.Number);
 
                     Logger.LogInformation("PM approved and closed enhancement issue #{Number}: {Title}",
                         issue.Number, issue.Title);
                     LogActivity("review", $"✅ Approved and closed user story #{issue.Number}: {issue.Title}");
-                    _taskTracker.RecordSubStep(completionStepId, $"Approved enhancement #{issue.Number}");
-                    _taskTracker.CompleteStep(completionStepId);
+                    Core.TaskTracker!.RecordSubStep(completionStepId, $"Approved enhancement #{issue.Number}");
+                    Core.TaskTracker!.CompleteStep(completionStepId);
                 }
                 else
                 {
@@ -1854,12 +1805,12 @@ public class ProgramManagerAgent : AgentBase
                         $"## Identified Gaps\n\n{gapText}\n\n" +
                         $"## Source\nOriginal enhancement: #{issue.Number}";
 
-                    var followUp = await _workItemService!.CreateAsync(
+                    var followUp = await _platform.WorkItemService!.CreateAsync(
                         followUpTitle, followUpBody,
                         new[] { "enhancement", "follow-up" }, ct);
 
                     // Close the original with a reference to the follow-up
-                    await _workItemService!.AddCommentAsync(issue.Number,
+                    await _platform.WorkItemService!.AddCommentAsync(issue.Number,
                         $"🔍 **PM Final Review — Delivered with Known Gaps**\n\n" +
                         $"All {subIssues.Count} engineering tasks are closed and merged. " +
                         $"PM identified improvements needed, but no active engineering " +
@@ -1867,7 +1818,7 @@ public class ProgramManagerAgent : AgentBase
                         $"**Gaps identified:**\n{gapText}\n\n" +
                         $"Closing as delivered. Follow-up improvements tracked in #{followUp.Number}.",
                         ct);
-                    await _workItemService!.CloseAsync(issue.Number, ct);
+                    await _platform.WorkItemService!.CloseAsync(issue.Number, ct);
                     _reviewedEnhancementIssues.Add(issue.Number);
 
                     Logger.LogInformation(
@@ -1875,8 +1826,8 @@ public class ProgramManagerAgent : AgentBase
                         issue.Number, followUp.Number);
                     LogActivity("review",
                         $"🔍 Enhancement #{issue.Number} delivered with gaps → follow-up #{followUp.Number}");
-                    _taskTracker.RecordSubStep(completionStepId, $"Enhancement #{issue.Number} — gaps found, follow-up #{followUp.Number}");
-                    _taskTracker.CompleteStep(completionStepId);
+                    Core.TaskTracker!.RecordSubStep(completionStepId, $"Enhancement #{issue.Number} — gaps found, follow-up #{followUp.Number}");
+                    Core.TaskTracker!.CompleteStep(completionStepId);
                 }
             }
         }
@@ -1898,7 +1849,7 @@ public class ProgramManagerAgent : AgentBase
                 if (tracking.CurrentTask is not null)
                     statusText += $" ({tracking.CurrentTask})";
 
-                await _projectFiles.UpdateTeamMemberStatusAsync(agentId, statusText, ct);
+                await Core.ProjectFiles.UpdateTeamMemberStatusAsync(agentId, statusText, ct);
             }
         }
         catch (Exception ex)
@@ -1918,13 +1869,13 @@ public class ProgramManagerAgent : AgentBase
             "Resource request from {Agent}: requesting {Role} (team size: {Size})",
             message.FromAgentId, message.RequestedRole, message.CurrentTeamSize);
 
-        if (_additionalEngineersHired >= _config.Limits.MaxAdditionalEngineers)
+        if (_additionalEngineersHired >= Core.Config.Limits.MaxAdditionalEngineers)
         {
             Logger.LogInformation(
                 "Resource request from {Agent} exceeds limit, creating executive issue",
                 message.FromAgentId);
 
-            await _issueWorkflow.RequestResourceAsync(
+            await _platform.IssueWorkflow!.RequestResourceAsync(
                 message.FromAgentId, message.RequestedRole, message.Justification, ct);
         }
         else
@@ -1933,7 +1884,7 @@ public class ProgramManagerAgent : AgentBase
             Logger.LogInformation(
                 "Resource request from {Agent} approved via message bus. Spawning {Role} ({Count}/{Max})",
                 message.FromAgentId, message.RequestedRole, _additionalEngineersHired,
-                _config.Limits.MaxAdditionalEngineers);
+                Core.Config.Limits.MaxAdditionalEngineers);
 
             // Actually spawn the engineer
             var spawnedIdentity = await _spawnManager.SpawnAgentAsync(message.RequestedRole, ct);
@@ -1947,7 +1898,7 @@ public class ProgramManagerAgent : AgentBase
                     ct: ct);
 
                 // Track in TeamMembers.md for persistence across restarts
-                await _projectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
+                await Core.ProjectFiles.AddTeamMemberAsync(spawnedIdentity, "Online", ct: ct);
             }
             else
             {
@@ -1956,7 +1907,7 @@ public class ProgramManagerAgent : AgentBase
                     message.RequestedRole, message.FromAgentId);
             }
 
-            await _messageBus.PublishAsync(new StatusUpdateMessage
+            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = message.FromAgentId,
@@ -1995,7 +1946,7 @@ public class ProgramManagerAgent : AgentBase
             Logger.LogInformation("Research complete signal received — generating PMSpec.md");
 
             // Skip gate if PMSpec already exists (resume scenario — no need to re-approve)
-            var existingSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var existingSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
             if (!string.IsNullOrWhiteSpace(existingSpec) &&
                 !existingSpec.Contains("No PM specification has been created yet", StringComparison.OrdinalIgnoreCase))
             {
@@ -2004,9 +1955,9 @@ public class ProgramManagerAgent : AgentBase
             else
             {
                 // === Gate: ResearchCompleteness — human reviews research before PM proceeds ===
-                if (_gateCheck.RequiresHuman(GateIds.ResearchCompleteness))
+                if (Core.GateCheck.RequiresHuman(GateIds.ResearchCompleteness))
                     UpdateStatus(AgentStatus.Working, "⏳ Awaiting human approval — research completeness");
-                await _gateCheck.WaitForGateAsync(
+                await Core.GateCheck.WaitForGateAsync(
                     GateIds.ResearchCompleteness,
                     "Research phase complete, PM ready to create specification",
                     ct: ct);
@@ -2024,12 +1975,12 @@ public class ProgramManagerAgent : AgentBase
 
         if (message.IsBlocker)
         {
-            await _issueWorkflow.ReportBlockerAsync(
+            await _platform.IssueWorkflow!.ReportBlockerAsync(
                 message.FromAgentId, message.IssueTitle, message.IssueBody, ct);
         }
         else
         {
-            await _issueWorkflow.AskAgentAsync(
+            await _platform.IssueWorkflow!.AskAgentAsync(
                 message.FromAgentId, Identity.DisplayName, message.IssueBody, ct);
         }
     }
@@ -2072,21 +2023,21 @@ public class ProgramManagerAgent : AgentBase
         {
             var currentContent = docName switch
             {
-                "PMSpec.md" => await _projectFiles.GetPMSpecAsync(ct),
+                "PMSpec.md" => await Core.ProjectFiles.GetPMSpecAsync(ct),
                 _ => null
             };
             if (string.IsNullOrWhiteSpace(currentContent)) return null;
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
             var history = CreateChatHistory();
             history.AddSystemMessage(
-                await _promptService.RenderAsync("pm/revision-system",
+                await Core.PromptService!.RenderAsync("pm/revision-system",
                     new Dictionary<string, string> { ["doc_name"] = docName }, ct)
                 ?? $"You are a Program Manager revising {docName} based on human reviewer feedback. " +
                    "Make the specific changes requested while preserving the overall structure.");
             history.AddUserMessage(
-                await _promptService.RenderAsync("pm/revision-user",
+                await Core.PromptService!.RenderAsync("pm/revision-user",
                     new Dictionary<string, string>
                     {
                         ["doc_name"] = docName,
@@ -2113,13 +2064,13 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var pr = await _prService.GetAsync(prNumber, ct);
+            var pr = await _platform.PrService.GetAsync(prNumber, ct);
             if (pr is null) return;
             var labels = pr.Labels?.ToList() ?? [];
             labels.Remove("human-approved");
             if (!labels.Contains("awaiting-human-review"))
                 labels.Add("awaiting-human-review");
-            await _prService.UpdateAsync(prNumber, labels: labels, ct: ct);
+            await _platform.PrService.UpdateAsync(prNumber, labels: labels, ct: ct);
         }
         catch (Exception ex)
         {
@@ -2134,18 +2085,18 @@ public class ProgramManagerAgent : AgentBase
     /// </summary>
     private async Task CreatePMSpecAsync(CancellationToken ct)
     {
-        var specStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Generate PM Spec",
+        var specStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Generate PM Spec",
             "Creating PM Specification from research findings", Identity.ModelTier);
         try
         {
             // Idempotency: check if PMSpec already has meaningful content
-            var existingSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var existingSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
             if (!string.IsNullOrWhiteSpace(existingSpec) &&
                 !existingSpec.Contains("No PM specification has been created yet"))
             {
                 Logger.LogInformation("PMSpec.md already exists with content, skipping creation");
                 // Still signal downstream agents
-                await _messageBus.PublishAsync(new StatusUpdateMessage
+                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = "*",
@@ -2157,45 +2108,45 @@ public class ProgramManagerAgent : AgentBase
                 // Create User Story Issues if not already done
                 // skipClosedIssueGuard: PMSpec exists in repo, old closed issues are from prior runs
                 await CreateUserStoryIssuesAsync(ct, skipClosedIssueGuard: true);
-                _taskTracker.CompleteStep(specStepId);
+                Core.TaskTracker!.CompleteStep(specStepId);
                 return;
             }
 
             // Create the PR upfront so it's visible immediately
-            var projectName = _config.Project.Name;
-            var pmSpecPath = _projectFiles.ResolvePath("PMSpec.md");
+            var projectName = Core.Config.Project.Name;
+            var pmSpecPath = Core.ProjectFiles.ResolvePath("PMSpec.md");
 
             // Quick mode: produce a minimal 1-paragraph PMSpec for fast testing
-            if (_config.Project.QuickDocumentCreation)
+            if (Core.Config.Project.QuickDocumentCreation)
             {
                 Logger.LogInformation("QuickDocumentCreation: producing minimal PMSpec.md");
                 UpdateStatus(AgentStatus.Working, "Creating minimal PMSpec (quick mode)");
-                var qPr = await _prWorkflow.OpenDocumentPRAsync(
+                var qPr = await _platform.PrWorkflow.OpenDocumentPRAsync(
                     Identity.DisplayName, pmSpecPath,
                     $"PM Specification for {projectName}",
                     $"Quick-mode PM specification for {projectName}.",
                     closesIssueNumber: null, ct);
 
                 // Resume-aware: check if gate is already pending/approved
-                var qGateStatus = await _gateCheck.GetGateStatusAsync(
+                var qGateStatus = await Core.GateCheck.GetGateStatusAsync(
                     GateIds.PMSpecification, qPr.Number, ct);
 
                 string? qContent = null;
                 if (qGateStatus == GateStatus.NotActivated)
                 {
-                    var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                    var qKernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                     var qChat = qKernel.GetRequiredService<IChatCompletionService>();
                     var qHistory = CreateChatHistory();
                     qHistory.AddSystemMessage(
-                        await _promptService.RenderAsync("pm/quick-system", new Dictionary<string, string>(), ct)
+                        await Core.PromptService!.RenderAsync("pm/quick-system", new Dictionary<string, string>(), ct)
                         ?? "You are a Program Manager. Write a brief product specification.");
                     qHistory.AddUserMessage(
-                        await _promptService.RenderAsync("pm/quick-user", new Dictionary<string, string>
+                        await Core.PromptService!.RenderAsync("pm/quick-user", new Dictionary<string, string>
                         {
-                            ["project_description"] = _config.Project.Description ?? "",
-                            ["tech_stack"] = _config.Project.TechStack
+                            ["project_description"] = Core.Config.Project.Description ?? "",
+                            ["tech_stack"] = Core.Config.Project.TechStack
                         }, ct)
-                        ?? $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
+                        ?? $"Project: {Core.Config.Project.Description}\nTech Stack: {Core.Config.Project.TechStack}\n\n" +
                            "Write a concise PMSpec with these sections (1-2 sentences each): " +
                            "Executive Summary, Business Goals, User Stories (3-5 bullet points with acceptance criteria), " +
                            "Scope, Non-Functional Requirements. Keep the entire document under 300 words.");
@@ -2211,7 +2162,7 @@ public class ProgramManagerAgent : AgentBase
                 // Commit document to PR so reviewers can see it before the gate
                 if (qContent is not null && !qPr.IsMerged)
                 {
-                    await _prWorkflow.CommitDocumentToPRAsync(
+                    await _platform.PrWorkflow.CommitDocumentToPRAsync(
                         qPr, pmSpecPath, qContent,
                         $"Add PM Specification for {projectName}", ct);
                 }
@@ -2222,9 +2173,9 @@ public class ProgramManagerAgent : AgentBase
                     var maxRevisions = 3;
                     for (var revision = 0; revision < maxRevisions; revision++)
                     {
-                        if (_gateCheck.RequiresHuman(GateIds.PMSpecification))
+                        if (Core.GateCheck.RequiresHuman(GateIds.PMSpecification))
                             UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{qPr.Number}");
-                        var gateWait = await _gateCheck.WaitForGateAsync(
+                        var gateWait = await Core.GateCheck.WaitForGateAsync(
                             GateIds.PMSpecification,
                             "PMSpec.md ready for human review before merge",
                             qPr.Number, ct: ct);
@@ -2239,25 +2190,25 @@ public class ProgramManagerAgent : AgentBase
                         var revised = await ReviseDocumentAsync("PMSpec.md", gateWait.Feedback!, ct);
                         if (revised is not null && !qPr.IsMerged)
                         {
-                            await _prWorkflow.CommitDocumentToPRAsync(
+                            await _platform.PrWorkflow.CommitDocumentToPRAsync(
                                 qPr, pmSpecPath, revised,
                                 $"Revise PMSpec based on reviewer feedback (attempt {revision + 2})", ct);
                         }
                         await ResetGateLabelsAsync(qPr.Number, ct);
-                        await _reviewService.AddCommentAsync(qPr.Number,
+                        await _platform.ReviewService.AddCommentAsync(qPr.Number,
                             $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated PMSpec.md.", ct);
                     }
                 }
 
                 if (!qPr.IsMerged)
                 {
-                    await _prWorkflow.MergeDocumentPRAsync(
+                    await _platform.PrWorkflow.MergeDocumentPRAsync(
                         qPr, Identity.DisplayName, pmSpecPath, ct);
                 }
                 Logger.LogInformation("Quick PMSpec.md created and merged");
                 LogActivity("task", $"📝 Quick PMSpec.md created for {projectName}");
 
-                await _messageBus.PublishAsync(new StatusUpdateMessage
+                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                 {
                     FromAgentId = Identity.Id, ToAgentId = "*",
                     MessageType = "PMSpecReady",
@@ -2271,7 +2222,7 @@ public class ProgramManagerAgent : AgentBase
             }
 
             UpdateStatus(AgentStatus.Working, "Creating PR for PMSpec.md");
-            var pr = await _prWorkflow.OpenDocumentPRAsync(
+            var pr = await _platform.PrWorkflow.OpenDocumentPRAsync(
                 Identity.DisplayName,
                 pmSpecPath,
                 $"PM Specification for {projectName}",
@@ -2281,7 +2232,7 @@ public class ProgramManagerAgent : AgentBase
                 ct);
 
             // Resume-aware: check if gate is already pending/approved from a prior run
-            var pmGateStatus = await _gateCheck.GetGateStatusAsync(
+            var pmGateStatus = await Core.GateCheck.GetGateStatusAsync(
                 GateIds.PMSpecification, pr.Number, ct);
 
             string? pmSpecDoc = null;
@@ -2301,13 +2252,13 @@ public class ProgramManagerAgent : AgentBase
 
             UpdateStatus(AgentStatus.Working, "Creating PMSpec (1/2): Analyzing requirements");
 
-            var projectDescription = _config.Project.Description;
-            var researchDoc = await _projectFiles.GetResearchDocAsync(ct);
+            var projectDescription = Core.Config.Project.Description;
+            var researchDoc = await Core.ProjectFiles.GetResearchDocAsync(ct);
 
             // Read visual design reference files for inclusion in PMSpec
             var designContext = await ReadDesignReferencesForSpecAsync(ct);
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
             var memoryContext = await GetMemoryContextAsync(ct: ct);
 
@@ -2315,14 +2266,14 @@ public class ProgramManagerAgent : AgentBase
             var designContextSection = "";
             if (!string.IsNullOrWhiteSpace(designContext))
             {
-                designContextSection = await _promptService.RenderAsync("pm/design-reference",
+                designContextSection = await Core.PromptService!.RenderAsync("pm/design-reference",
                     new Dictionary<string, string> { ["design_context"] = designContext }, ct)
                     ?? "\n\n## CRITICAL: VISUAL DESIGN REFERENCE\n" +
                        "The repository contains visual design reference files that define the EXACT UI to be built.\n" +
                        designContext;
             }
 
-            var systemPrompt = await _promptService.RenderAsync("pm/full-system", new Dictionary<string, string>
+            var systemPrompt = await Core.PromptService!.RenderAsync("pm/full-system", new Dictionary<string, string>
             {
                 ["memory_context"] = string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}",
                 ["design_context"] = designContextSection
@@ -2338,13 +2289,13 @@ public class ProgramManagerAgent : AgentBase
             history.AddSystemMessage(systemPrompt);
 
             // Turn 1: Analyze and identify business goals, user stories, success criteria
-            var useSinglePass = _config.CopilotCli.SinglePassMode;
+            var useSinglePass = Core.Config.CopilotCli.SinglePassMode;
 
             // Build design sections content for templates
             var designSections = "";
             if (!string.IsNullOrWhiteSpace(designContext))
             {
-                designSections = await _promptService.RenderAsync("pm/design-sections", new Dictionary<string, string>(), ct)
+                designSections = await Core.PromptService!.RenderAsync("pm/design-sections", new Dictionary<string, string>(), ct)
                     ?? "## Visual Design Specification\n(Describe the design.)\n\n## UI Interaction Scenarios\n(Describe interactions.)\n\n";
             }
 
@@ -2360,7 +2311,7 @@ public class ProgramManagerAgent : AgentBase
             {
                 // Single-pass: one comprehensive prompt instead of 2 turns
                 UpdateStatus(AgentStatus.Working, "Creating PMSpec (single-pass)");
-                var singlePassPrompt = await _promptService.RenderAsync("pm/single-pass-spec", specVars, ct);
+                var singlePassPrompt = await Core.PromptService!.RenderAsync("pm/single-pass-spec", specVars, ct);
                 if (singlePassPrompt is not null)
                 {
                     history.AddUserMessage(singlePassPrompt);
@@ -2387,13 +2338,13 @@ public class ProgramManagerAgent : AgentBase
 
                 var singleResponse = await chat.GetChatMessageContentAsync(
                     history, cancellationToken: ct);
-                _taskTracker.RecordSubStep(specStepId, "Single-pass PM Spec generation");
-                _taskTracker.RecordLlmCall(specStepId);
+                Core.TaskTracker!.RecordSubStep(specStepId, "Single-pass PM Spec generation");
+                Core.TaskTracker!.RecordLlmCall(specStepId);
                 pmSpecDoc = singleResponse.Content?.Trim() ?? "";
             }
             else
             {
-            var turn1Prompt = await _promptService.RenderAsync("pm/multi-turn-analysis", specVars, ct)
+            var turn1Prompt = await Core.PromptService!.RenderAsync("pm/multi-turn-analysis", specVars, ct)
                 ?? $"I need you to create a PM Specification for our project.\n\n" +
                    $"**Project Name:** {projectName}\n\n" +
                    $"**Project Description:**\n{projectDescription}\n\n" +
@@ -2410,15 +2361,15 @@ public class ProgramManagerAgent : AgentBase
 
             var analysisResponse = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
-            _taskTracker.RecordSubStep(specStepId, "Turn 1: Analyze requirements");
-            _taskTracker.RecordLlmCall(specStepId);
+            Core.TaskTracker!.RecordSubStep(specStepId, "Turn 1: Analyze requirements");
+            Core.TaskTracker!.RecordLlmCall(specStepId);
             history.AddAssistantMessage(analysisResponse.Content ?? "");
 
             Logger.LogDebug("PM Spec analysis complete for {ProjectName}", projectName);
 
             // Turn 2: Produce the structured PMSpec.md
             UpdateStatus(AgentStatus.Working, "Creating PMSpec (2/2): Drafting specification");
-            var turn2Prompt = await _promptService.RenderAsync("pm/multi-turn-compile",
+            var turn2Prompt = await Core.PromptService!.RenderAsync("pm/multi-turn-compile",
                 new Dictionary<string, string>
                 {
                     ["project_name"] = projectName,
@@ -2439,16 +2390,16 @@ public class ProgramManagerAgent : AgentBase
 
             var specResponse = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
-            _taskTracker.RecordSubStep(specStepId, "Turn 2: Compile specification document");
-            _taskTracker.RecordLlmCall(specStepId);
+            Core.TaskTracker!.RecordSubStep(specStepId, "Turn 2: Compile specification document");
+            Core.TaskTracker!.RecordLlmCall(specStepId);
             pmSpecDoc = specResponse.Content?.Trim() ?? "";
             }
 
             // Self-assessment: assess and refine the PM specification
-            _taskTracker.CompleteStep(specStepId);
-            var assessStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Self-assessment & refinement",
+            Core.TaskTracker!.CompleteStep(specStepId);
+            var assessStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Self-assessment & refinement",
                 "Assessing and refining PM specification quality", Identity.ModelTier);
-            _reasoningLog.Log(new AgentReasoningEvent
+            Core.ReasoningLog!.Log(new AgentReasoningEvent
             {
                 AgentId = Identity.Id,
                 AgentDisplayName = Identity.DisplayName,
@@ -2462,49 +2413,49 @@ public class ProgramManagerAgent : AgentBase
             if (criteria is not null)
             {
                 // PM spec self-assessment with inline impact classification
-                var (refinedOutput, _) = await _selfAssessment.AssessAndRefineWithResultAsync(
+                var (refinedOutput, _) = await Core.SelfAssessment!.AssessAndRefineWithResultAsync(
                     Identity.Id,
                     Identity.DisplayName,
                     Identity.Role,
                     "PM Specification",
                     pmSpecDoc,
                     criteria,
-                    $"Project: {_config.Project.Description}\nResearch findings available in Research.md",
+                    $"Project: {Core.Config.Project.Description}\nResearch findings available in Research.md",
                     chat,
                     classifyImpact: false, // PM spec assessment doesn't drive a decision gate
                     ct);
                 pmSpecDoc = refinedOutput;
-                _taskTracker.RecordLlmCall(assessStepId);
+                Core.TaskTracker!.RecordLlmCall(assessStepId);
             }
-            _taskTracker.CompleteStep(assessStepId);
+            Core.TaskTracker!.CompleteStep(assessStepId);
 
             Logger.LogDebug("PM Spec document compiled for {ProjectName}", projectName);
 
             } // end else (fresh AI work, not resuming from gate)
 
             // Commit document to PR so reviewers can see it before the gate
-            var commitStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Commit PMSpec.md",
+            var commitStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Commit PMSpec.md",
                 "Committing PM Specification to PR", Identity.ModelTier);
             if (pmSpecDoc is not null && !pr.IsMerged)
             {
-                await _prWorkflow.CommitDocumentToPRAsync(
+                await _platform.PrWorkflow.CommitDocumentToPRAsync(
                     pr, pmSpecPath, pmSpecDoc,
                     $"Add PM Specification for {projectName}", ct);
             }
-            _taskTracker.CompleteStep(commitStepId);
+            Core.TaskTracker!.CompleteStep(commitStepId);
 
             // === Gate: PMSpecification — human reviews PMSpec before merge ===
-            var gateStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Human gate review",
+            var gateStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Human gate review",
                 "Awaiting human approval of PM Specification", Identity.ModelTier);
-            _taskTracker.SetStepWaiting(gateStepId);
+            Core.TaskTracker!.SetStepWaiting(gateStepId);
             if (pmGateStatus != GateStatus.Approved)
             {
                 var maxRevisions = 3;
                 for (var revision = 0; revision < maxRevisions; revision++)
                 {
-                    if (_gateCheck.RequiresHuman(GateIds.PMSpecification))
+                    if (Core.GateCheck.RequiresHuman(GateIds.PMSpecification))
                         UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{pr.Number}");
-                    var gateWait = await _gateCheck.WaitForGateAsync(
+                    var gateWait = await Core.GateCheck.WaitForGateAsync(
                         GateIds.PMSpecification,
                         "PMSpec.md ready for human review before merge",
                         pr.Number, ct: ct);
@@ -2519,22 +2470,22 @@ public class ProgramManagerAgent : AgentBase
                     var revised = await ReviseDocumentAsync("PMSpec.md", gateWait.Feedback!, ct);
                     if (revised is not null && !pr.IsMerged)
                     {
-                        await _prWorkflow.CommitDocumentToPRAsync(
+                        await _platform.PrWorkflow.CommitDocumentToPRAsync(
                             pr, pmSpecPath, revised,
                             $"Revise PMSpec based on reviewer feedback (attempt {revision + 2})", ct);
                     }
                     await ResetGateLabelsAsync(pr.Number, ct);
-                    await _reviewService.AddCommentAsync(pr.Number,
+                    await _platform.ReviewService.AddCommentAsync(pr.Number,
                         $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated PMSpec.md.", ct);
                 }
             }
 
             if (!pr.IsMerged)
             {
-                await _prWorkflow.MergeDocumentPRAsync(
+                await _platform.PrWorkflow.MergeDocumentPRAsync(
                     pr, Identity.DisplayName, pmSpecPath, ct);
             }
-            _taskTracker.CompleteStep(gateStepId);
+            Core.TaskTracker!.CompleteStep(gateStepId);
             Logger.LogInformation("PMSpec.md PR created and merged for project {ProjectName}", projectName);
             LogActivity("task", $"📝 PMSpec.md created and merged for {projectName}");
             await RememberAsync(MemoryType.Action,
@@ -2543,27 +2494,27 @@ public class ProgramManagerAgent : AgentBase
 
             // Team composition BEFORE signaling downstream agents — the team must be
             // composed before the Architect, PE, and Engineers begin their work.
-            if (_teamComposer is not null && _config.SmeAgents.Enabled && !_teamCompositionComplete)
+            if (_teamComposer is not null && Core.Config.SmeAgents.Enabled && !_teamCompositionComplete)
             {
-                var teamStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Team composition analysis",
+                var teamStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Team composition analysis",
                     "Evaluating optimal team composition", Identity.ModelTier);
                 try
                 {
                     await ComposeTeamAsync(ct);
-                    _taskTracker.CompleteStep(teamStepId);
+                    Core.TaskTracker!.CompleteStep(teamStepId);
                 }
                 catch (Exception ex)
                 {
-                    _taskTracker.FailStep(teamStepId, ex.Message);
+                    Core.TaskTracker!.FailStep(teamStepId, ex.Message);
                     Logger.LogWarning(ex, "Team composition failed — continuing without it to avoid blocking workflow");
                     // Don't rethrow — team composition failure shouldn't block the entire pipeline
                 }
             }
 
             // Notify all agents that PMSpec is ready — Architect will pick this up
-            var signalStepId = _taskTracker.BeginStep(Identity.Id, "pm-spec", "Signal Architect",
+            var signalStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Signal Architect",
                 "Notifying team that PM Specification is ready", Identity.ModelTier);
-            await _messageBus.PublishAsync(new StatusUpdateMessage
+            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
@@ -2576,7 +2527,7 @@ public class ProgramManagerAgent : AgentBase
 
             // After PMSpec is merged, create User Story Issues
             await CreateUserStoryIssuesAsync(ct, skipClosedIssueGuard: true);
-            _taskTracker.CompleteStep(signalStepId);
+            Core.TaskTracker!.CompleteStep(signalStepId);
 
             UpdateStatus(AgentStatus.Idle, "PMSpec complete, Issues created, Architect triggered");
         }
@@ -2602,20 +2553,20 @@ public class ProgramManagerAgent : AgentBase
             UpdateStatus(AgentStatus.Working, "Composing optimal team");
             LogActivity("task", "🏗️ Analyzing project to determine optimal team composition");
 
-            var analyzeStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Analyze project needs",
+            var analyzeStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", "Analyze project needs",
                 "Gathering project docs and calling AI to propose team composition", Identity.ModelTier);
 
             // Gather project docs
-            var projectDesc = _config.Project.Description ?? "No project description";
-            var research = await _projectFiles.GetResearchDocAsync(ct);
-            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var projectDesc = Core.Config.Project.Description ?? "No project description";
+            var research = await Core.ProjectFiles.GetResearchDocAsync(ct);
+            var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
 
             // Build the team composition prompt
             var compositionPrompt = await _teamComposer.BuildTeamCompositionPromptAsync(
                 projectDesc, research, pmSpec, ct);
 
             // Call AI to analyze and propose team
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier);
             var chatService = kernel.GetRequiredService<IChatCompletionService>();
 
             var history = CreateChatHistory();
@@ -2623,12 +2574,12 @@ public class ProgramManagerAgent : AgentBase
 
             var response = await chatService.GetChatMessageContentsAsync(history, cancellationToken: ct);
             var aiResponse = response.LastOrDefault()?.Content;
-            _taskTracker.RecordLlmCall(analyzeStepId);
+            Core.TaskTracker!.RecordLlmCall(analyzeStepId);
 
             if (string.IsNullOrWhiteSpace(aiResponse))
             {
                 Logger.LogWarning("AI returned empty response for team composition. Using default team.");
-                _taskTracker.FailStep(analyzeStepId, "AI returned empty response");
+                Core.TaskTracker!.FailStep(analyzeStepId, "AI returned empty response");
                 _teamCompositionComplete = true;
                 return;
             }
@@ -2638,11 +2589,11 @@ public class ProgramManagerAgent : AgentBase
             if (proposal is null)
             {
                 Logger.LogWarning("Failed to parse team composition proposal. Using default team.");
-                _taskTracker.FailStep(analyzeStepId, "Failed to parse AI proposal");
+                Core.TaskTracker!.FailStep(analyzeStepId, "Failed to parse AI proposal");
                 _teamCompositionComplete = true;
                 return;
             }
-            _taskTracker.CompleteStep(analyzeStepId);
+            Core.TaskTracker!.CompleteStep(analyzeStepId);
 
             Logger.LogInformation(
                 "Team composition proposed: {BuiltInCount} built-in, {TemplateCount} templates, {NewSmeCount} new SME agents",
@@ -2678,7 +2629,7 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // === Gate: AgentTeamComposition — human approves team composition ===
-            var gateResult = await _gateCheck.WaitForGateAsync(
+            var gateResult = await Core.GateCheck.WaitForGateAsync(
                 GateIds.AgentTeamComposition,
                 $"PM proposes team composition:\n" +
                 $"Built-in: {string.Join(", ", proposal.BuiltInAgents.Select(a => $"{a.Role}x{a.Count}"))}\n" +
@@ -2688,13 +2639,13 @@ public class ProgramManagerAgent : AgentBase
                 ct: ct);
 
             // Generate and save TeamComposition.md
-            var docStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Write TeamComposition.md",
+            var docStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", "Write TeamComposition.md",
                 "Generating and committing team composition document");
             var teamDoc = _teamComposer.GenerateTeamCompositionDoc(proposal);
-            await _projectFiles.SaveScopedFileAsync("TeamComposition.md", teamDoc,
+            await Core.ProjectFiles.SaveScopedFileAsync("TeamComposition.md", teamDoc,
                 "PM: Add team composition document", ct);
             Logger.LogInformation("TeamComposition.md saved");
-            _taskTracker.CompleteStep(docStepId);
+            Core.TaskTracker!.CompleteStep(docStepId);
 
             // Apply PM-assigned role description overrides for built-in agents
             if (RoleContext is not null)
@@ -2712,7 +2663,7 @@ public class ProgramManagerAgent : AgentBase
             // Spawn any new SME agents from the approved proposal
             var smeCount = proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count;
             string? spawnStepId = smeCount > 0
-                ? _taskTracker.BeginStep(Identity.Id, "pm-team", $"Spawn {smeCount} SME agents",
+                ? Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", $"Spawn {smeCount} SME agents",
                     "Spawning SME agents from approved proposal")
                 : null;
 
@@ -2764,12 +2715,12 @@ public class ProgramManagerAgent : AgentBase
             }
 
             if (spawnStepId is not null)
-                _taskTracker.CompleteStep(spawnStepId);
+                Core.TaskTracker!.CompleteStep(spawnStepId);
 
             // Signal team composition complete
-            var teamSignalStepId = _taskTracker.BeginStep(Identity.Id, "pm-team", "Signal team ready",
+            var teamSignalStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", "Signal team ready",
                 "Broadcasting TeamCompositionComplete to all agents");
-            await _messageBus.PublishAsync(new StatusUpdateMessage
+            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
@@ -2779,7 +2730,7 @@ public class ProgramManagerAgent : AgentBase
             }, ct);
 
             _teamCompositionComplete = true;
-            _taskTracker.CompleteStep(teamSignalStepId);
+            Core.TaskTracker!.CompleteStep(teamSignalStepId);
             LogActivity("task", "✅ Team composition complete");
         }
         catch (OperationCanceledException) { throw; }
@@ -2803,7 +2754,7 @@ public class ProgramManagerAgent : AgentBase
         try
         {
             // Idempotency: check if OPEN enhancement issues already exist
-            var existingEnhancements = await _workItemService!.ListByLabelAsync(
+            var existingEnhancements = await _platform.WorkItemService!.ListByLabelAsync(
                 IssueWorkflow.Labels.Enhancement, "open", ct);
             if (existingEnhancements.Count > 0)
             {
@@ -2813,7 +2764,7 @@ public class ProgramManagerAgent : AgentBase
                 _userStoryIssuesCreated = true;
 
                 // Still notify PE in case it missed the signal
-                await _messageBus.PublishAsync(new PlanningCompleteMessage
+                await Core.MessageBus.PublishAsync(new PlanningCompleteMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = "*",
@@ -2828,7 +2779,7 @@ public class ProgramManagerAgent : AgentBase
             // Skip this guard on retry after mini-reset (caller already verified 0 open).
             if (!skipClosedIssueGuard)
             {
-                var closedEnhancements = await _workItemService!.ListByLabelAsync(
+                var closedEnhancements = await _platform.WorkItemService!.ListByLabelAsync(
                     IssueWorkflow.Labels.Enhancement, "closed", ct);
                 if (closedEnhancements.Count > 0)
                 {
@@ -2844,33 +2795,33 @@ public class ProgramManagerAgent : AgentBase
             LogActivity("planning", "📋 Reading PMSpec.md to extract user stories");
 
             // Single-issue mode: create one Enhancement issue with doc links instead of N stories
-            if (_config.Limits.SingleIssueMode)
+            if (Core.Config.Limits.SingleIssueMode)
             {
                 await CreateSingleEnhancementIssueAsync(ct);
                 return;
             }
 
-            var readSpecStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Read PMSpec",
+            var readSpecStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-stories", "Read PMSpec",
                 "Reading PMSpec.md to extract user stories", Identity.ModelTier);
 
-            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
             if (string.IsNullOrWhiteSpace(pmSpec) || pmSpec.Contains("No PM specification has been created yet"))
             {
                 Logger.LogWarning("PMSpec.md has no content, cannot create User Story Issues");
-                _taskTracker.FailStep(readSpecStepId, "PMSpec.md has no content");
+                Core.TaskTracker!.FailStep(readSpecStepId, "PMSpec.md has no content");
                 return;
             }
-            _taskTracker.CompleteStep(readSpecStepId);
+            Core.TaskTracker!.CompleteStep(readSpecStepId);
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var extractStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Extract user stories",
+            var extractStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-stories", "Extract user stories",
                 "AI extracting user stories from PMSpec", Identity.ModelTier);
             LogActivity("planning", "🤖 Calling AI to extract user stories from PMSpec");
             var history = CreateChatHistory();
             history.AddSystemMessage(
-                await _promptService.RenderAsync("pm/story-extraction-system", new Dictionary<string, string>(), ct)
+                await Core.PromptService!.RenderAsync("pm/story-extraction-system", new Dictionary<string, string>(), ct)
                 ?? "You are a Program Manager extracting User Stories from a PM Specification document. " +
                    "For each User Story, produce a structured output that can be parsed into individual GitHub Issues.\n\n" +
                    "Output format — one block per User Story, separated by '---':\n" +
@@ -2880,18 +2831,18 @@ public class ProgramManagerAgent : AgentBase
                    "List them by development dependency. Be thorough.");
 
             history.AddUserMessage(
-                await _promptService.RenderAsync("pm/story-extraction-user",
+                await Core.PromptService!.RenderAsync("pm/story-extraction-user",
                     new Dictionary<string, string> { ["pm_spec"] = pmSpec }, ct)
                 ?? $"Extract all User Stories from this PM Specification and format them as described.\n\n" +
                    $"## PM Specification\n{pmSpec}");
 
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
             var content = response.Content?.Trim() ?? "";
-            _taskTracker.RecordLlmCall(extractStepId);
+            Core.TaskTracker!.RecordLlmCall(extractStepId);
 
             // Parse the AI output into individual stories
             var storyBlocks = content.Split("---", StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            _taskTracker.CompleteStep(extractStepId);
+            Core.TaskTracker!.CompleteStep(extractStepId);
 
             // Cap stories to avoid AI generating an unreasonable number
             const int maxStories = 12;
@@ -2902,7 +2853,7 @@ public class ProgramManagerAgent : AgentBase
                 storyBlocks = storyBlocks[..maxStories];
             }
 
-            var createStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", $"Create {storyBlocks.Length} GitHub issues",
+            var createStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-stories", $"Create {storyBlocks.Length} GitHub issues",
                 "Creating enhancement issues on GitHub");
             LogActivity("planning", $"📝 AI extracted {storyBlocks.Length} story blocks, creating GitHub issues");
             var issueCount = 0;
@@ -2941,7 +2892,7 @@ public class ProgramManagerAgent : AgentBase
                 }
 
                 // Check if an issue with similar title already exists
-                var existingIssue = await _issueWorkflow.FindExistingIssueAsync(title, ct);
+                var existingIssue = await _platform.IssueWorkflow!.FindExistingIssueAsync(title, ct);
                 if (existingIssue is not null)
                 {
                     Logger.LogDebug("Issue '{Title}' already exists as #{Number}, skipping",
@@ -2950,7 +2901,7 @@ public class ProgramManagerAgent : AgentBase
                     continue;
                 }
 
-                var issue = await _workItemService!.CreateAsync(
+                var issue = await _platform.WorkItemService!.CreateAsync(
                     title, validatedBody,
                     [IssueWorkflow.Labels.Enhancement],
                     ct);
@@ -2964,24 +2915,24 @@ public class ProgramManagerAgent : AgentBase
             }
 
             _userStoryIssuesCreated = true;
-            _taskTracker.CompleteStep(createStepId);
+            Core.TaskTracker!.CompleteStep(createStepId);
             Logger.LogInformation("Created {Count} User Story Issues from PMSpec", issueCount);
             LogActivity("task", $"📌 Created {issueCount} User Story Issues from PMSpec");
 
-            var signalStepId = _taskTracker.BeginStep(Identity.Id, "pm-stories", "Notify team",
+            var signalStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-stories", "Notify team",
                 "Broadcasting PlanningComplete to all agents");
             await RememberAsync(MemoryType.Action,
                 $"Created {issueCount} user story issues from PMSpec for task tracking", ct: ct);
 
             // Notify PE that planning issues are ready
-            await _messageBus.PublishAsync(new PlanningCompleteMessage
+            await Core.MessageBus.PublishAsync(new PlanningCompleteMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
                 MessageType = "PlanningComplete",
                 IssueCount = issueCount
             }, ct);
-            _taskTracker.CompleteStep(signalStepId);
+            Core.TaskTracker!.CompleteStep(signalStepId);
 
             UpdateStatus(AgentStatus.Idle, $"Created {issueCount} User Story Issues");
         }
@@ -2999,26 +2950,26 @@ public class ProgramManagerAgent : AgentBase
     /// </summary>
     private async Task CreateSingleEnhancementIssueAsync(CancellationToken ct)
     {
-        var stepId = _taskTracker.BeginStep(Identity.Id, "pm-single-issue", "Create single Enhancement issue",
+        var stepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-single-issue", "Create single Enhancement issue",
             "Creating single issue with doc links", Identity.ModelTier);
         LogActivity("planning", "📋 Creating single Enhancement issue with document references");
 
-        var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+        var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
         if (string.IsNullOrWhiteSpace(pmSpec) || pmSpec.Contains("No PM specification has been created yet"))
         {
             Logger.LogWarning("PMSpec.md has no content, cannot create Enhancement issue");
-            _taskTracker.FailStep(stepId, "PMSpec.md has no content");
+            Core.TaskTracker!.FailStep(stepId, "PMSpec.md has no content");
             return;
         }
 
         // Extract executive summary (first ~800 chars or up to first ## heading after intro)
         var execSummary = ExtractExecutiveSummary(pmSpec);
 
-        var projectName = _config.Project.Name;
+        var projectName = Core.Config.Project.Name;
         if (string.IsNullOrWhiteSpace(projectName))
-            projectName = _config.Project.Description?.Split('\n').FirstOrDefault()?.Trim() ?? "Project";
+            projectName = Core.Config.Project.Description?.Split('\n').FirstOrDefault()?.Trim() ?? "Project";
 
-        var docsBasePath = _projectFiles.ArtifactBasePath;
+        var docsBasePath = Core.ProjectFiles.ArtifactBasePath;
         var title = $"Enhancement: {projectName}";
 
         var body = $"""
@@ -3043,19 +2994,19 @@ public class ProgramManagerAgent : AgentBase
         if (validatedBody is null)
         {
             Logger.LogWarning("Single enhancement issue body failed validation");
-            _taskTracker.FailStep(stepId, "Issue body failed validation");
+            Core.TaskTracker!.FailStep(stepId, "Issue body failed validation");
             return;
         }
 
         // Check for existing issue
-        var existingIssue = await _issueWorkflow.FindExistingIssueAsync(title, ct);
+        var existingIssue = await _platform.IssueWorkflow!.FindExistingIssueAsync(title, ct);
         if (existingIssue is not null)
         {
             Logger.LogInformation("Single enhancement issue already exists as #{Number}", existingIssue.Number);
         }
         else
         {
-            var issue = await _workItemService!.CreateAsync(
+            var issue = await _platform.WorkItemService!.CreateAsync(
                 title, validatedBody,
                 [IssueWorkflow.Labels.Enhancement],
                 ct);
@@ -3063,11 +3014,11 @@ public class ProgramManagerAgent : AgentBase
         }
 
         _userStoryIssuesCreated = true;
-        _taskTracker.CompleteStep(stepId);
+        Core.TaskTracker!.CompleteStep(stepId);
         LogActivity("task", $"📌 Created single Enhancement issue for {projectName}");
 
         // Notify team
-        await _messageBus.PublishAsync(new PlanningCompleteMessage
+        await Core.MessageBus.PublishAsync(new PlanningCompleteMessage
         {
             FromAgentId = Identity.Id,
             ToAgentId = "*",
@@ -3108,28 +3059,28 @@ public class ProgramManagerAgent : AgentBase
         {
             try
             {
-                var clarifyStepId = _taskTracker.BeginStep(Identity.Id, "pm-support",
+                var clarifyStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-support",
                     $"Answer question on #{request.IssueNumber}",
                     $"Clarification from {request.FromAgentId}", Identity.ModelTier);
 
-                var issue = await _workItemService!.GetAsync(request.IssueNumber, ct);
+                var issue = await _platform.WorkItemService!.GetAsync(request.IssueNumber, ct);
                 if (issue is null)
                 {
                     Logger.LogWarning("Cannot find issue #{Number} for clarification", request.IssueNumber);
-                    _taskTracker.FailStep(clarifyStepId, $"Issue #{request.IssueNumber} not found");
+                    Core.TaskTracker!.FailStep(clarifyStepId, $"Issue #{request.IssueNumber} not found");
                     continue;
                 }
 
                 UpdateStatus(AgentStatus.Working, $"Answering clarification on issue #{request.IssueNumber}");
 
-                var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                 var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-                var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+                var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
 
                 var history = CreateChatHistory();
                 history.AddSystemMessage(
-                    await _promptService.RenderAsync("pm/clarification-system", new Dictionary<string, string>(), ct)
+                    await Core.PromptService!.RenderAsync("pm/clarification-system", new Dictionary<string, string>(), ct)
                     ?? "You are a Program Manager answering a clarification question from an engineer " +
                        "about a GitHub Issue (User Story). Use the PM Specification as your primary " +
                        "reference to provide clear, actionable answers.\n\n" +
@@ -3143,7 +3094,7 @@ public class ProgramManagerAgent : AgentBase
                     : "";
 
                 history.AddUserMessage(
-                    await _promptService.RenderAsync("pm/clarification-user", new Dictionary<string, string>
+                    await Core.PromptService!.RenderAsync("pm/clarification-user", new Dictionary<string, string>
                     {
                         ["pm_spec"] = pmSpec ?? "",
                         ["issue_number"] = issue.Number.ToString(),
@@ -3159,7 +3110,7 @@ public class ProgramManagerAgent : AgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var answer = response.Content?.Trim() ?? "";
-                _taskTracker.RecordLlmCall(clarifyStepId);
+                Core.TaskTracker!.RecordLlmCall(clarifyStepId);
 
                 if (string.IsNullOrWhiteSpace(answer) ||
                     answer.Equals("ESCALATE", StringComparison.OrdinalIgnoreCase))
@@ -3168,8 +3119,8 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation(
                         "Escalating clarification for issue #{Number} to Executive", request.IssueNumber);
 
-                    var executiveUsername = _config.Project.ExecutiveGitHubUsername;
-                    var escalationIssue = await _issueWorkflow.CreateExecutiveRequestAsync(
+                    var executiveUsername = Core.Config.Project.ExecutiveGitHubUsername;
+                    var escalationIssue = await _platform.IssueWorkflow!.CreateExecutiveRequestAsync(
                         Identity.DisplayName,
                         $"Clarification needed for Issue #{request.IssueNumber}: {issue.Title}",
                         $"An engineer asked a question about Issue #{request.IssueNumber} that I cannot " +
@@ -3179,20 +3130,20 @@ public class ProgramManagerAgent : AgentBase
                         $"Please provide guidance. @{executiveUsername}",
                         ct);
 
-                    await _workItemService!.AddCommentAsync(request.IssueNumber,
+                    await _platform.WorkItemService!.AddCommentAsync(request.IssueNumber,
                         $"**{Identity.DisplayName}**: I need to consult with the Executive stakeholder " +
                         $"on this question. I've created issue #{escalationIssue.Number} for guidance. " +
                         $"I'll follow up once I have an answer.",
                         ct);
-                    _taskTracker.RecordSubStep(clarifyStepId, $"Escalated to Executive (#{escalationIssue.Number})");
-                    _taskTracker.CompleteStep(clarifyStepId);
+                    Core.TaskTracker!.RecordSubStep(clarifyStepId, $"Escalated to Executive (#{escalationIssue.Number})");
+                    Core.TaskTracker!.CompleteStep(clarifyStepId);
                 }
                 else
                 {
                     // === Gate: AgentToAgentResponse — human reviews before posting answer ===
-                    if (_gateCheck.RequiresHuman(GateIds.AgentToAgentResponse))
+                    if (Core.GateCheck.RequiresHuman(GateIds.AgentToAgentResponse))
                         UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on answer for #{request.IssueNumber}");
-                    var gateResult = await _gateCheck.WaitForGateAsync(
+                    var gateResult = await Core.GateCheck.WaitForGateAsync(
                         GateIds.AgentToAgentResponse,
                         $"{Identity.DisplayName} → {request.FromAgentId}: Answering question on Issue #{request.IssueNumber}\n\n" +
                         $"**Question:** {request.Question}\n\n" +
@@ -3208,17 +3159,17 @@ public class ProgramManagerAgent : AgentBase
                     if (gateResult.Decision == GateDecision.Rejected)
                     {
                         Logger.LogInformation("Human rejected agent answer for issue #{Number}", request.IssueNumber);
-                        _taskTracker.RecordSubStep(clarifyStepId, "Human rejected answer — not posting");
-                        _taskTracker.CompleteStep(clarifyStepId);
+                        Core.TaskTracker!.RecordSubStep(clarifyStepId, "Human rejected answer — not posting");
+                        Core.TaskTracker!.CompleteStep(clarifyStepId);
                         continue;
                     }
 
                     // Post the answer on the issue
-                    await _workItemService!.AddCommentAsync(request.IssueNumber,
+                    await _platform.WorkItemService!.AddCommentAsync(request.IssueNumber,
                         $"**{Identity.DisplayName}**: {finalAnswer}", ct);
 
                     // Notify the engineer
-                    await _messageBus.PublishAsync(new ClarificationResponseMessage
+                    await Core.MessageBus.PublishAsync(new ClarificationResponseMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = request.FromAgentId,
@@ -3230,8 +3181,8 @@ public class ProgramManagerAgent : AgentBase
                     Logger.LogInformation(
                         "Answered clarification from {Agent} on issue #{Number}",
                         request.FromAgentId, request.IssueNumber);
-                    _taskTracker.RecordSubStep(clarifyStepId, $"Answered {request.FromAgentId}");
-                    _taskTracker.CompleteStep(clarifyStepId);
+                    Core.TaskTracker!.RecordSubStep(clarifyStepId, $"Answered {request.FromAgentId}");
+                    Core.TaskTracker!.CompleteStep(clarifyStepId);
                 }
             }
             catch (Exception ex)
@@ -3246,18 +3197,18 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             var history = CreateChatHistory();
             history.AddSystemMessage(
-                await _promptService.RenderAsync("pm/blocker-triage-system", new Dictionary<string, string>(), ct)
+                await Core.PromptService!.RenderAsync("pm/blocker-triage-system", new Dictionary<string, string>(), ct)
                 ?? "You are a Program Manager triaging a blocker issue in a software project. " +
                    "Analyze the blocker and provide actionable guidance. " +
                    "If you cannot help, respond with exactly 'ESCALATE'.");
 
             history.AddUserMessage(
-                await _promptService.RenderAsync("pm/blocker-triage-user", new Dictionary<string, string>
+                await Core.PromptService!.RenderAsync("pm/blocker-triage-user", new Dictionary<string, string>
                 {
                     ["blocker_number"] = blocker.Number.ToString(),
                     ["blocker_title"] = blocker.Title,
@@ -3288,11 +3239,11 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
-            var engineeringPlan = await _projectFiles.GetEngineeringPlanAsync(ct);
+            var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
+            var engineeringPlan = await Core.ProjectFiles.GetEngineeringPlanAsync(ct);
 
             // Read the linked issue for acceptance criteria
             var issueContext = "";
@@ -3301,7 +3252,7 @@ public class ProgramManagerAgent : AgentBase
             {
                 try
                 {
-                    var issue = await _workItemService!.GetAsync(issueNumber.Value, ct);
+                    var issue = await _platform.WorkItemService!.GetAsync(issueNumber.Value, ct);
                     if (issue is not null)
                         issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
                 }
@@ -3312,16 +3263,16 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // Read actual code files from the PR branch
-            var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+            var codeContext = await _platform.PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Gather ALL screenshot evidence from PR comments (PE screenshots, TE screenshots, standalone)
             var screenshotImages = new List<PullRequestWorkflow.ScreenshotImage>();
             var screenshotContext = "";
             try
             {
-                screenshotImages = await _prWorkflow.GetPRScreenshotImagesAsync(pr.Number, ct: ct);
+                screenshotImages = await _platform.PrWorkflow.GetPRScreenshotImagesAsync(pr.Number, ct: ct);
                 if (screenshotImages.Count == 0)
-                    screenshotContext = await _prWorkflow.GetPRScreenshotContextAsync(pr.Number, ct);
+                    screenshotContext = await _platform.PrWorkflow.GetPRScreenshotContextAsync(pr.Number, ct);
             }
             catch (Exception ex)
             {
@@ -3339,7 +3290,7 @@ public class ProgramManagerAgent : AgentBase
             {
                 try
                 {
-                    var descKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                    var descKernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                     var descChat = descKernel.GetRequiredService<Microsoft.SemanticKernel.ChatCompletion.IChatCompletionService>();
                     foreach (var img in screenshotImages)
                     {
@@ -3361,12 +3312,12 @@ public class ProgramManagerAgent : AgentBase
             var screenshotSection = "";
             if (hasScreenshots)
             {
-                screenshotSection = await _promptService.RenderAsync("pm/pr-review-screenshots", new Dictionary<string, string>(), ct)
+                screenshotSection = await Core.PromptService!.RenderAsync("pm/pr-review-screenshots", new Dictionary<string, string>(), ct)
                     ?? "3. VISUAL VALIDATION: Screenshots have been posted on this PR. " +
                        "Review them carefully to verify the app renders correctly.\n";
             }
 
-            var systemPrompt = await _promptService.RenderAsync("pm/pr-review-system",
+            var systemPrompt = await Core.PromptService!.RenderAsync("pm/pr-review-system",
                 new Dictionary<string, string> { ["screenshot_section"] = screenshotSection }, ct);
 
             if (systemPrompt is null)
@@ -3423,7 +3374,7 @@ public class ProgramManagerAgent : AgentBase
                 {
                     // No rendered design reference images — still enforce strict visual rules
                     screenshotIntro += "\n## ⚠️ No Design Reference Image Available\n" +
-                        $"No rendered design screenshot was found in `{_projectFiles.DesignScreenshotsPrefix}`. " +
+                        $"No rendered design screenshot was found in `{Core.ProjectFiles.DesignScreenshotsPrefix}`. " +
                         "Apply these strict visual quality rules to the actual screenshot:\n\n" +
                         "**STRICT VISUAL RULES — REQUEST_CHANGES if ANY are violated:**\n" +
                         "- If the actual screenshot is blank, mostly white, or shows only a white page → REQUEST_CHANGES.\n" +
@@ -3475,7 +3426,7 @@ public class ProgramManagerAgent : AgentBase
 
                 history.AddAssistantMessage(result);
                 history.AddUserMessage(
-                    await _promptService.RenderAsync("pm/pr-review-retry", new Dictionary<string, string>(), ct)
+                    await Core.PromptService!.RenderAsync("pm/pr-review-retry", new Dictionary<string, string>(), ct)
                     ?? "That response was not a requirements review. Check the PR against the acceptance criteria.\n" +
                        "Output ONLY a numbered list of unmet requirements, or 'Requirements met' if acceptable.\n" +
                        "End with VERDICT: APPROVE or VERDICT: REQUEST_CHANGES");
@@ -3541,7 +3492,7 @@ public class ProgramManagerAgent : AgentBase
         string? priorReviews,
         CancellationToken ct)
     {
-        var critiqueTier = _config.Agents.CritiqueTier;
+        var critiqueTier = Core.Config.Agents.CritiqueTier;
         if (string.IsNullOrWhiteSpace(critiqueTier))
             return null;
 
@@ -3549,14 +3500,14 @@ public class ProgramManagerAgent : AgentBase
         {
             Logger.LogInformation("Running rubber-duck critique on PR #{Number} using tier {Tier}", pr.Number, critiqueTier);
 
-            var kernel = _modelRegistry.GetKernel(critiqueTier, Identity.Id + "-critique");
+            var kernel = Core.ModelRegistry.GetKernel(critiqueTier, Identity.Id + "-critique");
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
-            var systemPrompt = await _promptService.RenderAsync("pm/critique-system",
+            var systemPrompt = await Core.PromptService!.RenderAsync("pm/critique-system",
                 new Dictionary<string, string>(), ct)
                 ?? "You are an independent code critic. Find problems, challenge assumptions, identify risks.";
 
-            var userPrompt = await _promptService.RenderAsync("pm/critique-user",
+            var userPrompt = await Core.PromptService!.RenderAsync("pm/critique-user",
                 new Dictionary<string, string>
                 {
                     ["pr_number"] = pr.Number.ToString(),
@@ -3709,7 +3660,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designKeywords= new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
             var htmlDesignFiles = tree
@@ -3725,7 +3676,7 @@ public class ProgramManagerAgent : AgentBase
 
             // Also find design screenshots committed by the Researcher
             var designScreenshots = tree
-                .Where(f => f.StartsWith(_projectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
+                .Where(f => f.StartsWith(Core.ProjectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
                             Path.GetExtension(f).Equals(".png", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
@@ -3745,8 +3696,8 @@ public class ProgramManagerAgent : AgentBase
                 foreach (var screenshot in designScreenshots)
                 {
                     var fileName = Path.GetFileNameWithoutExtension(screenshot);
-                    var imageUrl = _platformHost?.GetRawFileUrl(screenshot, EffectiveBranch)
-                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{screenshot}";
+                    var imageUrl = _platform.PlatformHost?.GetRawFileUrl(screenshot, EffectiveBranch)
+                        ?? $"https://raw.githubusercontent.com/{Core.Config.Project.GitHubRepo}/{EffectiveBranch}/{screenshot}";
                     sb.AppendLine($"### {fileName}");
                     sb.AppendLine();
                     sb.AppendLine($"![{fileName} design reference]({imageUrl})");
@@ -3757,7 +3708,7 @@ public class ProgramManagerAgent : AgentBase
             // Include HTML source for detailed CSS/layout reference
             foreach (var file in htmlDesignFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
+                var content = await _platform.RepoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design Source: `{file}`");
@@ -3796,7 +3747,7 @@ public class ProgramManagerAgent : AgentBase
     {
         try
         {
-            var comments = await _reviewService.GetCommentsAsync(prNumber, ct);
+            var comments = await _platform.ReviewService.GetCommentsAsync(prNumber, ct);
 
             // Walk newest-first through TE-authored comments only.
             for (int i = comments.Count - 1; i >= 0; i--)
@@ -3849,9 +3800,9 @@ public class ProgramManagerAgent : AgentBase
         var results = new List<PullRequestWorkflow.ScreenshotImage>();
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designPngs= tree
-                .Where(f => f.StartsWith(_projectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
+                .Where(f => f.StartsWith(Core.ProjectFiles.DesignScreenshotsPrefix, StringComparison.OrdinalIgnoreCase) &&
                             f.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
                 .Take(3) // cap at 3 references to keep token usage sane
                 .ToList();
@@ -3875,8 +3826,8 @@ public class ProgramManagerAgent : AgentBase
                     try
                     {
                         using var http2 = new System.Net.Http.HttpClient { Timeout = TimeSpan.FromSeconds(10) };
-                        var htmlUrl = _platformHost?.GetRawFileUrl(designHtmlFiles[0], EffectiveBranch)
-                            ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{designHtmlFiles[0]}";
+                        var htmlUrl = _platform.PlatformHost?.GetRawFileUrl(designHtmlFiles[0], EffectiveBranch)
+                            ?? $"https://raw.githubusercontent.com/{Core.Config.Project.GitHubRepo}/{EffectiveBranch}/{designHtmlFiles[0]}";
                         var htmlContent = await http2.GetStringAsync(htmlUrl, ct);
                         // Extract key structural elements (cap at 2000 chars to avoid token bloat)
                         var summary = ExtractDesignHtmlSummary(htmlContent, designHtmlFiles[0]);
@@ -3897,8 +3848,8 @@ public class ProgramManagerAgent : AgentBase
             {
                 try
                 {
-                    var url = _platformHost?.GetRawFileUrl(path, EffectiveBranch)
-                        ?? $"https://raw.githubusercontent.com/{_config.Project.GitHubRepo}/{EffectiveBranch}/{path}";
+                    var url = _platform.PlatformHost?.GetRawFileUrl(path, EffectiveBranch)
+                        ?? $"https://raw.githubusercontent.com/{Core.Config.Project.GitHubRepo}/{EffectiveBranch}/{path}";
                     var resp = await http.GetAsync(url, ct);
                     if (!resp.IsSuccessStatusCode) continue;
                     var bytes = await resp.Content.ReadAsByteArrayAsync(ct);

@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Decisions;
+using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform.Capabilities;
@@ -9,11 +10,8 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Agents.Steps;
-using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 
@@ -52,25 +50,10 @@ public class TestEngineerAgent : AgentBase
         string Issue,
         string TestOutput);
 
-    private readonly IMessageBus _messageBus;
-    private readonly IPullRequestService _prService;
-    private readonly IWorkItemService _workItemService;
-    private readonly IRepositoryContentService _repoContent;
-    private readonly IReviewService _reviewService;
-    private readonly PullRequestWorkflow _prWorkflow;
-    private readonly ProjectFileManager _projectFiles;
-    private readonly ModelRegistry _modelRegistry;
-    private readonly AgentSquadConfig _config;
-    private readonly BuildRunner? _buildRunner;
-    private readonly TestRunner? _testRunner;
-    private readonly PlaywrightRunner? _playwrightRunner;
+    private readonly AgentPlatformServices _platform;
+    private readonly AgentWorkspaceServices _workspaceServices;
     private readonly TestStrategyAnalyzer? _testStrategyAnalyzer;
-    private readonly Core.Metrics.BuildTestMetrics? _metrics;
-    private readonly IGateCheckService _gateCheck;
-    private readonly IPromptTemplateService? _promptService;
     private readonly DecisionGateService? _decisionGate;
-    private readonly IAgentTaskTracker _taskTracker;
-    private readonly IRunBranchProvider? _branchProvider;
 
     private LocalWorkspace? _workspace;
     private bool _pendingWorkspaceCleanup;
@@ -104,70 +87,37 @@ public class TestEngineerAgent : AgentBase
 
     public TestEngineerAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        IPullRequestService prService,
-        IWorkItemService workItemService,
-        IRepositoryContentService repoContent,
-        IReviewService reviewService,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        AgentWorkspaceServices workspace,
         ILogger<AgentBase> logger,
-        RoleContextProvider? roleContextProvider = null,
-        BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null,
-        PlaywrightRunner? playwrightRunner = null,
         TestStrategyAnalyzer? testStrategyAnalyzer = null,
-        Core.Metrics.BuildTestMetrics? metrics = null,
-        AgentStateStore? stateStore = null,
-        IPromptTemplateService? promptService = null,
-        DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        DecisionGateService? decisionGate = null)
+        : base(identity, core, logger)
     {
-        _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
-        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
-        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
-        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
-        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
-        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _buildRunner = buildRunner;
-        _testRunner = testRunner;
-        _playwrightRunner = playwrightRunner;
+        _platform = platform ?? throw new ArgumentNullException(nameof(platform));
+        _workspaceServices = workspace ?? throw new ArgumentNullException(nameof(workspace));
         _testStrategyAnalyzer = testStrategyAnalyzer;
-        _metrics = metrics;
-        _stateStore = stateStore;
-        _promptService = promptService;
         _decisionGate = decisionGate;
-        _taskTracker = taskTracker!;
-        _branchProvider = branchProvider;
     }
 
-    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
+    private string EffectiveBranch => _platform.BranchProvider?.EffectiveBranch ?? Core!.Config.Project.DefaultBranch;
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(_messageBus.Subscribe<ChangesRequestedMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<ChangesRequestedMessage>(
             Identity.Id, HandleChangesRequestedAsync));
-        _subscriptions.Add(_messageBus.Subscribe<WorkspaceCleanupMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<WorkspaceCleanupMessage>(
             Identity.Id, HandleWorkspaceCleanupAsync));
 
         // Initialize local workspace if configured
-        if (_config.Workspace.IsEnabled)
+        if (Core.Config.Workspace.IsEnabled)
         {
             try
             {
-                var repoUrl = _config.GetGitCloneUrl();
+                var repoUrl = Core.Config.GetGitCloneUrl();
                 _workspace = new LocalWorkspace(
-                    _config.Workspace,
+                    Core.Config.Workspace,
                     Identity.Id,
                     repoUrl,
                     EffectiveBranch,
@@ -177,11 +127,11 @@ public class TestEngineerAgent : AgentBase
 
                 // Pre-install Playwright browsers so UI tests don't skip during test runs.
                 // This is done once during init — idempotent, ~80MB cached in shared directory.
-                if (_config.Workspace.EnableUITests && _playwrightRunner is not null)
+                if (Core.Config.Workspace.EnableUITests && _workspaceServices.PlaywrightRunner is not null)
                 {
                     try
                     {
-                        await _playwrightRunner.EnsureBrowsersInstalledAsync(_config.Workspace, _workspace.RepoPath, ct);
+                        await _workspaceServices.PlaywrightRunner.EnsureBrowsersInstalledAsync(Core.Config.Workspace, _workspace.RepoPath, ct);
                         Logger.LogInformation("TestEngineer: Playwright browsers ready");
                     }
                     catch (Exception pwEx)
@@ -202,7 +152,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var sessions = await _stateStore.LoadCliSessionsAsync(Identity.Id, ct);
+                var sessions = await Core.StateStore?.LoadCliSessionsAsync(Identity.Id, ct);
                 foreach (var (prNumber, sessionId) in sessions)
                     _prSessionIds[prNumber] = sessionId;
 
@@ -245,7 +195,7 @@ public class TestEngineerAgent : AgentBase
 
     protected override async Task RunAgentLoopAsync(CancellationToken ct)
     {
-        var isInline = _config.Workspace.IsInlineTestWorkflow;
+        var isInline = Core.Config.Workspace.IsInlineTestWorkflow;
         UpdateStatus(AgentStatus.Idle,
             isInline ? "Monitoring PRs for inline test coverage" : "Monitoring merged PRs for test coverage");
 
@@ -275,7 +225,7 @@ public class TestEngineerAgent : AgentBase
                 await RefreshDiagnosticWithMemoryAsync(ct);
 
                 // Poll less frequently than other agents
-                var pollInterval = TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds * 3);
+                var pollInterval = TimeSpan.FromSeconds(Core.Config.Limits.GitHubPollIntervalSeconds * 3);
                 await Task.Delay(pollInterval, ct);
             }
             catch (OperationCanceledException)
@@ -301,7 +251,7 @@ public class TestEngineerAgent : AgentBase
         if (_currentTestPrNumber is null)
             return;
 
-        var pr = await _prService.GetAsync(_currentTestPrNumber.Value, ct);
+        var pr = await _platform.PrService.GetAsync(_currentTestPrNumber.Value, ct);
         if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
         {
             Logger.LogInformation("Test PR #{PrNumber} is no longer open (state: {State}), clearing tracking",
@@ -317,7 +267,7 @@ public class TestEngineerAgent : AgentBase
     /// </summary>
     private async Task ScanMergedPRsForTestingAsync(CancellationToken ct)
     {
-        var mergedPRs = await _prService.ListMergedAsync(ct);
+        var mergedPRs = await _platform.PrService.ListMergedAsync(ct);
 
         foreach (var pr in mergedPRs)
         {
@@ -350,23 +300,23 @@ public class TestEngineerAgent : AgentBase
             }
 
             // AI-based testability assessment for legacy mode
-            var changedFiles = await _prService.GetChangedFilesAsync(pr.Number, ct);
+            var changedFiles = await _platform.PrService.GetChangedFilesAsync(pr.Number, ct);
             
-            var assessStepId = _taskTracker.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
+            var assessStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
                 $"Assessing testability of merged PR #{pr.Number}", Identity.ModelTier);
             Logger.LogInformation("Assessing testability of merged PR #{Number} ({FileCount} files): {Title}",
                 pr.Number, changedFiles.Count, pr.Title);
             var assessment = await AssessTestabilityAsync(pr.ToAgentPR(), changedFiles, ct);
-            _taskTracker.RecordLlmCall(assessStepId);
+            Core.TaskTracker!.RecordLlmCall(assessStepId);
 
             if (!assessment.NeedsTests)
             {
                 Logger.LogInformation("AI assessment: merged PR #{Number} does not need tests — {Rationale}", pr.Number, assessment.Rationale);
                 _testedPRs.Add(pr.Number);
-                _taskTracker.CompleteStep(assessStepId, AgentTaskStepStatus.Skipped);
+                Core.TaskTracker!.CompleteStep(assessStepId, AgentTaskStepStatus.Skipped);
                 continue;
             }
-            _taskTracker.CompleteStep(assessStepId);
+            Core.TaskTracker!.CompleteStep(assessStepId);
 
             _lastTestabilityAssessment = assessment;
             var codeFiles = assessment.TestableFiles;
@@ -378,12 +328,12 @@ public class TestEngineerAgent : AgentBase
 
             try
             {
-                var execStepId = _taskTracker.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Execute tests",
+                var execStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Execute tests",
                     $"Generating and running tests for PR #{pr.Number}", Identity.ModelTier);
                 await GenerateTestsForMergedPRAsync(pr.ToAgentPR(), codeFiles, ct);
                 _testedPRs.Add(pr.Number);
                 _sessionTestedPRs.Add(pr.Number);
-                _taskTracker.CompleteStep(execStepId);
+                Core.TaskTracker!.CompleteStep(execStepId);
             }
             catch (Exception ex)
             {
@@ -408,7 +358,7 @@ public class TestEngineerAgent : AgentBase
         if (_currentTestPrNumber is not null)
             return;
 
-        var openPRs = await _prService.ListOpenAsync(ct);
+        var openPRs = await _platform.PrService.ListOpenAsync(ct);
 
         // Priority: re-test PRs where we previously found source bugs and the engineer may have pushed fixes
         if (_pendingSourceFixPRs.Count > 0)
@@ -431,7 +381,7 @@ public class TestEngineerAgent : AgentBase
                     // Re-fetch changed files and re-test
                     try
                     {
-                        var changedFiles = await _prService.GetChangedFilesAsync(pendingPr.Number, ct);
+                        var changedFiles = await _platform.PrService.GetChangedFilesAsync(pendingPr.Number, ct);
                         // For re-test after source fix, use all changed files — AI assessment already done
                         await AddInlineTestsToPRAsync(pendingPr.ToAgentPR(), changedFiles, ct);
                     }
@@ -466,7 +416,7 @@ public class TestEngineerAgent : AgentBase
             // the PE worker is still pushing rework commits.
             try
             {
-                var comments = await _reviewService.GetCommentsAsync(pr.Number, ct);
+                var comments = await _platform.ReviewService.GetCommentsAsync(pr.Number, ct);
                 var lastPeReviewComment = comments
                     .Where(c => c.Body.Contains("[SoftwareEngineer]", StringComparison.OrdinalIgnoreCase)
                              && (c.Body.Contains("APPROVED", StringComparison.OrdinalIgnoreCase)
@@ -510,7 +460,7 @@ public class TestEngineerAgent : AgentBase
             }
 
             // AI-based testability assessment — examines files, acceptance criteria, and context
-            var changedFiles = await _prService.GetChangedFilesAsync(pr.Number, ct);
+            var changedFiles = await _platform.PrService.GetChangedFilesAsync(pr.Number, ct);
 
             // Skip PRs with 0 changed files — SE may not have pushed code yet.
             // Don't add to _testedPRs so we re-check on the next loop iteration.
@@ -522,26 +472,26 @@ public class TestEngineerAgent : AgentBase
                 continue;
             }
 
-            var inlineAssessStepId = _taskTracker.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
+            var inlineAssessStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
                 $"Assessing testability of PR #{pr.Number}", Identity.ModelTier);
             Logger.LogInformation("Assessing testability of PR #{Number} ({FileCount} changed files): {Title}",
                 pr.Number, changedFiles.Count, pr.Title);
             var assessment = await AssessTestabilityAsync(pr.ToAgentPR(), changedFiles, ct);
-            _taskTracker.RecordLlmCall(inlineAssessStepId);
+            Core.TaskTracker!.RecordLlmCall(inlineAssessStepId);
 
             if (!assessment.NeedsTests)
             {
                 Logger.LogInformation("AI assessment: PR #{Number} does not need tests — {Rationale}", pr.Number, assessment.Rationale);
                 _testedPRs.Add(pr.Number);
                 // Post comment BEFORE label so PM sees test results when it sees the label
-                await _reviewService.AddCommentAsync(pr.Number,
+                await _platform.ReviewService.AddCommentAsync(pr.Number,
                     $"✅ **[TestEngineer] No Tests Needed** — {assessment.Rationale}\n\n" +
                     "Marking as tested to proceed with PM review.", ct);
                 await ApplyTestsAddedLabelAsync(pr.ToAgentPR(), ct);
-                _taskTracker.CompleteStep(inlineAssessStepId, AgentTaskStepStatus.Skipped);
+                Core.TaskTracker!.CompleteStep(inlineAssessStepId, AgentTaskStepStatus.Skipped);
                 continue;
             }
-            _taskTracker.CompleteStep(inlineAssessStepId);
+            Core.TaskTracker!.CompleteStep(inlineAssessStepId);
 
             // Feed the assessment into the test strategy so GenerateTestCodeAsync knows what tiers to write
             _lastTestabilityAssessment = assessment;
@@ -557,18 +507,18 @@ public class TestEngineerAgent : AgentBase
 
             try
             {
-                var inlineExecStepId = _taskTracker.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Execute tests",
+                var inlineExecStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Execute tests",
                     $"Adding inline tests to PR #{pr.Number}", Identity.ModelTier);
                 var testingCompleted = await AddInlineTestsToPRAsync(pr.ToAgentPR(), codeFiles, ct);
                 if (testingCompleted)
                 {
                     _testedPRs.Add(pr.Number);
                     _sessionTestedPRs.Add(pr.Number);
-                    _taskTracker.CompleteStep(inlineExecStepId);
+                    Core.TaskTracker!.CompleteStep(inlineExecStepId);
                 }
                 else
                 {
-                    _taskTracker.SetStepWaiting(inlineExecStepId);
+                    Core.TaskTracker!.SetStepWaiting(inlineExecStepId);
                 }
                 // else: blocked (e.g., base build failed) — don't add to _testedPRs so TE re-checks after rework
             }
@@ -600,7 +550,7 @@ public class TestEngineerAgent : AgentBase
                 // Post a comment so the team knows what happened
                 try
                 {
-                    await _reviewService.AddCommentAsync(pr.Number,
+                    await _platform.ReviewService.AddCommentAsync(pr.Number,
                         $"⚠️ **Test Engineer:** Failed to generate tests for this PR.\n\n" +
                         $"Error: `{ex.Message}`\n\n" +
                         $"The PR can still be reviewed and merged without automated tests.", ct);
@@ -621,7 +571,7 @@ public class TestEngineerAgent : AgentBase
     private async Task<TestabilityAssessment> AssessTestabilityAsync(
         AgentPullRequest pr, IReadOnlyList<string> changedFiles, CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Gather acceptance criteria from linked issue
@@ -631,7 +581,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var issue = await _workItemService.GetAsync(issueNumber.Value, ct);
+                var issue = await _platform.WorkItemService.GetAsync(issueNumber.Value, ct);
                 issueBody = issue?.Body;
             }
             catch (Exception ex)
@@ -647,14 +597,14 @@ public class TestEngineerAgent : AgentBase
             fileList.AppendLine($"- {f} (ext: {Path.GetExtension(f)})");
         }
 
-        var prompt = _promptService is not null
-            ? await _promptService.RenderAsync("test-engineer/testability-assessment", new Dictionary<string, string>
+        var prompt = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("test-engineer/testability-assessment", new Dictionary<string, string>
             {
                 ["pr_title"] = pr.Title,
                 ["pr_description"] = pr.Body ?? "(no description)",
                 ["file_list"] = fileList.ToString(),
                 ["issue_body"] = issueBody ?? "(no linked issue)",
-                ["tech_stack"] = _config.Project.TechStack
+                ["tech_stack"] = Core.Config.Project.TechStack
             }, ct)
             : null;
 
@@ -673,7 +623,7 @@ public class TestEngineerAgent : AgentBase
             {issueBody ?? "(no linked issue)"}
             
             ## Tech Stack
-            {_config.Project.TechStack}
+            {Core.Config.Project.TechStack}
             
             ## Your Task
             Analyze the changed files and acceptance criteria. Determine:
@@ -776,7 +726,7 @@ public class TestEngineerAgent : AgentBase
         {
             UpdateStatus(AgentStatus.Working, $"Adding tests to PR #{pr.Number}");
 
-            if (_workspace is not null && _buildRunner is not null && _testRunner is not null)
+            if (_workspace is not null && _workspaceServices.BuildRunner is not null && _workspaceServices.TestRunner is not null)
                 return await AddInlineTestsViaWorkspaceAsync(pr, codeFilePaths, ct);
             else
             {
@@ -800,7 +750,7 @@ public class TestEngineerAgent : AgentBase
     {
         try
         {
-        var wsConfig = _config.Workspace;
+        var wsConfig = Core.Config.Workspace;
 
         // --- Phase 1: Sync workspace to the PR's branch ---
         LogActivity("testing", "🔍 Checking out PR branch");
@@ -812,7 +762,7 @@ public class TestEngineerAgent : AgentBase
         // If the base code doesn't build, there's no point adding tests to it
         LogActivity("testing", "⏳ Verifying PR base code builds");
         UpdateStatus(AgentStatus.Working, $"Verifying PR #{pr.Number} base build");
-        var baseBuild = await _buildRunner!.BuildAsync(
+        var baseBuild = await _workspaceServices.BuildRunner!.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
         // If root build failed (often MSB1003: no .sln/.csproj at root), try finding the actual project
@@ -827,7 +777,7 @@ public class TestEngineerAgent : AgentBase
             if (buildTarget is not null)
             {
                 Logger.LogInformation("Root build failed quickly — retrying with discovered project: {Target}", buildTarget);
-                baseBuild = await _buildRunner.BuildAsync(
+                baseBuild = await _workspaceServices.BuildRunner.BuildAsync(
                     _workspace.RepoPath, $"dotnet build \"{buildTarget}\"", wsConfig.BuildTimeoutSeconds, ct);
             }
         }
@@ -892,10 +842,10 @@ public class TestEngineerAgent : AgentBase
                   "Please fix build errors first. The Test Engineer will retry when the PR is updated.";
 
             // Use the standard CHANGES REQUESTED pattern so GetPendingChangesRequestedAsync detects this on restart
-            await _prWorkflow.RequestChangesAsync(pr.Number, "TestEngineer", body, ct);
+            await _platform.PrWorkflow.RequestChangesAsync(pr.Number, "TestEngineer", body, ct);
 
             // Notify the author engineer via bus so they wake up and fix the build
-            await _messageBus.PublishAsync(new ChangesRequestedMessage
+            await Core.MessageBus.PublishAsync(new ChangesRequestedMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
@@ -929,7 +879,7 @@ public class TestEngineerAgent : AgentBase
             {
                 try
                 {
-                    var content = await _repoContent.GetFileContentAsync(filePath, pr.HeadBranch, ct);
+                    var content = await _platform.RepoContent.GetFileContentAsync(filePath, pr.HeadBranch, ct);
                     if (!string.IsNullOrWhiteSpace(content))
                         sourceFiles[filePath] = content;
                 }
@@ -980,7 +930,7 @@ public class TestEngineerAgent : AgentBase
         // --- Phase 6: Build test code with AI fix retry loop ---
         LogActivity("testing", "🧪 Building generated test code");
         UpdateStatus(AgentStatus.Working, $"Building tests for PR #{pr.Number}");
-        var buildResult = await _buildRunner.BuildAsync(
+        var buildResult = await _workspaceServices.BuildRunner.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
         if (!buildResult.Success)
@@ -996,7 +946,7 @@ public class TestEngineerAgent : AgentBase
                 "Inline test build failed after {Retries} retries for PR #{Number}",
                 wsConfig.MaxBuildRetries, pr.Number);
             await _workspace.RevertUncommittedChangesAsync(ct);
-            await _reviewService.AddCommentAsync(pr.Number,
+            await _platform.ReviewService.AddCommentAsync(pr.Number,
                 $"❌ **Test Engineer:** Could not make test code compile after " +
                 $"{wsConfig.MaxBuildRetries} attempts. Build errors prevented test addition.\n\n" +
                 $"The PR can still be merged without automated tests.", ct);
@@ -1044,30 +994,30 @@ public class TestEngineerAgent : AgentBase
         if ((wsConfig.UITestsOnly || tierResults.All(r => r.Success)) && wsConfig.EnableUITests)
         {
             var uiCommand = wsConfig.UITestCommand;
-            if (!string.IsNullOrWhiteSpace(uiCommand) && _playwrightRunner is not null)
+            if (!string.IsNullOrWhiteSpace(uiCommand) && _workspaceServices.PlaywrightRunner is not null)
             {
-                if (!_playwrightRunner.IsReady)
+                if (!_workspaceServices.PlaywrightRunner.IsReady)
                 {
                     Logger.LogWarning("TestEngineer: Playwright not ready ({Reason}), skipping UI tests for PR #{Number}",
-                        _playwrightRunner.NotReadyReason, pr.Number);
+                        _workspaceServices.PlaywrightRunner.NotReadyReason, pr.Number);
                     tierResults.Add(new TestResult
                     {
                         Success = false,
-                        Output = $"Playwright not ready: {_playwrightRunner.NotReadyReason}",
+                        Output = $"Playwright not ready: {_workspaceServices.PlaywrightRunner.NotReadyReason}",
                         Passed = 0, Failed = 0, Skipped = 0,
                         Duration = TimeSpan.Zero,
                         Tier = TestTier.UI,
-                        FailureDetails = [$"Playwright not ready: {_playwrightRunner.NotReadyReason}. Health service will retry automatically."]
+                        FailureDetails = [$"Playwright not ready: {_workspaceServices.PlaywrightRunner.NotReadyReason}. Health service will retry automatically."]
                     });
                 }
                 else
                 {
                     try
                     {
-                        await _playwrightRunner.EnsureBrowsersInstalledAsync(_config.Workspace, _workspace!.RepoPath, ct);
+                        await _workspaceServices.PlaywrightRunner.EnsureBrowsersInstalledAsync(Core.Config.Workspace, _workspace!.RepoPath, ct);
 
-                    var uiResult = await _playwrightRunner.RunUITestsAsync(
-                        _workspace.RepoPath, _config.Workspace,
+                    var uiResult = await _workspaceServices.PlaywrightRunner.RunUITestsAsync(
+                        _workspace.RepoPath, Core.Config.Workspace,
                         uiCommand,
                         wsConfig.UITestTimeoutSeconds, ct);
                     tierResults.Add(uiResult);
@@ -1094,7 +1044,7 @@ public class TestEngineerAgent : AgentBase
         _lastClassifiedSourceBugs = new(); // consume
         if (sourceBugs.Count > 0)
         {
-            var maxRounds = _config.Limits?.MaxSourceBugRounds ?? 2;
+            var maxRounds = Core.Config.Limits?.MaxSourceBugRounds ?? 2;
             _pendingSourceFixPRs.TryGetValue(pr.Number, out var roundsSoFar);
 
             if (roundsSoFar < maxRounds)
@@ -1118,7 +1068,7 @@ public class TestEngineerAgent : AgentBase
                 }
 
                 // === Gate: SourceBugEscalation — human reviews before escalating source bug ===
-                await _gateCheck.WaitForGateAsync(
+                await Core.GateCheck.WaitForGateAsync(
                     GateIds.SourceBugEscalation,
                     $"TE found source bugs in PR #{pr.Number}, requesting engineer fix",
                     pr.Number, ct: ct);
@@ -1140,7 +1090,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // --- Phase 8: Pre-push safety check — is the PR still open? ---
-        var currentPr = await _prService.GetAsync(pr.Number, ct);
+        var currentPr = await _platform.PrService.GetAsync(pr.Number, ct);
         if (currentPr is null || !string.Equals(currentPr.State, "open", StringComparison.OrdinalIgnoreCase))
         {
             Logger.LogWarning("PR #{Number} is no longer open (state: {State}), discarding test work",
@@ -1228,7 +1178,7 @@ public class TestEngineerAgent : AgentBase
                 pr.Number);
             try
             {
-                await _reviewService.AddCommentAsync(pr.Number,
+                await _platform.ReviewService.AddCommentAsync(pr.Number,
                     $"❌ **Test Engineer:** Encountered an internal error while adding tests. " +
                     $"Error: {ex.GetType().Name}: {ex.Message}\n\n" +
                     "The PR can still be merged without automated tests.", ct);
@@ -1256,7 +1206,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var content = await _repoContent.GetFileContentAsync(filePath, pr.HeadBranch, ct);
+                var content = await _platform.RepoContent.GetFileContentAsync(filePath, pr.HeadBranch, ct);
                 if (!string.IsNullOrWhiteSpace(content))
                     sourceFiles[filePath] = content;
             }
@@ -1284,7 +1234,7 @@ public class TestEngineerAgent : AgentBase
 
         // Batch commit all test files to the PR's branch
         var fileTuples = testFiles.Select(f => new PlatformFileCommit { Path = f.Path, Content = f.Content }).ToList();
-        await _repoContent.BatchCommitFilesAsync(
+        await _platform.RepoContent.BatchCommitFilesAsync(
             fileTuples,
             $"test: add {testFiles.Count} test files for PR #{pr.Number}",
             pr.HeadBranch, ct);
@@ -1306,13 +1256,13 @@ public class TestEngineerAgent : AgentBase
         WorkspaceConfig wsConfig,
         CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // First try auto-restoring missing packages (cheap — no AI call needed)
         if (await TryAutoRestoreMissingPackagesAsync(buildResult, ct))
         {
-            buildResult = await _buildRunner!.BuildAsync(
+            buildResult = await _workspaceServices.BuildRunner!.BuildAsync(
                 _workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             if (buildResult.Success) return buildResult;
         }
@@ -1342,8 +1292,8 @@ public class TestEngineerAgent : AgentBase
             var testFilesContext = string.Join("\n", testFiles.Select(f =>
                 $"### {f.Path}\n```\n{(f.Content.Length > 1500 ? f.Content[..1500] + "\n// ... truncated" : f.Content)}\n```"));
 
-            var fixSysMsg = _promptService is not null
-                ? await _promptService.RenderAsync("test-engineer/build-fix-inline-system", new Dictionary<string, string>
+            var fixSysMsg = Core.PromptService is not null
+                ? await Core.PromptService?.RenderAsync("test-engineer/build-fix-inline-system", new Dictionary<string, string>
                 {
                     ["project_context"] = projectCtx
                 }, ct)
@@ -1363,8 +1313,8 @@ public class TestEngineerAgent : AgentBase
                 "Output ONLY corrected files using:\nFILE: path/to/file.ext\n```language\n<content>\n```";
             fixHistory.AddSystemMessage(fixSysMsg);
 
-            var fixUserMsg = _promptService is not null
-                ? await _promptService.RenderAsync("test-engineer/build-fix-inline-user", new Dictionary<string, string>
+            var fixUserMsg = Core.PromptService is not null
+                ? await Core.PromptService?.RenderAsync("test-engineer/build-fix-inline-user", new Dictionary<string, string>
                 {
                     ["attempt_number"] = (attempt + 1).ToString(),
                     ["max_retries"] = wsConfig.MaxBuildRetries.ToString(),
@@ -1394,7 +1344,7 @@ public class TestEngineerAgent : AgentBase
             foreach (var file in fixedFiles)
                 await _workspace!.WriteFileAsync(file.Path, file.Content, ct);
 
-            buildResult = await _buildRunner!.BuildAsync(
+            buildResult = await _workspaceServices.BuildRunner!.BuildAsync(
                 _workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
         }
 
@@ -1504,7 +1454,7 @@ public class TestEngineerAgent : AgentBase
     private async Task ApplyTestsAddedLabelAsync(AgentPullRequest pr, CancellationToken ct)
     {
         // === Gate: TestResults — human reviews test results before proceeding ===
-        await _gateCheck.WaitForGateAsync(
+        await Core.GateCheck.WaitForGateAsync(
             GateIds.TestResults,
             $"Tests completed on PR #{pr.Number}, results ready for human review",
             pr.Number, ct: ct);
@@ -1512,7 +1462,7 @@ public class TestEngineerAgent : AgentBase
         try
         {
             // Use AddLabelAsync to re-fetch fresh labels, avoiding race conditions
-            await _prService.AddLabelAsync(pr.Number, PullRequestWorkflow.Labels.TestsAdded, ct);
+            await _platform.PrService.AddLabelAsync(pr.Number, PullRequestWorkflow.Labels.TestsAdded, ct);
         }
         catch (Exception ex)
         {
@@ -1552,7 +1502,7 @@ public class TestEngineerAgent : AgentBase
         catch (Exception ex)
         {
             Logger.LogError(ex, "PR #{Number}: Fresh clone push also failed — giving up", pr.Number);
-            await _reviewService.AddCommentAsync(pr.Number,
+            await _platform.ReviewService.AddCommentAsync(pr.Number,
                 "⚠️ **Test Engineer:** Could not push tests after multiple retries (including fresh clone). " +
                 "Will retry on next cycle.", ct);
             _testedPRs.Remove(pr.Number);
@@ -1667,8 +1617,8 @@ public class TestEngineerAgent : AgentBase
         }
 
         // Fallback: if no screenshots were captured from tests, try a standalone screenshot
-        if (!hasUploadedScreenshots && _playwrightRunner is not null && _workspace is not null
-            && _config.Workspace.CaptureScreenshots)
+        if (!hasUploadedScreenshots && _workspaceServices.PlaywrightRunner is not null && _workspace is not null
+            && Core.Config.Workspace.CaptureScreenshots)
         {
             try
             {
@@ -1700,14 +1650,14 @@ public class TestEngineerAgent : AgentBase
 
                 Logger.LogInformation("No test screenshots found — attempting standalone screenshot capture for PR #{PrNumber}", pr.Number);
                 LogActivity("screenshot", $"📸 Attempting standalone screenshot capture for PR #{pr.Number}");
-                var screenshotBytes = await _playwrightRunner.CaptureAppScreenshotAsync(
-                    _workspace.RepoPath, _config.Workspace, ct);
+                var screenshotBytes = await _workspaceServices.PlaywrightRunner.CaptureAppScreenshotAsync(
+                    _workspace.RepoPath, Core.Config.Workspace, ct);
 
                 if (screenshotBytes is { Length: > 0 })
                 {
                     var fileName = $"pr-{pr.Number}-app-preview.png";
                     var repoPath = $"test-results/screenshots/{fileName}";
-                    var imageUrl = await _repoContent.CommitBinaryFileAsync(
+                    var imageUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                         repoPath, screenshotBytes,
                         $"📸 App screenshot for PR #{pr.Number}", pr.HeadBranch, ct);
 
@@ -1725,7 +1675,7 @@ public class TestEngineerAgent : AgentBase
                         // AI-describe the screenshot for dashboard visibility
                         try
                         {
-                            var descKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                            var descKernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                             var descChat = descKernel.GetRequiredService<Microsoft.SemanticKernel.ChatCompletion.IChatCompletionService>();
                             var img = new PullRequestWorkflow.ScreenshotImage(screenshotBytes, "image/png",
                                 $"TE screenshot PR #{pr.Number}", imageUrl);
@@ -1765,7 +1715,7 @@ public class TestEngineerAgent : AgentBase
         }
 
         // === Gate: TestScreenshots — human reviews screenshots before proceeding ===
-        await _gateCheck.WaitForGateAsync(
+        await Core.GateCheck.WaitForGateAsync(
             GateIds.TestScreenshots,
             $"Screenshots captured for PR #{pr.Number}, ready for human review",
             pr.Number, ct: ct);
@@ -1780,7 +1730,7 @@ public class TestEngineerAgent : AgentBase
 
         try
         {
-            await _reviewService.AddCommentAsync(pr.Number, sb.ToString(), ct);
+            await _platform.ReviewService.AddCommentAsync(pr.Number, sb.ToString(), ct);
         }
         catch (Exception ex)
         {
@@ -1844,7 +1794,7 @@ public class TestEngineerAgent : AgentBase
                 var bytes = await File.ReadAllBytesAsync(path, ct);
                 var fileName = Path.GetFileName(path);
                 var repoPath = $"test-results/screenshots/{fileName}";
-                var imageUrl = await _repoContent.CommitBinaryFileAsync(
+                var imageUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                     repoPath, bytes, $"test-artifact: {fileName}", pr.HeadBranch, ct);
                 if (imageUrl is not null)
                 {
@@ -1873,7 +1823,7 @@ public class TestEngineerAgent : AgentBase
                 }
                 var fileName = Path.GetFileName(path);
                 var repoPath = $"test-results/videos/{fileName}";
-                var videoUrl = await _repoContent.CommitBinaryFileAsync(
+                var videoUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                     repoPath, bytes, $"test-artifact: {fileName}", pr.HeadBranch, ct);
                 if (videoUrl is not null)
                     sb.AppendLine($"- 🎥 [{fileName}]({videoUrl}) ({bytes.Length / 1024}KB)");
@@ -1898,7 +1848,7 @@ public class TestEngineerAgent : AgentBase
                 }
                 var fileName = Path.GetFileName(path);
                 var repoPath = $"test-results/traces/{fileName}";
-                var traceUrl = await _repoContent.CommitBinaryFileAsync(
+                var traceUrl = await _platform.RepoContent.CommitBinaryFileAsync(
                     repoPath, bytes, $"test-artifact: {fileName}", pr.HeadBranch, ct);
                 if (traceUrl is not null)
                     sb.AppendLine($"- 📋 [{fileName}]({traceUrl}) — [View in Trace Viewer](https://trace.playwright.dev)");
@@ -1923,14 +1873,14 @@ public class TestEngineerAgent : AgentBase
         if (_currentTestPrNumber is not null || !_reworkQueue.IsEmpty)
             return;
 
-        var isInline = _config.Workspace.IsInlineTestWorkflow;
+        var isInline = Core.Config.Workspace.IsInlineTestWorkflow;
         var untestedCodePRs = 0;
         var alreadyTestedPRs = 0; // PRs that have tests-added/tested label (e.g. SE ran tests itself)
 
         if (isInline)
         {
             // Inline mode: check open PRs that have been reviewed (architect or PM approved)
-            var openPRs = await _prService.ListOpenAsync(ct);
+            var openPRs = await _platform.PrService.ListOpenAsync(ct);
             foreach (var pr in openPRs)
             {
                 // Count PRs that have been through at least one review gate
@@ -1961,7 +1911,7 @@ public class TestEngineerAgent : AgentBase
         else
         {
             // Legacy mode: check merged PRs
-            var mergedPRs = await _prService.ListMergedAsync(ct);
+            var mergedPRs = await _platform.PrService.ListMergedAsync(ct);
             foreach (var pr in mergedPRs)
             {
                 if (pr.MergedAt.HasValue && pr.MergedAt.Value < _sessionStartUtc) continue;
@@ -2015,7 +1965,7 @@ public class TestEngineerAgent : AgentBase
         {
             try
             {
-                var content = await _repoContent.GetFileContentAsync(filePath, EffectiveBranch, ct);
+                var content = await _platform.RepoContent.GetFileContentAsync(filePath, EffectiveBranch, ct);
                 if (!string.IsNullOrWhiteSpace(content))
                     sourceFiles[filePath] = content;
             }
@@ -2081,14 +2031,14 @@ public class TestEngineerAgent : AgentBase
         // Apply "tested" label to the source PR so we don't re-process it on restart
         try
         {
-            var sourcePrData = await _prService.GetAsync(pr.Number, ct);
+            var sourcePrData = await _platform.PrService.GetAsync(pr.Number, ct);
             if (sourcePrData is not null)
             {
                 var updatedLabels = sourcePrData.Labels
                     .Append(TestedLabel)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();
-                await _prService.UpdateAsync(pr.Number, labels: updatedLabels, ct: ct);
+                await _platform.PrService.UpdateAsync(pr.Number, labels: updatedLabels, ct: ct);
             }
         }
         catch (Exception ex)
@@ -2100,9 +2050,9 @@ public class TestEngineerAgent : AgentBase
         await SyncBranchWithMainAsync(testPrNumber, ct);
 
         // Mark test PR ready-for-review and request PE review
-        await _prWorkflow.MarkReadyForReviewAsync(testPrNumber, Identity.DisplayName, ct);
+        await _platform.PrWorkflow.MarkReadyForReviewAsync(testPrNumber, Identity.DisplayName, ct);
 
-        await _messageBus.PublishAsync(new ReviewRequestMessage
+        await Core.MessageBus.PublishAsync(new ReviewRequestMessage
         {
             FromAgentId = Identity.Id,
             ToAgentId = "*",
@@ -2126,9 +2076,9 @@ public class TestEngineerAgent : AgentBase
         AgentPullRequest pr, Dictionary<string, string> sourceFiles,
         Dictionary<string, string> existingTests, CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
-        var techStack = _config.Project.TechStack;
+        var techStack = Core.Config.Project.TechStack;
 
         // Gather business context: linked issue, PMSpec, Architecture
         var businessContext = await GatherBusinessContextAsync(pr, ct);
@@ -2193,7 +2143,7 @@ public class TestEngineerAgent : AgentBase
         var allOutputs = new System.Text.StringBuilder();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
 
-        var useSinglePass = _config.CopilotCli.SinglePassMode;
+        var useSinglePass = Core.Config.CopilotCli.SinglePassMode;
 
         // Use AI testability assessment if available (from ScanApprovedPRsForInlineTestingAsync)
         // This overrides both the heuristic TestStrategyAnalyzer and UITestsOnly config
@@ -2210,7 +2160,7 @@ public class TestEngineerAgent : AgentBase
                 pr.Number, strategy.NeedsUnitTests, strategy.NeedsIntegrationTests, strategy.NeedsUITests);
             _lastTestabilityAssessment = null; // Consume it
         }
-        else if (_config.Workspace.UITestsOnly)
+        else if (Core.Config.Workspace.UITestsOnly)
         {
             // Legacy fallback: When UITestsOnly, override strategy to skip unit/integration generation
             strategy = strategy with { NeedsUnitTests = false, NeedsIntegrationTests = false, NeedsUITests = true };
@@ -2223,7 +2173,7 @@ public class TestEngineerAgent : AgentBase
             var tiers = new List<string>();
             if (strategy.NeedsUnitTests) tiers.Add("Unit");
             if (strategy.NeedsIntegrationTests) tiers.Add("Integration");
-            if (strategy.NeedsUITests && _config.Workspace.EnableUITests) tiers.Add("UI/E2E (Playwright)");
+            if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests) tiers.Add("UI/E2E (Playwright)");
 
             UpdateStatus(AgentStatus.Working, $"Generating all tests ({string.Join("+", tiers)}) for PR #{pr.Number}");
             Logger.LogInformation("TE single-pass: generating {Tiers} tests in one prompt for PR #{Number}",
@@ -2248,7 +2198,7 @@ public class TestEngineerAgent : AgentBase
                 tierGuidanceBuilder.AppendLine("- Add [Trait(\"Category\", \"Integration\")] attribute. Place in tests/{ProjectName}.Tests/Integration/");
                 tierGuidanceBuilder.AppendLine("- Test error handling and validation at API boundaries.\n");
             }
-            if (strategy.NeedsUITests && _config.Workspace.EnableUITests)
+            if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests)
             {
                 tierGuidanceBuilder.AppendLine("## Tier 3: UI/E2E TESTS (Playwright)");
                 tierGuidanceBuilder.AppendLine("- Use Microsoft.Playwright for browser automation with Page Object Model.");
@@ -2268,8 +2218,8 @@ public class TestEngineerAgent : AgentBase
 
             var blazorGuidanceForSinglePass = IsBlazorProject() ? GetBlazorTestGuidance() : "";
 
-            var singlePassSysMsg = _promptService is not null
-                ? await _promptService.RenderAsync("test-engineer/single-pass-system", new Dictionary<string, string>
+            var singlePassSysMsg = Core.PromptService is not null
+                ? await Core.PromptService?.RenderAsync("test-engineer/single-pass-system", new Dictionary<string, string>
                 {
                     ["tech_stack"] = techStack,
                     ["tier_guidance"] = tierGuidanceBuilder.ToString(),
@@ -2327,7 +2277,7 @@ public class TestEngineerAgent : AgentBase
             userPrompt.AppendLine(sourceContext.ToString());
             userPrompt.AppendLine(existingTestContext);
 
-            if (strategy.NeedsUITests && _config.Workspace.EnableUITests && strategy.UITestScenarios.Count > 0)
+            if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests && strategy.UITestScenarios.Count > 0)
             {
                 userPrompt.AppendLine("## UI Test Scenarios to Cover");
                 foreach (var scenario in strategy.UITestScenarios)
@@ -2335,7 +2285,7 @@ public class TestEngineerAgent : AgentBase
                 userPrompt.AppendLine();
             }
 
-            if (strategy.NeedsUITests && _config.Workspace.EnableUITests)
+            if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests)
             {
                 var designCtx = await ReadDesignReferencesForTestsAsync(ct);
                 if (!string.IsNullOrWhiteSpace(designCtx))
@@ -2349,7 +2299,7 @@ public class TestEngineerAgent : AgentBase
             // Scale test count to PR complexity using configurable cap
             var totalSourceLines = sourceFiles.Values.Sum(c => c.Split('\n').Length);
             var fileCount = sourceFiles.Count;
-            var maxTests = _config.Workspace.MaxTestsPerTier;
+            var maxTests = Core.Config.Workspace.MaxTestsPerTier;
 
             userPrompt.AppendLine($"## Test Scope Guidance");
             userPrompt.AppendLine($"This PR has {fileCount} source file(s) with ~{totalSourceLines} lines.");
@@ -2392,7 +2342,7 @@ public class TestEngineerAgent : AgentBase
             }
 
             // Generate UI tests with Playwright (when UI components changed)
-            if (strategy.NeedsUITests && _config.Workspace.EnableUITests)
+            if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests)
             {
                 UpdateStatus(AgentStatus.Working, $"Generating UI/Playwright tests for PR #{pr.Number}");
                 var uiOutput = await GenerateTestsForTierAsync(
@@ -2405,7 +2355,7 @@ public class TestEngineerAgent : AgentBase
 
         Logger.LogInformation("Generated tests for PR #{Number}: Unit={Unit}, Integration={Integration}, UI={UI}, ExistingTests={Existing}",
             pr.Number, strategy.NeedsUnitTests, strategy.NeedsIntegrationTests,
-            strategy.NeedsUITests && _config.Workspace.EnableUITests, existingTests.Count);
+            strategy.NeedsUITests && Core.Config.Workspace.EnableUITests, existingTests.Count);
 
         return allOutputs.ToString();
     }
@@ -2456,7 +2406,7 @@ public class TestEngineerAgent : AgentBase
             }
         }
 
-        userPrompt.AppendLine(GetTierUserSuffix(tier, techStack, _config.Workspace.MaxTestsPerTier));
+        userPrompt.AppendLine(GetTierUserSuffix(tier, techStack, Core.Config.Workspace.MaxTestsPerTier));
         history.AddUserMessage(userPrompt.ToString());
 
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
@@ -2479,8 +2429,8 @@ public class TestEngineerAgent : AgentBase
             TestTier.UI => "test-engineer/tier-ui-guidance",
             _ => null
         };
-        var tierGuidance = tierTemplateName is not null && _promptService is not null
-            ? _promptService.RenderAsync(tierTemplateName, new Dictionary<string, string>(), default).GetAwaiter().GetResult()
+        var tierGuidance = tierTemplateName is not null && Core.PromptService is not null
+            ? Core.PromptService?.RenderAsync(tierTemplateName, new Dictionary<string, string>(), default).GetAwaiter().GetResult()
             : null;
 
         tierGuidance ??= tier switch
@@ -2570,9 +2520,9 @@ public class TestEngineerAgent : AgentBase
         };
 
         // Try rendering the full tier-system-base template
-        if (_promptService is not null)
+        if (Core.PromptService is not null)
         {
-            var rendered = _promptService.RenderAsync("test-engineer/tier-system-base", new Dictionary<string, string>
+            var rendered = Core.PromptService?.RenderAsync("test-engineer/tier-system-base", new Dictionary<string, string>
             {
                 ["tech_stack"] = techStack,
                 ["blazor_guidance"] = blazorGuidance,
@@ -2641,9 +2591,9 @@ public class TestEngineerAgent : AgentBase
                 projectName = Path.GetFileNameWithoutExtension(csproj);
         }
 
-        if (_promptService is not null)
+        if (Core.PromptService is not null)
         {
-            var rendered = _promptService.RenderAsync("test-engineer/blazor-test-guidance", new Dictionary<string, string>
+            var rendered = Core.PromptService?.RenderAsync("test-engineer/blazor-test-guidance", new Dictionary<string, string>
             {
                 ["project_name"] = projectName
             }, default).GetAwaiter().GetResult();
@@ -3074,7 +3024,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
         try
         {
-            var issue = await _workItemService.GetAsync(issueNumber.Value, ct);
+            var issue = await _platform.WorkItemService.GetAsync(issueNumber.Value, ct);
             return issue?.Body;
         }
         catch
@@ -3097,7 +3047,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         {
             try
             {
-                var issue = await _workItemService.GetAsync(issueNumber.Value, ct);
+                var issue = await _platform.WorkItemService.GetAsync(issueNumber.Value, ct);
                 if (issue is not null)
                 {
                     context.AppendLine("## Linked Issue (User Story & Acceptance Criteria)");
@@ -3116,7 +3066,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         // 2. Read PMSpec.md for business requirements
         try
         {
-            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
             if (!string.IsNullOrWhiteSpace(pmSpec))
             {
                 // Truncate to keep token budget reasonable
@@ -3136,7 +3086,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         // 3. Read Architecture.md for technical patterns and constraints
         try
         {
-            var archDoc = await _projectFiles.GetArchitectureDocAsync(ct);
+            var archDoc = await Core.ProjectFiles.GetArchitectureDocAsync(ct);
             if (!string.IsNullOrWhiteSpace(archDoc))
             {
                 var truncated = archDoc.Length > 4000
@@ -3300,7 +3250,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         var existingTests = new Dictionary<string, string>();
         try
         {
-            var repoTree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var repoTree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
 
             // Build a set of source file names (without extension) to match against test files
             var sourceNames = sourceFilePaths
@@ -3336,7 +3286,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             {
                 try
                 {
-                    var content = await _repoContent.GetFileContentAsync(testPath, EffectiveBranch, ct);
+                    var content = await _platform.RepoContent.GetFileContentAsync(testPath, EffectiveBranch, ct);
                     if (!string.IsNullOrWhiteSpace(content))
                         existingTests[testPath] = content;
                 }
@@ -3371,10 +3321,10 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     {
         var taskSlug = $"{sourcePR.Number}-tests";
         // Use centralized branch naming (includes run scope for multi-user safety)
-        var branchName = await _prWorkflow.CreateTaskBranchAsync(Identity.DisplayName, taskSlug, ct);
+        var branchName = await _platform.PrWorkflow.CreateTaskBranchAsync(Identity.DisplayName, taskSlug, ct);
 
         // Local workspace mode: write → build → test → push
-        if (_workspace is not null && _buildRunner is not null && _testRunner is not null)
+        if (_workspace is not null && _workspaceServices.BuildRunner is not null && _workspaceServices.TestRunner is not null)
         {
             return await CreateTestPRViaLocalWorkspaceAsync(sourcePR, testFiles, branchName, ct);
         }
@@ -3384,7 +3334,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         // Commit all test files to the branch
         foreach (var file in testFiles)
         {
-            await _repoContent.CreateOrUpdateFileAsync(
+            await _platform.RepoContent.CreateOrUpdateFileAsync(
                 file.Path,
                 file.Content,
                 $"test: add {Path.GetFileName(file.Path)} for PR #{sourcePR.Number}",
@@ -3405,7 +3355,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         string branchName,
         CancellationToken ct)
     {
-        var wsConfig = _config.Workspace;
+        var wsConfig = Core.Config.Workspace;
 
         // Sync and create branch
         await _workspace!.SyncWithMainAsync(ct);
@@ -3428,12 +3378,12 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         // If UI tests are enabled and this is a UI project, we will guarantee ≥1 smoke test exists —
         // either because AI already produced one, or we inject a minimal one below. This prevents
         // the "UI Tests: 0 passed, 0 failed, 0 skipped" outcome on scaffold PRs.
-        var shouldGuaranteeUiTest = _playwrightRunner is not null
+        var shouldGuaranteeUiTest = _workspaceServices.PlaywrightRunner is not null
             && wsConfig.EnableUITests
             && wsConfig.UITestCommand is not null
             && hasUiSurface;
 
-        if ((hasUITests || shouldGuaranteeUiTest) && _playwrightRunner is not null && wsConfig.EnableUITests)
+        if ((hasUITests || shouldGuaranteeUiTest) && _workspaceServices.PlaywrightRunner is not null && wsConfig.EnableUITests)
         {
             var uiTestDir = Path.Combine(_workspace.RepoPath, "tests");
             var existingPlaywright = Directory.Exists(uiTestDir) &&
@@ -3471,7 +3421,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         await AddTestProjectsToSolutionAsync(testFiles, ct);
 
         // Build to verify test files compile
-        var buildResult = await _buildRunner!.BuildAsync(
+        var buildResult = await _workspaceServices.BuildRunner!.BuildAsync(
             _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
 
         if (!buildResult.Success)
@@ -3479,7 +3429,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             // First try auto-restoring missing packages (cheap — no AI call needed)
             if (await TryAutoRestoreMissingPackagesAsync(buildResult, ct))
             {
-                buildResult = await _buildRunner.BuildAsync(
+                buildResult = await _workspaceServices.BuildRunner.BuildAsync(
                     _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             }
         }
@@ -3490,7 +3440,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 buildResult.ParsedErrors.Count > 0
                     ? string.Join("; ", buildResult.ParsedErrors.Take(5))
                     : buildResult.Errors[..Math.Min(500, buildResult.Errors.Length)]);
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             for (int attempt = 0; attempt < wsConfig.MaxBuildRetries && !buildResult.Success; attempt++)
@@ -3502,8 +3452,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 // Include project context so AI can properly fix structural issues
                 var fixHistory = CreateChatHistory();
 
-                var wsBuildFixSys = _promptService is not null
-                    ? await _promptService.RenderAsync("test-engineer/workspace-build-fix-system", new Dictionary<string, string>
+                var wsBuildFixSys = Core.PromptService is not null
+                    ? await Core.PromptService?.RenderAsync("test-engineer/workspace-build-fix-system", new Dictionary<string, string>
                     {
                         ["blazor_guidance"] = IsBlazorProject() ? GetBlazorTestGuidance() : ""
                     }, ct)
@@ -3522,8 +3472,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 fixHistory.AddSystemMessage(wsBuildFixSys);
 
                 var testFileList = string.Join("\n", testFiles.Select(f => $"- {f.Path}"));
-                var wsBuildFixUser = _promptService is not null
-                    ? await _promptService.RenderAsync("test-engineer/workspace-build-fix-user", new Dictionary<string, string>
+                var wsBuildFixUser = Core.PromptService is not null
+                    ? await Core.PromptService?.RenderAsync("test-engineer/workspace-build-fix-user", new Dictionary<string, string>
                     {
                         ["attempt_number"] = (attempt + 1).ToString(),
                         ["max_retries"] = wsConfig.MaxBuildRetries.ToString(),
@@ -3552,7 +3502,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     .Concat(fixedFiles)
                     .ToList();
 
-                buildResult = await _buildRunner.BuildAsync(
+                buildResult = await _workspaceServices.BuildRunner.BuildAsync(
                     _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             }
         }
@@ -3586,20 +3536,20 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
             // Tier 3: UI tests with Playwright (only if earlier tiers passed)
             var allPriorPassed = tierResults.All(r => r.Success);
-            if (allPriorPassed && wsConfig.EnableUITests && _playwrightRunner is not null && wsConfig.UITestCommand is not null)
+            if (allPriorPassed && wsConfig.EnableUITests && _workspaceServices.PlaywrightRunner is not null && wsConfig.UITestCommand is not null)
             {
-                if (!_playwrightRunner.IsReady)
+                if (!_workspaceServices.PlaywrightRunner.IsReady)
                 {
                     Logger.LogWarning("TestEngineer: Playwright not ready ({Reason}), skipping UI tests",
-                        _playwrightRunner.NotReadyReason);
+                        _workspaceServices.PlaywrightRunner.NotReadyReason);
                     tierResults.Add(new TestResult
                     {
                         Success = false,
-                        Output = $"Playwright not ready: {_playwrightRunner.NotReadyReason}",
+                        Output = $"Playwright not ready: {_workspaceServices.PlaywrightRunner.NotReadyReason}",
                         Passed = 0, Failed = 0, Skipped = 0,
                         Duration = TimeSpan.Zero,
                         Tier = TestTier.UI,
-                        FailureDetails = [$"Playwright not ready: {_playwrightRunner.NotReadyReason}. Health service will retry automatically."]
+                        FailureDetails = [$"Playwright not ready: {_workspaceServices.PlaywrightRunner.NotReadyReason}. Health service will retry automatically."]
                     });
                 }
                 else
@@ -3607,9 +3557,9 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 try
                 {
                     // Ensure Playwright browsers are installed
-                    await _playwrightRunner.EnsureBrowsersInstalledAsync(wsConfig, _workspace.RepoPath, ct);
+                    await _workspaceServices.PlaywrightRunner.EnsureBrowsersInstalledAsync(wsConfig, _workspace.RepoPath, ct);
 
-                    var uiResult = await _playwrightRunner.RunUITestsAsync(
+                    var uiResult = await _workspaceServices.PlaywrightRunner.RunUITestsAsync(
                         _workspace.RepoPath, wsConfig,
                         wsConfig.UITestCommand,
                         wsConfig.UITestTimeoutSeconds, ct);
@@ -3646,7 +3596,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             await _workspace.RevertUncommittedChangesAsync(ct);
             try
             {
-                await _reviewService.AddCommentAsync(sourcePR.Number,
+                await _platform.ReviewService.AddCommentAsync(sourcePR.Number,
                     $"❌ **Test Build Blocked:** Test files for PR #{sourcePR.Number} could not be made to compile after " +
                     $"{wsConfig.MaxBuildRetries} fix attempts. Tests were not committed.", ct);
             }
@@ -3690,7 +3640,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             ["PLAYWRIGHT_BROWSERS_PATH"] = wsConfig.GetPlaywrightBrowsersPath()
         };
 
-        var testResult = await _testRunner!.RunTestsAsync(
+        var testResult = await _workspaceServices.TestRunner!.RunTestsAsync(
             _workspace!.RepoPath, testCommand, timeoutSeconds, ct, envVars);
         testResult = testResult with { Tier = tier };
 
@@ -3699,7 +3649,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             Logger.LogWarning("TestEngineer: {Tier} tests failed ({Failed} of {Total}), attempting AI fix",
                 tier, testResult.Failed, testResult.Total);
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             for (int attempt = 0; attempt < wsConfig.MaxTestRetries && !testResult.Success; attempt++)
@@ -3710,8 +3660,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
                 var fixHistory = CreateChatHistory();
 
-                var testFixMsg = _promptService is not null
-                    ? await _promptService.RenderAsync("test-engineer/test-fix-user", new Dictionary<string, string>
+                var testFixMsg = Core.PromptService is not null
+                    ? await Core.PromptService?.RenderAsync("test-engineer/test-fix-user", new Dictionary<string, string>
                     {
                         ["tier"] = tier.ToString(),
                         ["failed_count"] = testResult.Failed.ToString(),
@@ -3732,7 +3682,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     await _workspace.WriteFileAsync(file.Path, file.Content, ct);
 
                 // Rebuild + retest
-                var rebuildResult = await _buildRunner!.BuildAsync(
+                var rebuildResult = await _workspaceServices.BuildRunner!.BuildAsync(
                     _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
                 if (!rebuildResult.Success)
                 {
@@ -3741,7 +3691,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     continue;
                 }
 
-                testResult = await _testRunner.RunTestsAsync(
+                testResult = await _workspaceServices.TestRunner.RunTestsAsync(
                     _workspace.RepoPath, testCommand, timeoutSeconds, ct, envVars);
                 testResult = testResult with { Tier = tier };
             }
@@ -3806,7 +3756,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         Dictionary<string, string> sourceFiles,
         CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var failureSummary = failingResult.FailureDetails.Count > 0
@@ -3818,8 +3768,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
         var history = CreateChatHistory();
 
-        var classifySys = _promptService is not null
-            ? await _promptService.RenderAsync("test-engineer/classify-failures-system", new Dictionary<string, string>(), ct)
+        var classifySys = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("test-engineer/classify-failures-system", new Dictionary<string, string>(), ct)
             : null;
         classifySys ??=
             "You are an expert test engineer classifying test failures. " +
@@ -3835,8 +3785,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             "and the source code clearly has a defect.";
         history.AddSystemMessage(classifySys);
 
-        var classifyUser = _promptService is not null
-            ? await _promptService.RenderAsync("test-engineer/classify-failures-user", new Dictionary<string, string>
+        var classifyUser = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("test-engineer/classify-failures-user", new Dictionary<string, string>
             {
                 ["failure_summary"] = failureSummary,
                 ["source_context"] = sourceContext
@@ -3912,10 +3862,10 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             $"Please fix these issues. The Test Engineer will re-run tests after your changes.\n" +
             $"Passing tests have been committed to this PR.";
 
-        await _reviewService.AddCommentAsync(pr.Number, comment, ct);
+        await _platform.ReviewService.AddCommentAsync(pr.Number, comment, ct);
 
         // Request changes via the PR workflow — this triggers the engineer's rework pipeline
-        await _prWorkflow.RequestChangesAsync(
+        await _platform.PrWorkflow.RequestChangesAsync(
             pr.Number, Identity.DisplayName,
             $"{EngineerAgentBase.TeSourceBugMarker} {bugs.Count} source code bug(s) found by test failures. See PR comments for details.",
             ct);
@@ -3937,15 +3887,15 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
         WorkspaceConfig wsConfig,
         CancellationToken ct)
     {
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var failureSummary = failingResult.FailureDetails.Count > 0
             ? string.Join("\n", failingResult.FailureDetails.Take(20))
             : failingResult.Output.Length > 3000 ? failingResult.Output[^3000..] : failingResult.Output;
 
-        var removePrompt = _promptService is not null
-            ? await _promptService.RenderAsync("test-engineer/remove-failing-tests", new Dictionary<string, string>
+        var removePrompt = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("test-engineer/remove-failing-tests", new Dictionary<string, string>
             {
                 ["tier"] = tier.ToString(),
                 ["max_retries"] = wsConfig.MaxTestRetries.ToString(),
@@ -3989,7 +3939,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 await _workspace!.WriteFileAsync(file.Path, file.Content, ct);
 
             // Verify build still passes after test removal
-            var buildResult = await _buildRunner!.BuildAsync(
+            var buildResult = await _workspaceServices.BuildRunner!.BuildAsync(
                 _workspace.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             if (!buildResult.Success)
             {
@@ -4003,7 +3953,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             {
                 ["PLAYWRIGHT_BROWSERS_PATH"] = wsConfig.GetPlaywrightBrowsersPath()
             };
-            var result = await _testRunner!.RunTestsAsync(
+            var result = await _workspaceServices.TestRunner!.RunTestsAsync(
                 _workspace.RepoPath, testCommand, timeoutSeconds, ct, envVarsForRetest);
             result = result with { Tier = tier };
 
@@ -4068,7 +4018,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
         var labels = new[] { "tests", PullRequestWorkflow.Labels.InProgress };
 
-        var testPr = await _prService.CreateAsync(
+        var testPr = await _platform.PrService.CreateAsync(
             prTitle,
             prBody,
             branchName,
@@ -4088,7 +4038,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 var artifactSb = new System.Text.StringBuilder();
                 await UploadTestArtifactsToPrAsync(testPr.ToAgentPR(), testResults.TierResults, artifactSb, ct);
                 if (artifactSb.Length > 0)
-                    await _reviewService.AddCommentAsync(testPr.Number, artifactSb.ToString(), ct);
+                    await _platform.ReviewService.AddCommentAsync(testPr.Number, artifactSb.ToString(), ct);
             }
             catch (Exception ex)
             {
@@ -4117,20 +4067,20 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     {
         while (_reworkQueue.TryDequeue(out var rework))
         {
-            var pr = await _prService.GetAsync(rework.PrNumber, ct);
+            var pr = await _platform.PrService.GetAsync(rework.PrNumber, ct);
             if (pr is null || !string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
                 continue;
 
             var attempts = _reworkAttempts.GetValueOrDefault(rework.PrNumber, 0) + 1;
             _reworkAttempts[rework.PrNumber] = attempts;
 
-            if (attempts >= _config.Limits.MaxReworkCycles)
+            if (attempts >= Core.Config.Limits.MaxReworkCycles)
             {
                 Logger.LogWarning("TestEngineer reached max rework cycles for PR #{PrNumber}", rework.PrNumber);
-                await _reviewService.AddCommentAsync(rework.PrNumber,
+                await _platform.ReviewService.AddCommentAsync(rework.PrNumber,
                     $"⚠️ **{Identity.DisplayName}** has reached the maximum rework cycle limit. " +
                     "Requesting final approval to unblock progress.", ct);
-                await _messageBus.PublishAsync(new ReviewRequestMessage
+                await Core.MessageBus.PublishAsync(new ReviewRequestMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = "*",
@@ -4143,13 +4093,13 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             }
 
             UpdateStatus(AgentStatus.Working,
-                $"Addressing feedback on test PR #{rework.PrNumber} (attempt {attempts}/{_config.Limits.MaxReworkCycles})");
+                $"Addressing feedback on test PR #{rework.PrNumber} (attempt {attempts}/{Core.Config.Limits.MaxReworkCycles})");
             Logger.LogInformation("TestEngineer reworking PR #{PrNumber} based on feedback from {Reviewer} (attempt {Attempt})",
                 rework.PrNumber, rework.Reviewer, attempts);
 
-            var reworkStepId = _taskTracker.BeginStep(Identity.Id, "te-rework",
+            var reworkStepId = Core.TaskTracker!.BeginStep(Identity.Id, "te-rework",
                 $"Address feedback on PR #{rework.PrNumber}",
-                $"Rework attempt {attempts}/{_config.Limits.MaxReworkCycles} based on {rework.Reviewer}'s review",
+                $"Rework attempt {attempts}/{Core.Config.Limits.MaxReworkCycles} based on {rework.Reviewer}'s review",
                 Identity.ModelTier);
 
             // Resume the CLI session used to create these tests
@@ -4157,18 +4107,18 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
             try
             {
-                var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                 var chat = kernel.GetRequiredService<IChatCompletionService>();
-                var techStack = _config.Project.TechStack;
+                var techStack = Core.Config.Project.TechStack;
 
                 // Fetch current PR files so the AI can see what it already wrote
-                var currentFilesContext = await _prWorkflow.GetPRCodeContextAsync(
+                var currentFilesContext = await _platform.PrWorkflow.GetPRCodeContextAsync(
                     rework.PrNumber, pr.HeadBranch, ct: ct);
 
                 var history = CreateChatHistory();
 
-                var reworkSysMsg = _promptService is not null
-                    ? await _promptService.RenderAsync("test-engineer/rework-system", new Dictionary<string, string>
+                var reworkSysMsg = Core.PromptService is not null
+                    ? await Core.PromptService?.RenderAsync("test-engineer/rework-system", new Dictionary<string, string>
                     {
                         ["tech_stack"] = techStack
                     }, ct)
@@ -4188,8 +4138,8 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 var currentFilesBlock = string.IsNullOrEmpty(currentFilesContext) ? "" :
                     $"## Current Files on PR Branch\nThese are the files you already wrote. " +
                     "Modify them to address the feedback below:\n" + currentFilesContext + "\n\n";
-                var reworkUserMsg = _promptService is not null
-                    ? await _promptService.RenderAsync("test-engineer/rework-user", new Dictionary<string, string>
+                var reworkUserMsg = Core.PromptService is not null
+                    ? await Core.PromptService?.RenderAsync("test-engineer/rework-user", new Dictionary<string, string>
                     {
                         ["pr_number"] = rework.PrNumber.ToString(),
                         ["pr_title"] = rework.PrTitle,
@@ -4213,7 +4163,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 history.AddUserMessage(reworkUserMsg);
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
-                _taskTracker.RecordLlmCall(reworkStepId);
+                Core.TaskTracker!.RecordLlmCall(reworkStepId);
                 var updatedContent = response.Content?.Trim() ?? "";
 
                 if (!string.IsNullOrWhiteSpace(updatedContent))
@@ -4223,7 +4173,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                     var codeFiles = CodeFileParser.ParseFiles(updatedContent);
                     if (codeFiles.Count > 0)
                     {
-                        await _prWorkflow.CommitCodeFilesToPRAsync(
+                        await _platform.PrWorkflow.CommitCodeFilesToPRAsync(
                             pr.Number, codeFiles, "Address review feedback on tests", ct);
 
                         var commentBody = $"**[{Identity.DisplayName}] Rework** — Addressed feedback from {rework.Reviewer}.\n\n";
@@ -4231,11 +4181,11 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                             commentBody += changesSummary;
                         else
                             commentBody += $"**Files updated:** {string.Join(", ", codeFiles.Select(f => $"`{f.Path}`"))}";
-                        await _reviewService.AddCommentAsync(pr.Number, commentBody, ct);
+                        await _platform.ReviewService.AddCommentAsync(pr.Number, commentBody, ct);
 
                         await SyncBranchWithMainAsync(pr.Number, ct);
-                        await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
-                        await _messageBus.PublishAsync(new ReviewRequestMessage
+                        await _platform.PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+                        await Core.MessageBus.PublishAsync(new ReviewRequestMessage
                         {
                             FromAgentId = Identity.Id,
                             ToAgentId = "*",
@@ -4258,17 +4208,17 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                             "TestEngineer rework on PR #{PrNumber} produced no FILE: blocks — no changes committed. " +
                             "Skipping ready-for-review to avoid pointless re-review of unchanged code",
                             rework.PrNumber);
-                        await _reviewService.AddCommentAsync(pr.Number,
+                        await _platform.ReviewService.AddCommentAsync(pr.Number,
                             $"**[{Identity.DisplayName}] Rework attempted** — AI response did not produce committable file changes. " +
-                            $"This rework attempt counted toward the limit ({attempts}/{_config.Limits.MaxReworkCycles}).", ct);
+                            $"This rework attempt counted toward the limit ({attempts}/{Core.Config.Limits.MaxReworkCycles}).", ct);
                     }
                 }
-                _taskTracker.CompleteStep(reworkStepId);
+                Core.TaskTracker!.CompleteStep(reworkStepId);
             }
             catch (Exception ex)
             {
                 Logger.LogError(ex, "TestEngineer failed rework on PR #{PrNumber}", rework.PrNumber);
-                _taskTracker.FailStep(reworkStepId, ex.Message);
+                Core.TaskTracker!.FailStep(reworkStepId, ex.Message);
                 _reworkQueue.Enqueue(rework);
             }
         }
@@ -4284,7 +4234,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
 
         try
         {
-            var myPRs = await _prWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
+            var myPRs = await _platform.PrWorkflow.GetAgentTasksAsync(Identity.DisplayName, ct);
             foreach (var pr in myPRs)
             {
                 if (!string.Equals(pr.State, "open", StringComparison.OrdinalIgnoreCase))
@@ -4293,7 +4243,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 _currentTestPrNumber = pr.Number;
 
                 // Check for unaddressed feedback
-                var pendingFeedback = await _prWorkflow.GetPendingChangesRequestedAsync(pr.Number, ct);
+                var pendingFeedback = await _platform.PrWorkflow.GetPendingChangesRequestedAsync(pr.Number, ct);
                 if (pendingFeedback is { } pending)
                 {
                     _reworkQueue.Enqueue((pr.Number, pr.Title, pending.Feedback, pending.Reviewer));
@@ -4307,14 +4257,14 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 if (pr.Labels.Contains("ready-for-review", StringComparer.OrdinalIgnoreCase))
                 {
                     // Check if PE already approved — maybe we can just wait for merge
-                    if (!await _prWorkflow.NeedsReviewFromAsync(pr.Number, "SoftwareEngineer", ct))
+                    if (!await _platform.PrWorkflow.NeedsReviewFromAsync(pr.Number, "SoftwareEngineer", ct))
                     {
                         UpdateStatus(AgentStatus.Idle, $"Test PR #{pr.Number} reviewed, awaiting merge");
                         return;
                     }
 
                     // Re-request review
-                    await _messageBus.PublishAsync(new ReviewRequestMessage
+                    await Core.MessageBus.PublishAsync(new ReviewRequestMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = "*",
@@ -4333,15 +4283,15 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
                 // This happens if the runner was killed after creating the PR but before marking it ready.
                 if (pr.Labels.Contains("in-progress", StringComparer.OrdinalIgnoreCase))
                 {
-                    var changedFiles = await _prService.GetChangedFilesAsync(pr.Number, ct);
+                    var changedFiles = await _platform.PrService.GetChangedFilesAsync(pr.Number, ct);
                     if (changedFiles.Count > 0)
                     {
                         Logger.LogInformation(
                             "TestEngineer recovering PR #{PrNumber} — has {FileCount} files but not ready-for-review. Marking ready.",
                             pr.Number, changedFiles.Count);
                         await SyncBranchWithMainAsync(pr.Number, ct);
-                        await _prWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
-                        await _messageBus.PublishAsync(new ReviewRequestMessage
+                        await _platform.PrWorkflow.MarkReadyForReviewAsync(pr.Number, Identity.DisplayName, ct);
+                        await Core.MessageBus.PublishAsync(new ReviewRequestMessage
                         {
                             FromAgentId = Identity.Id,
                             ToAgentId = "*",
@@ -4381,7 +4331,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     {
         try
         {
-            var synced = await _prService.UpdateBranchAsync(prNumber, ct);
+            var synced = await _platform.PrService.UpdateBranchAsync(prNumber, ct);
             if (synced)
                 Logger.LogInformation("TestEngineer synced PR #{PrNumber} branch with main", prNumber);
             else
@@ -4409,7 +4359,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             {
                 _ = Task.Run(async () =>
                 {
-                    try { await _stateStore.SaveCliSessionAsync(Identity.Id, prNumber, sessionId); }
+                    try { await Core.StateStore?.SaveCliSessionAsync(Identity.Id, prNumber, sessionId); }
                     catch (Exception ex) { Logger.LogWarning(ex, "Failed to persist CLI session for test PR #{Pr}", prNumber); }
                 });
             }
@@ -4424,7 +4374,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designFiles = tree
                 .Where(f =>
                 {
@@ -4441,7 +4391,7 @@ You MUST output this file: `tests/{projectName}.Tests/{projectName}.Tests.csproj
             var sb = new System.Text.StringBuilder();
             foreach (var file in designFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
+                var content = await _platform.RepoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design File: `{file}`");

@@ -1,15 +1,8 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
-using AgentSquad.Core.DevPlatform.Capabilities;
-using AgentSquad.Core.GitHub;
-using AgentSquad.Core.Messaging;
-using AgentSquad.Core.Persistence;
 using AgentSquad.Core.Services;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using Microsoft.SemanticKernel;
-using Microsoft.SemanticKernel.ChatCompletion;
 using System.Text;
 
 namespace AgentSquad.Agents;
@@ -21,9 +14,6 @@ namespace AgentSquad.Agents;
 /// </summary>
 public class SmeAgent : CustomAgent
 {
-    private readonly IMessageBus _messageBus;
-    private readonly ModelRegistry _modelRegistry;
-    private readonly AgentSquadConfig _config;
     private readonly SmeMetrics _smeMetrics;
     private bool _hasCompletedOneShot;
 
@@ -33,25 +23,13 @@ public class SmeAgent : CustomAgent
     public SmeAgent(
         AgentIdentity identity,
         SMEAgentDefinition definition,
-        IMessageBus messageBus,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
         ILogger<SmeAgent> logger,
-        SmeMetrics smeMetrics,
-        RoleContextProvider? roleContextProvider = null,
-        IWorkItemService? workItemService = null)
-        : base(identity, messageBus, prWorkflow, projectFiles, modelRegistry,
-               memoryStore, config, gateCheck, logger, roleContextProvider,
-               workItemService: workItemService)
+        SmeMetrics smeMetrics)
+        : base(identity, core, platform, logger)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
-        _messageBus = messageBus;
-        _modelRegistry = modelRegistry;
-        _config = config.Value;
         _smeMetrics = smeMetrics ?? throw new ArgumentNullException(nameof(smeMetrics));
     }
 
@@ -79,7 +57,7 @@ public class SmeAgent : CustomAgent
     {
         UpdateStatus(AgentStatus.Idle, "OneShot: waiting for task assignment");
 
-        var pollInterval = TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds);
+        var pollInterval = TimeSpan.FromSeconds(Core.Config.Limits.GitHubPollIntervalSeconds);
 
         // Wait for a task assignment (poll the base class queues)
         while (!ct.IsCancellationRequested && !_hasCompletedOneShot)
@@ -179,7 +157,7 @@ public class SmeAgent : CustomAgent
             RelatedIssueNumber = relatedIssueNumber
         };
 
-        await _messageBus.PublishAsync(resultMessage, ct);
+        await Core.MessageBus.PublishAsync(resultMessage, ct);
 
         Logger.LogInformation(
             "SME agent '{DisplayName}' reported findings for '{TaskSummary}' with {RecCount} recommendations",

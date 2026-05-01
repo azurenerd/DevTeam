@@ -1,17 +1,10 @@
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Decisions;
-using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
-using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
-using AgentSquad.Core.GitHub;
-using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Prompts;
-using AgentSquad.Core.Workspace;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
 namespace AgentSquad.Agents;
 
@@ -32,34 +25,12 @@ public class SpecialistEngineerAgent : EngineerAgentBase
     public SpecialistEngineerAgent(
         AgentIdentity identity,
         SMEAgentDefinition definition,
-        IMessageBus messageBus,
-        IssueWorkflow issueWorkflow,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentStateStore stateStore,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        AgentWorkspaceServices workspace,
         ILogger<SpecialistEngineerAgent> logger,
-        IPromptTemplateService? promptService = null,
-        RoleContextProvider? roleContextProvider = null,
-        BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null,
-        Core.Metrics.BuildTestMetrics? metrics = null,
-        PlaywrightRunner? playwrightRunner = null,
-        DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null,
-        IPullRequestService? prService = null,
-        IWorkItemService? workItemService = null,
-        IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null,
-        IBranchService? branchService = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, messageBus, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
-               prService, workItemService, repoContent, reviewService, branchService, branchProvider)
+        DecisionGateService? decisionGate = null)
+        : base(identity, core, platform, workspace, logger, decisionGate)
     {
         Definition = definition ?? throw new ArgumentNullException(nameof(definition));
     }

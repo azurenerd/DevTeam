@@ -52,6 +52,38 @@ builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.RequirementsCache>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.AgentChatService>();
 builder.Services.AddSemanticKernelModels();
 builder.Services.AddSingleton<AgentSquad.Core.AI.IChatCompletionRunner, AgentSquad.Core.AI.ChatCompletionRunner>();
+
+// Agent dependency bundles — pre-built service bags so agent constructors stay clean
+builder.Services.AddSingleton(sp => new AgentSquad.Core.Agents.AgentCoreServices(
+    messageBus: sp.GetRequiredService<IMessageBus>(),
+    modelRegistry: sp.GetRequiredService<AgentSquad.Core.Configuration.ModelRegistry>(),
+    chatRunner: sp.GetRequiredService<AgentSquad.Core.AI.IChatCompletionRunner>(),
+    projectFiles: sp.GetRequiredService<ProjectFileManager>(),
+    memoryStore: sp.GetRequiredService<AgentMemoryStore>(),
+    gateCheck: sp.GetRequiredService<IGateCheckService>(),
+    config: sp.GetRequiredService<IOptions<AgentSquadConfig>>(),
+    promptService: sp.GetService<AgentSquad.Core.Prompts.IPromptTemplateService>(),
+    roleContextProvider: sp.GetService<AgentSquad.Core.AI.RoleContextProvider>(),
+    selfAssessment: sp.GetService<AgentSquad.Core.Agents.Reasoning.SelfAssessmentService>(),
+    reasoningLog: sp.GetService<AgentSquad.Core.Agents.Reasoning.IAgentReasoningLog>(),
+    taskTracker: sp.GetService<AgentSquad.Core.Agents.Steps.IAgentTaskTracker>(),
+    stateStore: sp.GetService<AgentStateStore>()));
+builder.Services.AddSingleton(sp => new AgentSquad.Core.Agents.AgentPlatformServices(
+    prService: sp.GetRequiredService<IPullRequestService>(),
+    workItemService: sp.GetRequiredService<IWorkItemService>(),
+    repoContent: sp.GetRequiredService<IRepositoryContentService>(),
+    reviewService: sp.GetRequiredService<IReviewService>(),
+    prWorkflow: sp.GetRequiredService<PullRequestWorkflow>(),
+    branchService: sp.GetService<IBranchService>(),
+    issueWorkflow: sp.GetService<IssueWorkflow>(),
+    branchProvider: sp.GetService<IRunBranchProvider>(),
+    docResolver: sp.GetService<AgentSquad.Core.DevPlatform.Capabilities.IDocumentReferenceResolver>(),
+    platformHost: sp.GetService<IPlatformHostContext>()));
+builder.Services.AddSingleton(sp => new AgentSquad.Core.Agents.AgentWorkspaceServices(
+    buildRunner: sp.GetService<BuildRunner>(),
+    testRunner: sp.GetService<TestRunner>(),
+    playwrightRunner: sp.GetService<PlaywrightRunner>(),
+    metrics: sp.GetService<AgentSquad.Core.Metrics.BuildTestMetrics>()));
 builder.Services.AddGitHubIntegration();
 
 // Dev platform abstraction layer (capability interfaces backed by GitHub adapter)

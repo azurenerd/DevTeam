@@ -3,7 +3,6 @@ using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Decisions;
 using AgentSquad.Core.Agents.Reasoning;
-using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
 using AgentSquad.Core.DevPlatform;
@@ -13,7 +12,6 @@ using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Prompts;
 using AgentSquad.Core.Services;
 using AgentSquad.Core.Strategies;
 using AgentSquad.Core.Workspace;
@@ -36,19 +34,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     private const string IntegrationTaskName = "Final Integration & Validation";
 
     private readonly AgentRegistry _registry;
-    private readonly IGateCheckService _gateCheck;
     private readonly EngineeringTaskIssueManager _taskManager;
-    private readonly SelfAssessmentService _selfAssessment;
-    private readonly IAgentReasoningLog _reasoningLog;
     private readonly SmeDefinitionGenerator? _smeGenerator;
     private readonly AgentSpawnManager? _spawnManager;
     private readonly DecisionGateService? _decisionGate;
 
     // Platform abstraction for post-merge close-out (works for both GitHub and ADO)
     private readonly MergeCloseoutService? _mergeCloseout;
-
-    // Document reference resolver for single-issue mode context enrichment
-    private readonly IDocumentReferenceResolver? _docResolver;
 
     // Strategy Framework (Phase 1) — optional, opt-in via StrategyFrameworkConfig.Enabled.
     private readonly StrategyOrchestrator? _strategyOrchestrator;
@@ -145,51 +137,23 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
     public SoftwareEngineerAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        IssueWorkflow issueWorkflow,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentStateStore stateStore,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        AgentWorkspaceServices workspace,
         AgentRegistry registry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
-        SelfAssessmentService selfAssessment,
-        IAgentReasoningLog reasoningLog,
         ILogger<SoftwareEngineerAgent> logger,
-        IPromptTemplateService? promptService = null,
-        RoleContextProvider? roleContextProvider = null,
-        BuildRunner? buildRunner = null,
-        TestRunner? testRunner = null,
-        Core.Metrics.BuildTestMetrics? metrics = null,
-        PlaywrightRunner? playwrightRunner = null,
         SmeDefinitionGenerator? smeGenerator = null,
         AgentSpawnManager? spawnManager = null,
         DecisionGateService? decisionGate = null,
-        IAgentTaskTracker? taskTracker = null,
         StrategyOrchestrator? strategyOrchestrator = null,
         WinnerApplyService? winnerApply = null,
         IOptionsMonitor<StrategyFrameworkConfig>? strategyConfig = null,
         StrategyTaskStepBridge? strategyStepBridge = null,
-        MergeCloseoutService? mergeCloseout = null,
-        IPullRequestService? prService = null,
-        IWorkItemService? workItemService = null,
-        IRepositoryContentService? repoContent = null,
-        IReviewService? reviewService = null,
-        IBranchService? branchService = null,
-        IDocumentReferenceResolver? docResolver = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, messageBus, prWorkflow, issueWorkflow,
-               projectFiles, modelRegistry, stateStore, config.Value, memoryStore, gateCheck, logger,
-               promptService, roleContextProvider, buildRunner, testRunner, metrics, playwrightRunner, decisionGate, taskTracker,
-               prService, workItemService, repoContent, reviewService, branchService, branchProvider)
+        MergeCloseoutService? mergeCloseout = null)
+        : base(identity, core, platform, workspace, logger, decisionGate)
     {
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
-        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
-        _taskManager = new EngineeringTaskIssueManager(workItemService!, logger);
+        _taskManager = new EngineeringTaskIssueManager(platform.WorkItemService, logger);
         _smeGenerator = smeGenerator;
         _spawnManager = spawnManager;
         _decisionGate = decisionGate;
@@ -198,8 +162,8 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         _strategyConfig = strategyConfig;
         _strategyStepBridge = strategyStepBridge;
         _mergeCloseout = mergeCloseout;
-        _docResolver = docResolver;
     }
+
 
     protected override string GetRoleDisplayName() => "Software Engineer";
 
@@ -312,9 +276,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         {
                             if (!_loggedArchitectureRead)
                             {
-                                var readArchStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Read architecture & PMSpec",
+                                var readArchStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Read architecture & PMSpec",
                                     "Architecture and PM Specification documents detected, starting engineering plan", Identity.ModelTier);
-                                _taskTracker.CompleteStep(readArchStepId);
+                                TaskTracker.CompleteStep(readArchStepId);
                                 _loggedArchitectureRead = true;
                             }
                             await CreateEngineeringPlanAsync(ct);
@@ -372,7 +336,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     if (!_taskInventoryLogged && total > 0)
                     {
                         var taskGroupId = "task-inventory";
-                        var inventoryStepId = _taskTracker.BeginStep(Identity.Id, taskGroupId, "Task Inventory",
+                        var inventoryStepId = TaskTracker.BeginStep(Identity.Id, taskGroupId, "Task Inventory",
                             $"{done}/{total} done, {pending} pending, {total - done - pending} in-progress", Identity.ModelTier);
 
                         foreach (var t in _taskManager.Tasks.Where(t => t.Id != IntegrationTaskId))
@@ -386,14 +350,14 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                 _ => "❓"
                             };
                             var prRef = t.PullRequestNumber.HasValue ? $" PR #{t.PullRequestNumber}" : "";
-                            var taskStepId = _taskTracker.BeginStep(Identity.Id, taskGroupId,
+                            var taskStepId = TaskTracker.BeginStep(Identity.Id, taskGroupId,
                                 $"{statusIcon} {t.Name}",
                                 $"Status: {t.Status}, Complexity: {t.Complexity}{prRef}",
                                 Identity.ModelTier);
-                            _taskTracker.CompleteStep(taskStepId);
+                            TaskTracker.CompleteStep(taskStepId);
                         }
 
-                        _taskTracker.CompleteStep(inventoryStepId);
+                        TaskTracker.CompleteStep(inventoryStepId);
                         _taskInventoryLogged = true;
                     }
 
@@ -630,7 +594,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     _taskManager.TotalCount, _taskManager.DoneCount, _taskManager.PendingCount);
 
                 // Add visible planning steps so the dashboard shows what happened during recovery
-                var restoreStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Restore engineering plan",
+                var restoreStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Restore engineering plan",
                     $"Recovered {_taskManager.TotalCount} tasks from existing issues ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)", Identity.ModelTier);
 
                 // Register display names for restored tasks so dashboard shows meaningful titles
@@ -656,7 +620,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     Logger.LogWarning(ex, "Dependency link restoration failed (non-fatal)");
                 }
 
-                _taskTracker.CompleteStep(restoreStepId);
+                TaskTracker.CompleteStep(restoreStepId);
 
                 // Recover completion state from restored tasks to prevent duplicate work on restart
                 var restoredNonIntegration = _taskManager.Tasks
@@ -738,7 +702,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         LogActivity("task", "📋 Starting engineering plan creation from Enhancement issues");
 
-        var decompStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Task decomposition",
+        var decompStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Task decomposition",
             "Decomposing enhancement issues into engineering tasks", Identity.ModelTier);
 
         var issuesSummary = string.Join("\n\n", enhancementIssues.Select(i =>
@@ -747,13 +711,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // Single-issue mode enrichment: resolve doc links in the issue body
         // This allows the SE to get full PMSpec/Architecture content even when
         // the issue body only contains summary + links to the actual docs
-        if (Config.Limits.SingleIssueMode && _docResolver is not null && enhancementIssues.Count == 1)
+        if (Config.Limits.SingleIssueMode && Platform.DocResolver is not null && enhancementIssues.Count == 1)
         {
             try
             {
                 var issue = enhancementIssues[0];
                 var resolveContext = new DocumentResolutionContext(EffectiveBranch);
-                var resolvedDocs = await _docResolver.ResolveReferencesAsync(issue.Body ?? "", resolveContext, ct);
+                var resolvedDocs = await Platform.DocResolver?.ResolveReferencesAsync(issue.Body ?? "", resolveContext, ct);
 
                 if (resolvedDocs.Count > 0)
                 {
@@ -827,7 +791,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 SkillTags = new List<string> { "fullstack", "foundation" }
             });
 
-            _taskTracker.CompleteStep(decompStepId);
+            TaskTracker.CompleteStep(decompStepId);
         }
         else
         {
@@ -1075,15 +1039,15 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var response = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         var structuredText = response.Content ?? "";
-        _taskTracker.RecordLlmCall(decompStepId);
-        _taskTracker.CompleteStep(decompStepId);
+        TaskTracker.RecordLlmCall(decompStepId);
+        TaskTracker.CompleteStep(decompStepId);
 
         LogActivity("planning", "📝 AI generated plan, parsing tasks...");
 
         // Self-assessment: assess and refine the engineering plan
-        var assessStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Self-assessment & impact classification",
+        var assessStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Self-assessment & impact classification",
             "Assessing engineering plan quality and classifying impact", Identity.ModelTier);
-        _reasoningLog.Log(new AgentReasoningEvent
+        Core!.ReasoningLog!.Log(new AgentReasoningEvent
         {
             AgentId = Identity.Id,
             AgentDisplayName = Identity.DisplayName,
@@ -1097,7 +1061,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         var criteria = AssessmentCriteria.GetForRole(Identity.Role);
         if (criteria is not null)
         {
-            var (refinedOutput, assessment) = await _selfAssessment.AssessAndRefineWithResultAsync(
+            var (refinedOutput, assessment) = await Core!.SelfAssessment!.AssessAndRefineWithResultAsync(
                 Identity.Id,
                 Identity.DisplayName,
                 Identity.Role,
@@ -1110,9 +1074,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 ct);
             structuredText = refinedOutput;
             peAssessmentResult = assessment;
-            _taskTracker.RecordLlmCall(assessStepId);
+            TaskTracker.RecordLlmCall(assessStepId);
         }
-        _taskTracker.CompleteStep(assessStepId);
+        TaskTracker.CompleteStep(assessStepId);
 
         var issueMap = enhancementIssues.ToDictionary(i => i.Number);
 
@@ -1258,9 +1222,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         });
 
         // Classify task decomposition decision impact
-        var decisionStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Decision gate",
+        var decisionStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Decision gate",
             "Classifying task decomposition impact for approval", Identity.ModelTier);
-        _taskTracker.SetStepWaiting(decisionStepId);
+        TaskTracker.SetStepWaiting(decisionStepId);
         if (_decisionGate is not null)
         {
             var decisionTaskSummary = string.Join(", ", parsedTasks.Where(t => t.Id != IntegrationTaskId)
@@ -1313,11 +1277,11 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     "Engineering plan rejected",
                     planDecision.HumanFeedback ?? "No feedback provided", ct);
                 UpdateStatus(AgentStatus.Idle, "Engineering plan rejected — awaiting new direction");
-                _taskTracker.FailStep(decisionStepId, "Plan rejected by human");
+                TaskTracker.FailStep(decisionStepId, "Plan rejected by human");
                 return;
             }
         }
-        _taskTracker.CompleteStep(decisionStepId);
+        TaskTracker.CompleteStep(decisionStepId);
 
         // Informational check: log overlap with already-merged PRs from this run.
         // We do NOT auto-drop tasks — overlap is common (shared files, scaffolding) and
@@ -1366,7 +1330,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         // Create GitHub issues for each task (the single source of truth)
         LogActivity("planning", $"📌 Creating {parsedTasks.Count} task issues on GitHub");
-        var createIssuesStepId = _taskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
+        var createIssuesStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
             $"Creating {parsedTasks.Count} engineering task issues on GitHub", Identity.ModelTier);
         var createdTasks = await _taskManager.CreateTaskIssuesAsync(parsedTasks, ct);
 
@@ -1405,7 +1369,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         LogActivity("planning", "🔗 Establishing task dependencies");
         // Create native GitHub blocked-by dependency links between tasks
         await _taskManager.LinkTaskDependenciesAsync(_taskManager.Tasks.ToList(), ct);
-        _taskTracker.CompleteStep(createIssuesStepId);
+        TaskTracker.CompleteStep(createIssuesStepId);
 
         // REQ-PE-009: Validate all PM enhancements have engineering tasks
         // Skip in SinglePRMode — T1 monolithic task covers ALL enhancements by design
@@ -1431,9 +1395,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         }
         else
         {
-            if (_gateCheck.RequiresHuman(GateIds.EngineeringPlan))
+            if (GateCheck.RequiresHuman(GateIds.EngineeringPlan))
                 UpdateStatus(AgentStatus.Working, "⏳ Awaiting human approval — engineering plan");
-            await _gateCheck.WaitForGateAsync(
+            await GateCheck.WaitForGateAsync(
                 GateIds.EngineeringPlan,
                 "Engineering plan ready for human review before finalization",
                 ct: ct);
@@ -1443,7 +1407,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             _taskManager.TotalCount, enhancementIssues.Count);
         LogActivity("task", $"📋 Engineering plan created: {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues");
 
-        _reasoningLog.Log(new AgentReasoningEvent
+        Core!.ReasoningLog!.Log(new AgentReasoningEvent
         {
             AgentId = Identity.Id,
             AgentDisplayName = Identity.DisplayName,
@@ -1966,9 +1930,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             }
             else
             {
-                if (_gateCheck.RequiresHuman(GateIds.TaskAssignment))
+                if (GateCheck.RequiresHuman(GateIds.TaskAssignment))
                     UpdateStatus(AgentStatus.Working, "⏳ Awaiting human approval — task assignments");
-                await _gateCheck.WaitForGateAsync(
+                await GateCheck.WaitForGateAsync(
                     GateIds.TaskAssignment,
                     $"Ready to assign {_taskManager.PendingCount} engineering tasks to available engineers",
                     ct: ct);
@@ -2019,7 +1983,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         ? $" [tags: {string.Join(",", task.SkillTags)}]"
                         : "";
 
-                    var assignStepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
+                    var assignStepId = TaskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
                         $"Assigning issue #{task.IssueNumber} ({task.Name}){taskSkills} to {engineer.Name}{skillMatch} (LLM-matched)", Identity.ModelTier);
 
                     Logger.LogInformation(
@@ -2036,7 +2000,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         Complexity = task.Complexity,
                         IssueUrl = task.IssueUrl
                     }, ct);
-                    _taskTracker.CompleteStep(assignStepId);
+                    TaskTracker.CompleteStep(assignStepId);
 
                     freeEngineers.Remove(engineer);
                 }
@@ -2084,7 +2048,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     ? $" [tags: {string.Join(",", bestTask.SkillTags)}]"
                     : "";
 
-                var assignStepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
+                var assignStepId = TaskTracker.BeginStep(Identity.Id, "pe-orchestration", "Assign engineers",
                     $"Assigning issue #{bestTask.IssueNumber} ({bestTask.Name}){taskSkills} to {engineer.Name}{skillMatch}", Identity.ModelTier);
 
                 Logger.LogInformation(
@@ -2101,7 +2065,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     Complexity = bestTask.Complexity,
                     IssueUrl = bestTask.IssueUrl
                 }, ct);
-                _taskTracker.CompleteStep(assignStepId);
+                TaskTracker.CompleteStep(assignStepId);
             }
         }
         catch (Exception ex)
@@ -2441,18 +2405,18 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 task.Id, task.Name);
 
             // Track step: Generate PR description
-            var descStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Generate PR description",
+            var descStepId = TaskTracker.BeginStep(Identity.Id, task.Id, "Generate PR description",
                 $"Creating description for {task.Name}", Identity.ModelTier);
             UpdateStatus(AgentStatus.Working, $"Generating PR description: {task.Name}");
             var prDescription = await GenerateTaskDescriptionAsync(task, ct);
-            _taskTracker.RecordLlmCall(descStepId);
-            _taskTracker.CompleteStep(descStepId);
+            TaskTracker.RecordLlmCall(descStepId);
+            TaskTracker.CompleteStep(descStepId);
 
             if (task.IssueNumber.HasValue)
                 prDescription = $"Closes #{task.IssueNumber}\n\n{prDescription}";
 
             // Track step: Create branch & PR
-            var createPrStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Create branch & PR",
+            var createPrStepId = TaskTracker.BeginStep(Identity.Id, task.Id, "Create branch & PR",
                 $"Creating branch and PR for {task.Name}", Identity.ModelTier);
             UpdateStatus(AgentStatus.Working, $"Creating branch & PR: {task.Name}");
             var branchName = await PrWorkflow.CreateTaskBranchAsync(
@@ -2469,7 +2433,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 "",
                 branchName,
                 ct);
-            _taskTracker.CompleteStep(createPrStepId);
+            TaskTracker.CompleteStep(createPrStepId);
 
             // Mark task in-progress via the task manager
             if (task.IssueNumber.HasValue)
@@ -2500,7 +2464,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 Logger.LogInformation(
                     "Strategy framework produced winning candidate for PR #{PrNumber} (task {TaskId}); skipping legacy code-gen",
                     pr.Number, task.Id);
-                _reasoningLog.Log(new AgentReasoningEvent
+                Core!.ReasoningLog!.Log(new AgentReasoningEvent
                 {
                     AgentId = Identity.Id,
                     AgentDisplayName = Identity.DisplayName,
@@ -2558,13 +2522,13 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             if (!useSinglePass)
             {
                 // Multi-step path: generate steps then implement each one
-                var genStepsStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Generate implementation steps",
+                var genStepsStepId = TaskTracker.BeginStep(Identity.Id, task.Id, "Generate implementation steps",
                     $"Planning implementation steps for {task.Name}", Identity.ModelTier);
                 UpdateStatus(AgentStatus.Working, $"Generating implementation steps: {task.Name}");
                 var steps = await GenerateImplementationStepsAsync(
                     chat, pr, syntheticIssue, pmSpecDoc, architectureDoc, techStack, ct);
-                _taskTracker.RecordLlmCall(genStepsStepId);
-                _taskTracker.CompleteStep(genStepsStepId);
+                TaskTracker.RecordLlmCall(genStepsStepId);
+                TaskTracker.CompleteStep(genStepsStepId);
 
                 if (steps.Count > 0)
                 {
@@ -2579,7 +2543,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         var step = steps[i];
                         var stepNumber = i + 1;
 
-                        var execStepId = _taskTracker.BeginStep(Identity.Id, task.Id,
+                        var execStepId = TaskTracker.BeginStep(Identity.Id, task.Id,
                             $"Implement step {stepNumber}/{steps.Count}",
                             Truncate(step, 120), Identity.ModelTier);
                         UpdateStatus(AgentStatus.Working,
@@ -2630,7 +2594,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                         var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
                         var stepImpl = stepResponse.Content?.Trim() ?? "";
-                        _taskTracker.RecordLlmCall(execStepId);
+                        TaskTracker.RecordLlmCall(execStepId);
 
                         var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(stepImpl);
 
@@ -2650,7 +2614,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                             var retryResp = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
                             var retryImpl = retryResp.Content?.Trim() ?? "";
-                            _taskTracker.RecordLlmCall(execStepId);
+                            TaskTracker.RecordLlmCall(execStepId);
                             codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(retryImpl);
 
                             if (codeFiles.Count > 0)
@@ -2668,7 +2632,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                     stepNumber, steps.Count, step, chat, ct);
                                 if (!committed)
                                 {
-                                    _taskTracker.FailStep(execStepId, "Blocked by build errors");
+                                    TaskTracker.FailStep(execStepId, "Blocked by build errors");
                                     Logger.LogWarning("SE step {Step}/{Total} blocked by build errors on PR #{PrNumber}",
                                         stepNumber, steps.Count, pr.Number);
                                     await ReviewService.AddCommentAsync(pr.Number,
@@ -2686,7 +2650,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                                 codeFiles.Count, stepNumber, steps.Count, pr.Number);
                         }
 
-                        _taskTracker.CompleteStep(execStepId);
+                        TaskTracker.CompleteStep(execStepId);
                         completedSteps.Add(step);
 
                         // Inter-step assignment: if we're the leader, assign tasks to idle workers
@@ -2707,7 +2671,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             if (useSinglePass)
             {
                 // Single-pass: complete implementation in one AI call
-                var implStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Implement (single-pass)",
+                var implStepId = TaskTracker.BeginStep(Identity.Id, task.Id, "Implement (single-pass)",
                     $"Generating complete implementation for {task.Name}", Identity.ModelTier);
                 UpdateStatus(AgentStatus.Working, $"Generating code: {task.Name}");
                 Logger.LogInformation("SE using single-pass implementation for task {TaskId}", task.Id);
@@ -2739,7 +2703,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var implementation = response.Content?.Trim() ?? "";
-                _taskTracker.RecordLlmCall(implStepId);
+                TaskTracker.RecordLlmCall(implStepId);
 
                 var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(implementation);
 
@@ -2762,7 +2726,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                     var retryResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                     var retryImpl = retryResponse.Content?.Trim() ?? "";
-                    _taskTracker.RecordLlmCall(implStepId);
+                    TaskTracker.RecordLlmCall(implStepId);
                     codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(retryImpl);
 
                     if (codeFiles.Count == 0)
@@ -2770,7 +2734,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         Logger.LogError(
                             "SE single-pass retry also produced no FILE: blocks (response length={Length}). Failing step.",
                             retryImpl.Length);
-                        _taskTracker.FailStep(implStepId, "AI produced no parseable code files after retry");
+                        TaskTracker.FailStep(implStepId, "AI produced no parseable code files after retry");
                         LogActivity("task", "❌ Implementation failed — AI unable to produce code in FILE: format after retry");
                         await ReviewService.AddCommentAsync(pr.Number,
                             $"❌ **Implementation Failed:** AI was unable to produce code files in the expected format after 2 attempts.", ct);
@@ -2781,7 +2745,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 else if (codeFiles.Count == 0)
                 {
                     Logger.LogWarning("SE single-pass produced empty response. Failing step.");
-                    _taskTracker.FailStep(implStepId, "AI produced empty response");
+                    TaskTracker.FailStep(implStepId, "AI produced empty response");
                     LogActivity("task", "❌ Implementation failed — AI returned empty response");
                     return;
                 }
@@ -2792,7 +2756,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                         $"Implement {task.Name}", 1, 1, task.Name, chat, ct);
                     if (!committed)
                     {
-                        _taskTracker.FailStep(implStepId, "Blocked by build errors");
+                        TaskTracker.FailStep(implStepId, "Blocked by build errors");
                         Logger.LogWarning("SE single-pass implementation blocked by build errors on PR #{PrNumber}", pr.Number);
                         await ReviewService.AddCommentAsync(pr.Number,
                             $"❌ **Build Blocked:** Single-pass implementation could not produce a buildable commit.", ct);
@@ -2803,7 +2767,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 {
                     await PrWorkflow.CommitCodeFilesToPRAsync(pr.Number, codeFiles, $"Implement {task.Name}", ct);
                 }
-                _taskTracker.CompleteStep(implStepId);
+                TaskTracker.CompleteStep(implStepId);
             }
 
             // Track step: Mark ready for review
@@ -2825,7 +2789,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// </summary>
     private async Task FinalizeReadyForReviewAsync(AgentPullRequest pr, EngineeringTask task, CancellationToken ct)
     {
-        var readyStepId = _taskTracker.BeginStep(Identity.Id, task.Id, "Mark ready for review",
+        var readyStepId = TaskTracker.BeginStep(Identity.Id, task.Id, "Mark ready for review",
             $"Syncing branch and marking PR #{pr.Number} ready", Identity.ModelTier);
 
         // Sync branch with main before marking ready — ensures PR is merge-clean
@@ -2844,12 +2808,12 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 "literal placeholder strings. Replace the placeholder strings with the real component invocation " +
                 "(or a concrete empty state), then re-run the ready-for-review flow.",
                 ct);
-            _taskTracker.CompleteStep(readyStepId);
+            TaskTracker.CompleteStep(readyStepId);
             return;
         }
 
         await MarkReadyForReviewWithScreenshotAsync(pr, ct);
-        _taskTracker.CompleteStep(readyStepId);
+        TaskTracker.CompleteStep(readyStepId);
 
         await MessageBus.PublishAsync(new ReviewRequestMessage
         {
@@ -3712,9 +3676,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 // === Gate: PRReviewApproval — human reviews before PE approval ===
                 if (approved)
                 {
-                    if (_gateCheck.RequiresHuman(GateIds.PRReviewApproval))
+                    if (GateCheck.RequiresHuman(GateIds.PRReviewApproval))
                         UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{prNumber}");
-                    var prGateResult = await _gateCheck.WaitForGateAsync(
+                    var prGateResult = await GateCheck.WaitForGateAsync(
                         GateIds.PRReviewApproval,
                         $"SE ready to approve PR #{prNumber}",
                         prNumber, ct: ct);
@@ -3751,7 +3715,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
                     var requireTests = Config.Workspace.IsInlineTestWorkflow;
                     // Defer merge when FinalPRApproval gate requires human — we'll gate before merging
-                    var deferMerge = _gateCheck.RequiresHuman(GateIds.FinalPRApproval);
+                    var deferMerge = GateCheck.RequiresHuman(GateIds.FinalPRApproval);
                     var result = await PrWorkflow.ApproveAndMaybeMergeAsync(
                         pr.Number, "SoftwareEngineer", reviewBody, requireTests, deferMerge, ct);
 
@@ -3760,7 +3724,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     {
                         // === Gate: FinalPRApproval — human reviews before merge ===
                         UpdateStatus(AgentStatus.Working, $"⏳ Awaiting final human approval to merge PR #{prNumber}");
-                        var finalGateResult = await _gateCheck.WaitForGateAsync(
+                        var finalGateResult = await GateCheck.WaitForGateAsync(
                             GateIds.FinalPRApproval,
                             $"PR #{pr.Number} approved by all reviewers, ready for final merge",
                             pr.Number, ct: ct);
@@ -3942,9 +3906,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 }
 
                 // === Gate: FinalPRApproval — human reviews before final merge ===
-                if (_gateCheck.RequiresHuman(GateIds.FinalPRApproval))
+                if (GateCheck.RequiresHuman(GateIds.FinalPRApproval))
                     UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{pr.Number}");
-                var finalGateResult = await _gateCheck.WaitForGateAsync(
+                var finalGateResult = await GateCheck.WaitForGateAsync(
                     GateIds.FinalPRApproval,
                     $"PR #{pr.Number} has passed all reviews and tests, ready for final merge",
                     pr.Number, ct: ct);
@@ -5134,7 +5098,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
     private async Task CreateIntegrationPRAsync(CancellationToken ct)
     {
-        var integrationStepId = _taskTracker.BeginStep(Identity.Id, "pe-integration", "Final integration review",
+        var integrationStepId = TaskTracker.BeginStep(Identity.Id, "pe-integration", "Final integration review",
             "Reviewing merged work for integration gaps (missing wiring, imports, config)", Identity.ModelTier);
         try
         {
@@ -5163,7 +5127,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         {
             Logger.LogError(ex, "Failed to create integration PR");
             RecordError($"Integration PR failed: {ex.Message}", Microsoft.Extensions.Logging.LogLevel.Error, ex);
-            _taskTracker.FailStep(integrationStepId, ex.Message);
+            TaskTracker.FailStep(integrationStepId, ex.Message);
             // Signal completion anyway so the pipeline doesn't get stuck
             _integrationPrCreated = true;
             await SignalEngineeringCompleteAsync(ct);
@@ -5263,7 +5227,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     successfullyRanButEmpty.Count, outcome.Evaluation.Candidates.Count);
                 LogActivity("task", $"✅ No integration fixes needed ({successfullyRanButEmpty.Count} of {outcome.Evaluation.Candidates.Count} strategies ran successfully and found nothing to fix)");
                 _integrationPrCreated = true;
-                _taskTracker.CompleteStep(integrationStepId);
+                TaskTracker.CompleteStep(integrationStepId);
                 await CloseIntegrationIssueAsync(
                     $"✅ No integration fixes needed — {successfullyRanButEmpty.Count} strategy candidate(s) examined the code and found no issues " +
                     $"({outcome.Evaluation.Candidates.Count - totalSuccessfullyRan} candidate(s) failed to execute).", ct);
@@ -5291,7 +5255,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                 winner.StrategyId);
             LogActivity("task", "✅ No integration fixes needed (strategy framework confirmed) — signaling completion");
             _integrationPrCreated = true;
-            _taskTracker.CompleteStep(integrationStepId);
+            TaskTracker.CompleteStep(integrationStepId);
             await CloseIntegrationIssueAsync("✅ No integration fixes needed — strategy framework confirmed all tasks cleanly integrated.", ct);
             await SignalEngineeringCompleteAsync(ct);
             return true;
@@ -5432,7 +5396,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         _strategyStepBridge?.UnregisterTask(taskCtx.RunId, IntegrationTaskId,
             succeeded: true, winnerStrategy: winner.StrategyId);
-        _taskTracker.CompleteStep(integrationStepId);
+        TaskTracker.CompleteStep(integrationStepId);
         return true;
     }
 
@@ -5478,7 +5442,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             "Generate any missing integration files (config, wiring, startup registration, etc.).");
 
         var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
-        _taskTracker.RecordLlmCall(integrationStepId);
+        TaskTracker.RecordLlmCall(integrationStepId);
         var integrationContent = response.Content?.Trim() ?? "";
 
         var codeFiles = AgentSquad.Core.AI.CodeFileParser.ParseFiles(integrationContent);
@@ -5489,7 +5453,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             Logger.LogInformation("No integration fixes needed — all tasks cleanly integrated");
             LogActivity("task", "✅ No integration fixes needed — signaling completion");
             _integrationPrCreated = true;
-            _taskTracker.CompleteStep(integrationStepId);
+            TaskTracker.CompleteStep(integrationStepId);
             await CloseIntegrationIssueAsync("✅ No integration fixes needed — all tasks cleanly integrated.", ct);
             await SignalEngineeringCompleteAsync(ct);
             return;
@@ -5567,7 +5531,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             $"Integration PR #{pr.Number} created with {codeFiles.Count} fixes.", ct);
         await RememberAsync(MemoryType.Action,
             $"Created integration PR #{pr.Number} with {codeFiles.Count} integration fixes", ct: ct);
-        _taskTracker.CompleteStep(integrationStepId);
+        TaskTracker.CompleteStep(integrationStepId);
     }
 
     private async Task CloseIntegrationIssueAsync(string comment, CancellationToken ct)
@@ -6661,7 +6625,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var displayName = task.IssueNumber.HasValue
                 ? $"#{task.IssueNumber}: {task.Name}"
                 : task.Name;
-            _taskTracker.RegisterTaskDisplayName(task.Id, displayName);
+            TaskTracker.RegisterTaskDisplayName(task.Id, displayName);
         }
     }
 
@@ -7362,7 +7326,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
 
         try
         {
-            var stepId = _taskTracker.BeginStep(Identity.Id, "pe-orchestration", "LLM skill matching",
+            var stepId = TaskTracker.BeginStep(Identity.Id, "pe-orchestration", "LLM skill matching",
                 $"Matching {tasks.Count} tasks to {engineers.Count} engineers using semantic skill analysis", Identity.ModelTier);
 
             var prompt = new StringBuilder();
@@ -7417,7 +7381,7 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             var response = await chat.GetChatMessageContentsAsync(history, cancellationToken: ct);
             var content = response.FirstOrDefault()?.Content;
 
-            _taskTracker.CompleteStep(stepId);
+            TaskTracker.CompleteStep(stepId);
 
             if (string.IsNullOrWhiteSpace(content))
             {

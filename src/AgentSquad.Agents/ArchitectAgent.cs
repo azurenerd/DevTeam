@@ -3,18 +3,14 @@ using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.Agents.Decisions;
 using AgentSquad.Core.Agents.Reasoning;
-using AgentSquad.Core.Agents.Steps;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
-using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
 using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Prompts;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 
@@ -22,23 +18,8 @@ namespace AgentSquad.Agents;
 
 public class ArchitectAgent : AgentBase
 {
-    private readonly IMessageBus _messageBus;
-    private readonly IPullRequestService _prService;
-    private readonly IWorkItemService _workItemService;
-    private readonly IRepositoryContentService _repoContent;
-    private readonly IReviewService _reviewService;
-    private readonly IssueWorkflow _issueWorkflow;
-    private readonly PullRequestWorkflow _prWorkflow;
-    private readonly ProjectFileManager _projectFiles;
-    private readonly ModelRegistry _modelRegistry;
-    private readonly AgentSquadConfig _config;
-    private readonly IGateCheckService _gateCheck;
-    private readonly SelfAssessmentService _selfAssessment;
-    private readonly IAgentReasoningLog _reasoningLog;
-    private readonly IPromptTemplateService _promptService;
+    private readonly AgentPlatformServices _platform;
     private readonly DecisionGateService? _decisionGate;
-    private readonly IAgentTaskTracker _taskTracker;
-    private readonly IRunBranchProvider? _branchProvider;
 
     private readonly Queue<ArchitectureDirective>_taskQueue = new();
     private readonly HashSet<int> _reviewedPrNumbers = new();
@@ -48,60 +29,30 @@ public class ArchitectAgent : AgentBase
 
     private bool _architectureComplete;
 
+
     public ArchitectAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        IssueWorkflow issueWorkflow,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
-        SelfAssessmentService selfAssessment,
-        IAgentReasoningLog reasoningLog,
-        IPromptTemplateService promptService,
-        IAgentTaskTracker taskTracker,
+        AgentCoreServices core,
+        AgentPlatformServices platform,
         ILogger<ArchitectAgent> logger,
-        IPullRequestService prService,
-        IWorkItemService workItemService,
-        IRepositoryContentService repoContent,
-        IReviewService reviewService,
-        RoleContextProvider? roleContextProvider = null,
-        DecisionGateService? decisionGate = null,
-        IRunBranchProvider? branchProvider = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        DecisionGateService? decisionGate = null)
+        : base(identity, core, logger)
     {
-        _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _prService = prService ?? throw new ArgumentNullException(nameof(prService));
-        _workItemService = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
-        _repoContent = repoContent ?? throw new ArgumentNullException(nameof(repoContent));
-        _reviewService = reviewService ?? throw new ArgumentNullException(nameof(reviewService));
-        _issueWorkflow = issueWorkflow ?? throw new ArgumentNullException(nameof(issueWorkflow));
-        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
-        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _selfAssessment = selfAssessment ?? throw new ArgumentNullException(nameof(selfAssessment));
-        _reasoningLog = reasoningLog ?? throw new ArgumentNullException(nameof(reasoningLog));
-        _promptService = promptService ?? throw new ArgumentNullException(nameof(promptService));
-        _taskTracker = taskTracker ?? throw new ArgumentNullException(nameof(taskTracker));
+        _platform = platform ?? throw new ArgumentNullException(nameof(platform));
         _decisionGate = decisionGate;
-        _branchProvider = branchProvider;
     }
 
-    private string EffectiveBranch => _branchProvider?.EffectiveBranch ?? _config.Project.DefaultBranch;
+    private string EffectiveBranch => _platform.BranchProvider?.EffectiveBranch ?? Core!.Config.Project.DefaultBranch;
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
         // Only listen for PMSpecReady — NOT generic TaskAssignments.
         // The PM sends a dedicated TaskAssignment after PMSpec is created,
         // but we gate on StatusUpdateMessage to avoid starting before PMSpec exists.
-        _subscriptions.Add(_messageBus.Subscribe<StatusUpdateMessage>(
+        _subscriptions.Add(Core!.MessageBus.Subscribe<StatusUpdateMessage>(
             Identity.Id, HandleStatusUpdateAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<ReviewRequestMessage>(
+        _subscriptions.Add(Core!.MessageBus.Subscribe<ReviewRequestMessage>(
             Identity.Id, HandleReviewRequestAsync));
 
         // NOTE: Idempotency check for existing Architecture.md is performed inside
@@ -144,7 +95,7 @@ public class ArchitectAgent : AgentBase
                 await RefreshDiagnosticWithMemoryAsync(ct);
 
                 await Task.Delay(
-                    TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds), ct);
+                    TimeSpan.FromSeconds(Core!.Config.Limits.GitHubPollIntervalSeconds), ct);
             }
             catch (OperationCanceledException)
             {
@@ -225,20 +176,20 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var currentContent = await _projectFiles.GetArchitectureDocAsync(ct);
+            var currentContent = await Core!.ProjectFiles.GetArchitectureDocAsync(ct);
             if (string.IsNullOrWhiteSpace(currentContent)) return null;
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core!.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
             var history = CreateChatHistory();
 
-            var revSys = await _promptService.RenderAsync("architect/revision-system",
+            var revSys = await Core!.PromptService!.RenderAsync("architect/revision-system",
                 new Dictionary<string, string>(), ct)
                 ?? "You are a senior software architect revising Architecture.md based on human reviewer feedback. " +
                    "Make the specific changes requested while preserving the overall structure.";
             history.AddSystemMessage(revSys);
 
-            var revUser = await _promptService.RenderAsync("architect/revision-user",
+            var revUser = await Core!.PromptService!.RenderAsync("architect/revision-user",
                 new Dictionary<string, string>
                 {
                     ["current_content"] = currentContent,
@@ -265,13 +216,13 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var pr = await _prService.GetAsync(prNumber, ct);
+            var pr = await _platform.PrService.GetAsync(prNumber, ct);
             if (pr is null) return;
             var labels = pr.Labels?.ToList() ?? [];
             labels.Remove("human-approved");
             if (!labels.Contains("awaiting-human-review"))
                 labels.Add("awaiting-human-review");
-            await _prService.UpdateAsync(prNumber, labels: labels, ct: ct);
+            await _platform.PrService.UpdateAsync(prNumber, labels: labels, ct: ct);
         }
         catch (Exception ex)
         {
@@ -282,13 +233,13 @@ public class ArchitectAgent : AgentBase
     private async Task DesignArchitectureAsync(ArchitectureDirective directive, CancellationToken ct)
     {
         // Idempotency: check if Architecture.md already has real architectural content
-        var existingArch = await _projectFiles.GetArchitectureDocAsync(ct);
+        var existingArch = await Core!.ProjectFiles.GetArchitectureDocAsync(ct);
         if (!string.IsNullOrWhiteSpace(existingArch) &&
             !existingArch.Contains("No architecture document has been created yet") &&
             existingArch.Contains("## System Components", StringComparison.OrdinalIgnoreCase))
         {
             Logger.LogInformation("Architecture.md already exists with content, skipping design");
-            _reasoningLog.Log(new AgentReasoningEvent
+            Core!.ReasoningLog!.Log(new AgentReasoningEvent
             {
                 AgentId = Identity.Id,
                 AgentDisplayName = Identity.DisplayName,
@@ -298,7 +249,7 @@ public class ArchitectAgent : AgentBase
                 Detail = "Idempotency check found existing architecture with System Components section. Skipping design and signaling ArchitectureComplete."
             });
             // Still signal downstream so PE isn't stuck
-            await _messageBus.PublishAsync(new StatusUpdateMessage
+            await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id,
                 ToAgentId = "*",
@@ -313,7 +264,7 @@ public class ArchitectAgent : AgentBase
         int? relatedIssue = null;
         try
         {
-            var issues = await _workItemService.ListOpenAsync(ct);
+            var issues = await _platform.WorkItemService.ListOpenAsync(ct);
             var archIssue = issues.FirstOrDefault(i =>
                 i.Title.Contains("Architecture", StringComparison.OrdinalIgnoreCase) ||
                 i.Title.Contains("architecture", StringComparison.OrdinalIgnoreCase));
@@ -325,32 +276,32 @@ public class ArchitectAgent : AgentBase
         }
 
         // Quick mode: produce a minimal 1-paragraph architecture for fast testing
-        var archPath = _projectFiles.ResolvePath("Architecture.md");
-        if (_config.Project.QuickDocumentCreation)
+        var archPath = Core!.ProjectFiles.ResolvePath("Architecture.md");
+        if (Core!.Config.Project.QuickDocumentCreation)
         {
             Logger.LogInformation("QuickDocumentCreation: producing minimal Architecture.md");
             UpdateStatus(AgentStatus.Working, "Creating minimal Architecture (quick mode)");
-            var qPr = await _prWorkflow.OpenDocumentPRAsync(
+            var qPr = await _platform.PrWorkflow.OpenDocumentPRAsync(
                 Identity.DisplayName, archPath,
                 $"System Architecture for {directive.Title}",
                 "Quick-mode architecture document.", relatedIssue, ct);
 
-            var qKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var qKernel = Core!.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var qChat = qKernel.GetRequiredService<IChatCompletionService>();
             var qHistory = CreateChatHistory();
 
-            var qSys = await _promptService.RenderAsync("architect/quick-system",
+            var qSys = await Core!.PromptService!.RenderAsync("architect/quick-system",
                 new Dictionary<string, string>(), ct)
                 ?? "You are a software architect. Write a brief architecture document.";
             qHistory.AddSystemMessage(qSys);
 
-            var qUser = await _promptService.RenderAsync("architect/quick-user",
+            var qUser = await Core!.PromptService!.RenderAsync("architect/quick-user",
                 new Dictionary<string, string>
                 {
-                    ["project_description"] = _config.Project.Description,
-                    ["tech_stack"] = _config.Project.TechStack
+                    ["project_description"] = Core!.Config.Project.Description,
+                    ["tech_stack"] = Core!.Config.Project.TechStack
                 }, ct)
-                ?? $"Project: {_config.Project.Description}\nTech Stack: {_config.Project.TechStack}\n\n" +
+                ?? $"Project: {Core!.Config.Project.Description}\nTech Stack: {Core!.Config.Project.TechStack}\n\n" +
                    "Write a concise architecture document with these sections (1-2 sentences each): " +
                    "## System Components (list main components), ## Data Model (key entities), " +
                    "## Project Structure (folder layout — the repo root IS the solution root; " +
@@ -361,7 +312,7 @@ public class ArchitectAgent : AgentBase
             var qResp = await qChat.GetChatMessageContentAsync(qHistory, cancellationToken: ct);
             var qContent = $"# System Architecture: {directive.Title}\n\n{qResp.Content?.Trim() ?? ""}";
 
-            await _prWorkflow.CommitAndMergeDocumentPRAsync(
+            await _platform.PrWorkflow.CommitAndMergeDocumentPRAsync(
                 qPr, Identity.DisplayName, archPath, qContent,
                 $"Add system architecture for {directive.Title}", ct);
             Logger.LogInformation("Quick Architecture.md created and merged");
@@ -369,11 +320,11 @@ public class ArchitectAgent : AgentBase
 
             if (relatedIssue.HasValue)
             {
-                try { await _workItemService.CloseAsync(relatedIssue.Value, ct); }
+                try { await _platform.WorkItemService.CloseAsync(relatedIssue.Value, ct); }
                 catch { /* best effort */ }
             }
 
-            await _messageBus.PublishAsync(new StatusUpdateMessage
+            await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
             {
                 FromAgentId = Identity.Id, ToAgentId = "*",
                 MessageType = "ArchitectureComplete",
@@ -387,8 +338,8 @@ public class ArchitectAgent : AgentBase
         // Create the PR upfront so it's visible immediately
         UpdateStatus(AgentStatus.Working, "Creating PR for Architecture.md");
         string? createPrStepId = null;
-        try { createPrStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Create architecture PR", "Opening PR for Architecture.md"); } catch { }
-        var pr = await _prWorkflow.OpenDocumentPRAsync(
+        try { createPrStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Create architecture PR", "Opening PR for Architecture.md"); } catch { }
+        var pr = await _platform.PrWorkflow.OpenDocumentPRAsync(
             Identity.DisplayName,
             archPath,
             $"System Architecture for {directive.Title}",
@@ -396,10 +347,10 @@ public class ArchitectAgent : AgentBase
             "API contracts, infrastructure, security, and scaling strategy.",
             relatedIssue,
             ct);
-        try { if (createPrStepId is not null) _taskTracker.CompleteStep(createPrStepId); } catch { }
+        try { if (createPrStepId is not null) Core!.TaskTracker!.CompleteStep(createPrStepId); } catch { }
 
         // Resume-aware: check if gate is already pending/approved from a prior run
-        var gateStatus = await _gateCheck.GetGateStatusAsync(
+        var gateStatus = await Core!.GateCheck.GetGateStatusAsync(
             GateIds.ArchitectureDesign, pr.Number, ct);
 
         string? architectureDoc = null;
@@ -425,17 +376,17 @@ public class ArchitectAgent : AgentBase
         // 1. Read PM specs and Research.md
         LogActivity("planning", "📋 Reading PMSpec and Research inputs");
         string? readCtxStepId = null;
-        try { readCtxStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Read context (PMSpec, Research)", "Reading PM specification and research findings"); } catch { }
-        var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
-        var research = await _projectFiles.GetResearchDocAsync(ct);
+        try { readCtxStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Read context (PMSpec, Research)", "Reading PM specification and research findings"); } catch { }
+        var pmSpec = await Core!.ProjectFiles.GetPMSpecAsync(ct);
+        var research = await Core!.ProjectFiles.GetResearchDocAsync(ct);
 
         // 1b. Read visual design reference files directly for architecture decisions
         LogActivity("planning", "🔍 Scanning design reference files");
         var designContext = await ReadDesignReferencesAsync(ct);
-        try { if (readCtxStepId is not null) _taskTracker.CompleteStep(readCtxStepId); } catch { }
+        try { if (readCtxStepId is not null) Core!.TaskTracker!.CompleteStep(readCtxStepId); } catch { }
 
         // 2. Use Semantic Kernel multi-turn conversation to design architecture
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+        var kernel = Core!.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         var history = CreateChatHistory();
@@ -443,14 +394,14 @@ public class ArchitectAgent : AgentBase
 
         var sysVars = new Dictionary<string, string>
         {
-            ["tech_stack"] = _config.Project.TechStack,
+            ["tech_stack"] = Core!.Config.Project.TechStack,
             ["memory_context"] = string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}",
             ["design_context"] = ""
         };
 
         if (!string.IsNullOrWhiteSpace(designContext))
         {
-            var designPrompt = await _promptService.RenderAsync("architect/design-reference",
+            var designPrompt = await Core!.PromptService!.RenderAsync("architect/design-reference",
                 new Dictionary<string, string> { ["design_context"] = designContext }, ct);
             sysVars["design_context"] = designPrompt ??
                 "\n\n## VISUAL DESIGN REFERENCE\n" +
@@ -461,14 +412,14 @@ public class ArchitectAgent : AgentBase
                 designContext;
         }
 
-        var systemPrompt = await _promptService.RenderAsync("architect/full-system", sysVars, ct)
+        var systemPrompt = await Core!.PromptService!.RenderAsync("architect/full-system", sysVars, ct)
             ?? "You are a senior software architect on a development team. " +
                "Your job is to design a complete, well-structured system architecture based on " +
                "the PM specification (business requirements) and research findings. " +
                "Ensure the architecture supports all business goals, user stories, and " +
                "non-functional requirements from the PM spec. Be thorough, specific, and practical. " +
                "Focus on producing actionable architecture that engineers can implement directly.\n\n" +
-               $"IMPORTANT: The project's technology stack has already been decided: **{_config.Project.TechStack}**. " +
+               $"IMPORTANT: The project's technology stack has already been decided: **{Core!.Config.Project.TechStack}**. " +
                "Your architecture MUST use this stack. Design all components, patterns, and " +
                "infrastructure around this technology. Do NOT recommend or use alternative stacks." +
                (string.IsNullOrEmpty(memoryContext) ? "" : $"\n\n{memoryContext}") +
@@ -483,9 +434,9 @@ public class ArchitectAgent : AgentBase
 
         history.AddSystemMessage(systemPrompt);
 
-        var useSinglePass = _config.CopilotCli.SinglePassMode;
+        var useSinglePass = Core!.Config.CopilotCli.SinglePassMode;
         string? designStepId = null;
-        try { designStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Architecture design", "Designing architecture via AI conversation", Identity.ModelTier); } catch { }
+        try { designStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Architecture design", "Designing architecture via AI conversation", Identity.ModelTier); } catch { }
 
         if (useSinglePass)
         {
@@ -497,15 +448,15 @@ public class ArchitectAgent : AgentBase
             {
                 ["task_title"] = directive.Title,
                 ["task_description"] = directive.Description,
-                ["tech_stack"] = _config.Project.TechStack,
+                ["tech_stack"] = Core!.Config.Project.TechStack,
                 ["pm_spec"] = pmSpec ?? "",
                 ["research"] = research ?? ""
             };
-            var singlePassUser = await _promptService.RenderAsync("architect/single-pass-user", singlePassVars, ct)
+            var singlePassUser = await Core!.PromptService!.RenderAsync("architect/single-pass-user", singlePassVars, ct)
                 ?? $"I need you to design the complete system architecture for our project.\n\n" +
                    $"**Task:** {directive.Title}\n\n" +
                    $"**Description:** {directive.Description}\n\n" +
-                   $"**Technology Stack (mandatory):** {_config.Project.TechStack}\n\n" +
+                   $"**Technology Stack (mandatory):** {Core!.Config.Project.TechStack}\n\n" +
                    $"## PM Specification (Business Requirements)\n{pmSpec}\n\n" +
                    $"## Research Findings\n{research}\n\n" +
                    "Produce a complete, structured Architecture.md document with ALL of these sections:\n\n" +
@@ -528,7 +479,7 @@ public class ArchitectAgent : AgentBase
             var singleResponse = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
             architectureDoc = singleResponse.Content?.Trim() ?? "";
-            try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Single-pass architecture design"); } } catch { }
+            try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Single-pass architecture design"); } } catch { }
         }
         else
         {
@@ -538,15 +489,15 @@ public class ArchitectAgent : AgentBase
         {
             ["task_title"] = directive.Title,
             ["task_description"] = directive.Description,
-            ["tech_stack"] = _config.Project.TechStack,
+            ["tech_stack"] = Core!.Config.Project.TechStack,
             ["pm_spec"] = pmSpec ?? "",
             ["research"] = research ?? ""
         };
-        var turn1Prompt = await _promptService.RenderAsync("architect/multi-turn-decisions", turnVars, ct)
+        var turn1Prompt = await Core!.PromptService!.RenderAsync("architect/multi-turn-decisions", turnVars, ct)
             ?? $"I need you to design the system architecture for our project.\n\n" +
                $"**Task:** {directive.Title}\n\n" +
                $"**Description:** {directive.Description}\n\n" +
-               $"**Technology Stack (mandatory):** {_config.Project.TechStack}\n\n" +
+               $"**Technology Stack (mandatory):** {Core!.Config.Project.TechStack}\n\n" +
                $"## PM Specification (Business Requirements)\n{pmSpec}\n\n" +
                $"## Research Findings\n{research}\n\n" +
                "First, identify the key architectural decisions we need to make. " +
@@ -559,7 +510,7 @@ public class ArchitectAgent : AgentBase
         var decisionsResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(decisionsResponse.Content ?? "");
-        try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Turn 1/5: Key architectural decisions"); } } catch { }
+        try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Turn 1/5: Key architectural decisions"); } } catch { }
 
         Logger.LogDebug("Architectural decisions identified for {TaskId}", directive.TaskId);
         await RememberAsync(MemoryType.Decision,
@@ -569,7 +520,7 @@ public class ArchitectAgent : AgentBase
         // Turn 2: Design system components and interactions
         LogActivity("planning", "🤖 AI turn 2/5: Components & interactions");
         UpdateStatus(AgentStatus.Working, "Designing (2/5): Components & interactions");
-        var turn2Prompt = await _promptService.RenderAsync("architect/multi-turn-components",
+        var turn2Prompt = await Core!.PromptService!.RenderAsync("architect/multi-turn-components",
             new Dictionary<string, string>(), ct)
             ?? "Now design the system components based on those decisions. For each component, cover:\n" +
                "- Name and responsibility (single responsibility principle)\n" +
@@ -582,14 +533,14 @@ public class ArchitectAgent : AgentBase
         var componentsResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(componentsResponse.Content ?? "");
-        try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Turn 2/5: Components & interactions"); } } catch { }
+        try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Turn 2/5: Components & interactions"); } } catch { }
 
         Logger.LogDebug("System components designed for {TaskId}", directive.TaskId);
 
         // Turn 3: Data model, API contracts, and infrastructure
         LogActivity("planning", "🤖 AI turn 3/5: Data model & APIs");
         UpdateStatus(AgentStatus.Working, "Designing (3/5): Data model & APIs");
-        var turn3Prompt = await _promptService.RenderAsync("architect/multi-turn-data-model",
+        var turn3Prompt = await Core!.PromptService!.RenderAsync("architect/multi-turn-data-model",
             new Dictionary<string, string>(), ct)
             ?? "Now define:\n" +
                "1. **Data Model** — key entities, their relationships, and storage strategy.\n" +
@@ -601,14 +552,14 @@ public class ArchitectAgent : AgentBase
         var contractsResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(contractsResponse.Content ?? "");
-        try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Turn 3/5: Data model & APIs"); } } catch { }
+        try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Turn 3/5: Data model & APIs"); } } catch { }
 
         Logger.LogDebug("Data model and contracts defined for {TaskId}", directive.TaskId);
 
         // Turn 4: Security, scaling, and risk mitigation
         LogActivity("planning", "🤖 AI turn 4/5: Security & scaling");
         UpdateStatus(AgentStatus.Working, "Designing (4/5): Security & scaling");
-        var turn4Prompt = await _promptService.RenderAsync("architect/multi-turn-cross-cutting",
+        var turn4Prompt = await Core!.PromptService!.RenderAsync("architect/multi-turn-cross-cutting",
             new Dictionary<string, string>(), ct)
             ?? "Now address cross-cutting concerns:\n" +
                "1. **Security Considerations** — authentication, authorization, data protection, input validation.\n" +
@@ -620,14 +571,14 @@ public class ArchitectAgent : AgentBase
         var risksResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         history.AddAssistantMessage(risksResponse.Content ?? "");
-        try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Turn 4/5: Security & scaling"); } } catch { }
+        try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Turn 4/5: Security & scaling"); } } catch { }
 
         Logger.LogDebug("Cross-cutting concerns addressed for {TaskId}", directive.TaskId);
 
         // Turn 5: Compile into structured Architecture.md
         LogActivity("planning", "🤖 AI turn 5/5: Compiling Architecture.md");
         UpdateStatus(AgentStatus.Working, "Designing (5/5): Compiling Architecture.md");
-        var turn5Prompt = await _promptService.RenderAsync("architect/multi-turn-compile",
+        var turn5Prompt = await Core!.PromptService!.RenderAsync("architect/multi-turn-compile",
             new Dictionary<string, string>(), ct)
             ?? "Now compile everything into a single, structured Architecture.md document with these exact sections:\n\n" +
                "# Architecture\n\n" +
@@ -658,15 +609,15 @@ public class ArchitectAgent : AgentBase
         var architectureResponse = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         architectureDoc = architectureResponse.Content?.Trim() ?? "";
-        try { if (designStepId is not null) { _taskTracker.RecordLlmCall(designStepId); _taskTracker.RecordSubStep(designStepId, "Turn 5/5: Compiling Architecture.md"); } } catch { }
+        try { if (designStepId is not null) { Core!.TaskTracker!.RecordLlmCall(designStepId); Core!.TaskTracker!.RecordSubStep(designStepId, "Turn 5/5: Compiling Architecture.md"); } } catch { }
 
         } // end else (multi-turn)
 
         // Self-assessment: assess and refine the architecture document
-        try { if (designStepId is not null) _taskTracker.CompleteStep(designStepId); } catch { }
+        try { if (designStepId is not null) Core!.TaskTracker!.CompleteStep(designStepId); } catch { }
         string? assessStepId = null;
-        try { assessStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & impact classification", "Assessing and refining architecture output", Identity.ModelTier); } catch { }
-        _reasoningLog.Log(new AgentReasoningEvent
+        try { assessStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & impact classification", "Assessing and refining architecture output", Identity.ModelTier); } catch { }
+        Core!.ReasoningLog!.Log(new AgentReasoningEvent
         {
             AgentId = Identity.Id,
             AgentDisplayName = Identity.DisplayName,
@@ -681,14 +632,14 @@ public class ArchitectAgent : AgentBase
         if (criteria is not null)
         {
             // Use inline classification to save a separate LLM call
-            var (refinedOutput, assessment) = await _selfAssessment.AssessAndRefineWithResultAsync(
+            var (refinedOutput, assessment) = await Core!.SelfAssessment!.AssessAndRefineWithResultAsync(
                 Identity.Id,
                 Identity.DisplayName,
                 Identity.Role,
                 "Architecture",
                 architectureDoc,
                 criteria,
-                $"Project: {_config.Project.Description}\nPM Spec and Research available for reference",
+                $"Project: {Core!.Config.Project.Description}\nPM Spec and Research available for reference",
                 chat,
                 classifyImpact: _decisionGate is not null,
                 ct);
@@ -749,7 +700,7 @@ public class ArchitectAgent : AgentBase
                     archDecision.HumanFeedback ?? "No feedback provided", ct);
             }
         }
-        try { if (assessStepId is not null) _taskTracker.CompleteStep(assessStepId); } catch { }
+        try { if (assessStepId is not null) Core!.TaskTracker!.CompleteStep(assessStepId); } catch { }
 
         } // end else (fresh AI work, not resuming from gate)
 
@@ -759,25 +710,25 @@ public class ArchitectAgent : AgentBase
             LogActivity("task", "📝 Committing Architecture.md to PR");
             UpdateStatus(AgentStatus.Working, "Committing Architecture.md for review");
             string? commitStepId = null;
-            try { commitStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Commit Architecture.md", "Committing architecture document to PR"); } catch { }
-            await _prWorkflow.CommitDocumentToPRAsync(
+            try { commitStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Commit Architecture.md", "Committing architecture document to PR"); } catch { }
+            await _platform.PrWorkflow.CommitDocumentToPRAsync(
                 pr, archPath, architectureDoc,
                 $"Add system architecture for {directive.Title}", ct);
-            try { if (commitStepId is not null) _taskTracker.CompleteStep(commitStepId); } catch { }
+            try { if (commitStepId is not null) Core!.TaskTracker!.CompleteStep(commitStepId); } catch { }
         }
 
         // === Gate: ArchitectureDesign — human reviews architecture before merge ===
         if (gateStatus != GateStatus.Approved)
         {
             string? gateStepId = null;
-            try { gateStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Human gate review", $"Awaiting human approval on PR #{pr.Number}"); } catch { }
-            try { if (gateStepId is not null) _taskTracker.SetStepWaiting(gateStepId); } catch { }
+            try { gateStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Human gate review", $"Awaiting human approval on PR #{pr.Number}"); } catch { }
+            try { if (gateStepId is not null) Core!.TaskTracker!.SetStepWaiting(gateStepId); } catch { }
             var maxRevisions = 3;
             for (var revision = 0; revision < maxRevisions; revision++)
             {
-                if (_gateCheck.RequiresHuman(GateIds.ArchitectureDesign))
+                if (Core!.GateCheck.RequiresHuman(GateIds.ArchitectureDesign))
                     UpdateStatus(AgentStatus.Working, $"⏳ Awaiting human approval on PR #{pr.Number}");
-                var gateWait = await _gateCheck.WaitForGateAsync(
+                var gateWait = await Core!.GateCheck.WaitForGateAsync(
                     GateIds.ArchitectureDesign,
                     "Architecture.md ready for human review before merge",
                     pr.Number, ct: ct);
@@ -792,15 +743,15 @@ public class ArchitectAgent : AgentBase
                 var revised = await ReviseArchitectureAsync(directive, gateWait.Feedback!, ct);
                 if (revised is not null && !pr.IsMerged)
                 {
-                    await _prWorkflow.CommitDocumentToPRAsync(
+                    await _platform.PrWorkflow.CommitDocumentToPRAsync(
                         pr, archPath, revised,
                         $"Revise architecture based on reviewer feedback (attempt {revision + 2})", ct);
                 }
                 await ResetGateLabelsAsync(pr.Number, ct);
-                await _reviewService.AddCommentAsync(pr.Number,
+                await _platform.ReviewService.AddCommentAsync(pr.Number,
                     $"📝 **Revised** based on your feedback:\n\n> {gateWait.Feedback}\n\nPlease review the updated Architecture.md.", ct);
             }
-            try { if (gateStepId is not null) _taskTracker.CompleteStep(gateStepId); } catch { }
+            try { if (gateStepId is not null) Core!.TaskTracker!.CompleteStep(gateStepId); } catch { }
         }
 
         // Merge after gate approval (skip if PR already merged)
@@ -809,10 +760,10 @@ public class ArchitectAgent : AgentBase
         {
             LogActivity("task", "🔗 Merging Architecture.md PR");
             UpdateStatus(AgentStatus.Working, "Merging Architecture.md PR");
-            try { mergeStepId = _taskTracker.BeginStep(Identity.Id, directive.TaskId, "Merge PR", "Merging Architecture.md PR"); } catch { }
-            await _prWorkflow.MergeDocumentPRAsync(
+            try { mergeStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Merge PR", "Merging Architecture.md PR"); } catch { }
+            await _platform.PrWorkflow.MergeDocumentPRAsync(
                 pr, Identity.DisplayName, archPath, ct);
-            try { if (mergeStepId is not null) _taskTracker.CompleteStep(mergeStepId); } catch { }
+            try { if (mergeStepId is not null) Core!.TaskTracker!.CompleteStep(mergeStepId); } catch { }
         }
 
         Logger.LogInformation("Architecture.md PR created and merged for task {TaskId}", directive.TaskId);
@@ -826,7 +777,7 @@ public class ArchitectAgent : AgentBase
         {
             try
             {
-                await _workItemService.CloseAsync(relatedIssue.Value, ct);
+                await _platform.WorkItemService.CloseAsync(relatedIssue.Value, ct);
                 Logger.LogInformation("Closed related issue #{IssueNumber}", relatedIssue.Value);
             }
             catch (Exception ex)
@@ -843,7 +794,7 @@ public class ArchitectAgent : AgentBase
         // below (ArchitectureComplete) is the correct notification mechanism.
 
         // Notify all agents via message bus that architecture is complete
-        await _messageBus.PublishAsync(new StatusUpdateMessage
+        await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
         {
             FromAgentId = Identity.Id,
             ToAgentId = "*",
@@ -877,7 +828,7 @@ public class ArchitectAgent : AgentBase
                 if (_reviewedPrNumbers.Contains(prNumber))
                     continue;
 
-                var platformPr = await _prService.GetAsync(prNumber, ct);
+                var platformPr = await _platform.PrService.GetAsync(prNumber, ct);
                 if (platformPr is null)
                     continue;
                 var pr = platformPr.ToAgentPR();
@@ -901,7 +852,7 @@ public class ArchitectAgent : AgentBase
                 // Dedup across restarts: check GitHub comments to see if we already reviewed
                 // BUT always process force-approval PRs regardless
                 if (!_forceApprovalPrs.Contains(prNumber) &&
-                    !await _prWorkflow.NeedsReviewFromAsync(prNumber, "Architect", ct))
+                    !await _platform.PrWorkflow.NeedsReviewFromAsync(prNumber, "Architect", ct))
                 {
                     _reviewedPrNumbers.Add(prNumber);
                     continue;
@@ -934,7 +885,7 @@ public class ArchitectAgent : AgentBase
                             "PR #{Number} has no substantive production code — refusing force-approval. " +
                             "Requesting SE resubmit with real scaffolding content.",
                             prNumber);
-                        await _prWorkflow.RequestChangesAsync(prNumber, "Architect",
+                        await _platform.PrWorkflow.RequestChangesAsync(prNumber, "Architect",
                             "🛑 **Force-approval refused — PR has no production code.**\n\n" +
                             "The branch contains only task markers / test stubs / workflow files — no `.sln`, `.csproj`, " +
                             "source files, or components. This usually indicates a failed code-generation or push. " +
@@ -957,7 +908,7 @@ public class ArchitectAgent : AgentBase
                 }
                 else
                 {
-                    var hasNewCommits = await _prWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "Architect", ct);
+                    var hasNewCommits = await _platform.PrWorkflow.HasNewCommitsSinceReviewAsync(prNumber, "Architect", ct);
                     if (!hasNewCommits)
                     {
                         // NO-NEW-COMMITS REFUSAL: do not auto-approve when HEAD hasn't advanced.
@@ -976,32 +927,32 @@ public class ArchitectAgent : AgentBase
 
                 var verdict = reviewResult.Verdict;
                 var reasoning = reviewResult.Summary;
-                var riskSuffix = _config.Review.EnableRiskAssessment
+                var riskSuffix = Core!.Config.Review.EnableRiskAssessment
                     ? $"\n\n⚠️ **Risk Level**: {reviewResult.RiskLevel.ToString().ToUpperInvariant()}"
                     : "";
 
                 // Check human risk gate BEFORE adding phase-transition labels
-                if (verdict == "APPROVED" && _config.Review.MinRiskLevelForHumanReview != ReviewRiskLevel.None
-                    && reviewResult.RiskLevel >= _config.Review.MinRiskLevelForHumanReview)
+                if (verdict == "APPROVED" && Core!.Config.Review.MinRiskLevelForHumanReview != ReviewRiskLevel.None
+                    && reviewResult.RiskLevel >= Core!.Config.Review.MinRiskLevelForHumanReview)
                 {
                     Logger.LogInformation(
                         "PR #{Number} risk level {Risk} >= gate threshold {Threshold} — adding human-review-required label",
-                        pr.Number, reviewResult.RiskLevel, _config.Review.MinRiskLevelForHumanReview);
+                        pr.Number, reviewResult.RiskLevel, Core!.Config.Review.MinRiskLevelForHumanReview);
 
                     var gateLabels = pr.Labels
                         .Append(PullRequestWorkflow.Labels.HumanReviewRequired)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
-                    await _prService.UpdateAsync(pr.Number, labels: gateLabels, ct: ct);
-                    await _reviewService.AddCommentAsync(pr.Number,
+                    await _platform.PrService.UpdateAsync(pr.Number, labels: gateLabels, ct: ct);
+                    await _platform.ReviewService.AddCommentAsync(pr.Number,
                         $"**[Architect] APPROVED** (pending human review)\n\n" +
                         $"🏗️ Architecture Review: {reasoning}{riskSuffix}\n\n" +
                         $"⏳ **Human review required** — risk level `{reviewResult.RiskLevel}` meets or exceeds " +
-                        $"the configured threshold `{_config.Review.MinRiskLevelForHumanReview}`. " +
+                        $"the configured threshold `{Core!.Config.Review.MinRiskLevelForHumanReview}`. " +
                         $"Remove the `{PullRequestWorkflow.Labels.HumanReviewRequired}` label to proceed.", ct);
 
                     // Submit inline comments as a review even though we're gating
-                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    if (reviewResult.Comments.Count > 0 && Core!.Config.Review.EnableInlineComments)
                     {
                         await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
                     }
@@ -1016,11 +967,11 @@ public class ArchitectAgent : AgentBase
                     // Phase 1 complete: Architect approved → add architect-approved label, do NOT merge.
                     // The TE will pick up the PR next (Phase 2), then PM reviews last (Phase 3).
                     var approvalComment = $"**[Architect] APPROVED**\n\n🏗️ Architecture Review: {reasoning}";
-                    await _reviewService.AddCommentAsync(pr.Number, approvalComment, ct);
+                    await _platform.ReviewService.AddCommentAsync(pr.Number, approvalComment, ct);
 
                     // Submit inline review comments as COMMENT event (single-PAT setup: APPROVE is
                     // forbidden on own PRs, so we always use COMMENT to keep comments on Files tab)
-                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    if (reviewResult.Comments.Count > 0 && Core!.Config.Review.EnableInlineComments)
                     {
                         await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
                     }
@@ -1036,7 +987,7 @@ public class ArchitectAgent : AgentBase
                         .Append(PullRequestWorkflow.Labels.ArchitectApproved)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToList();
-                    await _prService.UpdateAsync(pr.Number, labels: updatedLabels, ct: ct);
+                    await _platform.PrService.UpdateAsync(pr.Number, labels: updatedLabels, ct: ct);
 
                     LogActivity("task", $"✅ Approved PR #{pr.Number}: {pr.Title} — TE testing next");
                     await RememberAsync(MemoryType.Decision,
@@ -1044,7 +995,7 @@ public class ArchitectAgent : AgentBase
                         TruncateForMemory(reasoning), ct);
 
                     // Notify TE via bus that PR is ready for testing
-                    await _messageBus.PublishAsync(new StatusUpdateMessage
+                    await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = "*",
@@ -1056,11 +1007,11 @@ public class ArchitectAgent : AgentBase
                 }
                 else if (verdict == "REWORK")
                 {
-                    await _prWorkflow.RequestChangesAsync(
+                    await _platform.PrWorkflow.RequestChangesAsync(
                         pr.Number, "Architect", $"🏗️ Architecture Review: {reasoning}{riskSuffix}", ct);
 
                     // Submit inline comments as COMMENT review (single-PAT: REQUEST_CHANGES forbidden)
-                    if (reviewResult.Comments.Count > 0 && _config.Review.EnableInlineComments)
+                    if (reviewResult.Comments.Count > 0 && Core!.Config.Review.EnableInlineComments)
                     {
                         await SubmitInlineReviewCommentsAsync(pr.Number, reviewResult, "COMMENT", ct);
                     }
@@ -1072,7 +1023,7 @@ public class ArchitectAgent : AgentBase
                         TruncateForMemory(reasoning), ct);
 
                     // Notify the PR author via bus so they can start rework
-                    await _messageBus.PublishAsync(new ChangesRequestedMessage
+                    await Core!.MessageBus.PublishAsync(new ChangesRequestedMessage
                     {
                         FromAgentId = Identity.Id,
                         ToAgentId = "*",
@@ -1086,7 +1037,7 @@ public class ArchitectAgent : AgentBase
                 else
                 {
                     // Fallback: post as informational comment if AI didn't produce a clear verdict
-                    await _reviewService.AddCommentAsync(pr.Number,
+                    await _platform.ReviewService.AddCommentAsync(pr.Number,
                         $"🏗️ **Architecture Review (Advisory):**\n\n{reasoning}", ct);
                     Logger.LogWarning("Architect review for PR #{Number} produced unclear verdict: {Verdict}",
                         pr.Number, verdict);
@@ -1110,7 +1061,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var maxComments = _config.Review.MaxInlineCommentsPerReview;
+            var maxComments = Core!.Config.Review.MaxInlineCommentsPerReview;
             var platformComments = reviewResult.Comments
                 .Take(maxComments)
                 // Tag each comment with [Architect] so agents know who authored it
@@ -1128,7 +1079,7 @@ public class ArchitectAgent : AgentBase
                 $"{reviewResult.Summary}\n\n" +
                 $"_{platformComments.Count} inline comment(s) below_";
 
-            await _reviewService.CreateReviewWithInlineCommentsAsync(
+            await _platform.ReviewService.CreateReviewWithInlineCommentsAsync(
                 prNumber, reviewBody, eventType, platformComments, ct: ct);
 
             Logger.LogInformation(
@@ -1151,7 +1102,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var threads = await _reviewService.GetThreadsAsync(prNumber, ct);
+            var threads = await _platform.ReviewService.GetThreadsAsync(prNumber, ct);
             // Only resolve threads authored by this agent (identified by [Architect] tag in comment body)
             var ownThreads = threads
                 .Where(t => !t.IsResolved && t.Body.Contains("[Architect]", StringComparison.OrdinalIgnoreCase))
@@ -1169,7 +1120,7 @@ public class ArchitectAgent : AgentBase
             foreach (var thread in ownThreads)
             {
                 var replyBody = $"✅ **[Architect] Resolved** — Rework addressed this feedback. Approved.";
-                await _reviewService.ResolveThreadAsync(
+                await _platform.ReviewService.ResolveThreadAsync(
                     prNumber, thread.ThreadId, replyBody, ct);
             }
 
@@ -1191,7 +1142,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var files = await _prService.GetFileDiffsAsync(prNumber, ct);
+            var files = await _platform.PrService.GetFileDiffsAsync(prNumber, ct);
             if (files is null || files.Count == 0) return true;
 
             foreach (var f in files)
@@ -1247,12 +1198,12 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+            var kernel = Core!.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             LogActivity("review", "📋 Reading architecture doc and PR context");
-            var architectureDoc = await _projectFiles.GetArchitectureDocAsync(ct);
-            var pmSpec = await _projectFiles.GetPMSpecAsync(ct);
+            var architectureDoc = await Core!.ProjectFiles.GetArchitectureDocAsync(ct);
+            var pmSpec = await Core!.ProjectFiles.GetPMSpecAsync(ct);
 
             // Read the linked issue for acceptance criteria
             var issueContext = "";
@@ -1261,7 +1212,7 @@ public class ArchitectAgent : AgentBase
             {
                 try
                 {
-                    var issue = await _workItemService.GetAsync(issueNumber.Value, ct);
+                    var issue = await _platform.WorkItemService.GetAsync(issueNumber.Value, ct);
                     if (issue is not null)
                         issueContext = $"## Linked Issue #{issue.Number}: {issue.Title}\n{issue.Body}\n\n";
                 }
@@ -1273,10 +1224,10 @@ public class ArchitectAgent : AgentBase
 
             // Read actual code files from the PR branch
             LogActivity("review", "🔍 Reading PR code for architecture review");
-            var codeContext = await _prWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
+            var codeContext = await _platform.PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Get actual changed file list so LLM only references real paths in inline comments
-            var changedFiles = await _prService.GetChangedFilesAsync(pr.Number, ct);
+            var changedFiles = await _platform.PrService.GetChangedFilesAsync(pr.Number, ct);
             var fileListContext = changedFiles.Count > 0
                 ? "\n\n## Changed Files in This PR\n" +
                   "Your inline comment `file` paths MUST exactly match one of these:\n" +
@@ -1288,9 +1239,9 @@ public class ArchitectAgent : AgentBase
             var screenshotContext = "";
             try
             {
-                screenshotImages = await _prWorkflow.GetPRScreenshotImagesAsync(pr.Number, ct: ct);
+                screenshotImages = await _platform.PrWorkflow.GetPRScreenshotImagesAsync(pr.Number, ct: ct);
                 if (screenshotImages.Count == 0)
-                    screenshotContext = await _prWorkflow.GetPRScreenshotContextAsync(pr.Number, ct);
+                    screenshotContext = await _platform.PrWorkflow.GetPRScreenshotContextAsync(pr.Number, ct);
             }
             catch (Exception ex)
             {
@@ -1304,7 +1255,7 @@ public class ArchitectAgent : AgentBase
             {
                 try
                 {
-                    var descKernel = _modelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
+                    var descKernel = Core!.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
                     var descChat = descKernel.GetRequiredService<Microsoft.SemanticKernel.ChatCompletion.IChatCompletionService>();
                     foreach (var img in screenshotImages)
                     {
@@ -1335,10 +1286,10 @@ public class ArchitectAgent : AgentBase
                     : ""
             };
 
-            var useInlineComments = _config.Review.EnableInlineComments;
-            var useRiskAssessment = _config.Review.EnableRiskAssessment;
+            var useInlineComments = Core!.Config.Review.EnableInlineComments;
+            var useRiskAssessment = Core!.Config.Review.EnableRiskAssessment;
 
-            var reviewSys = await _promptService.RenderAsync("architect/pr-review-system", reviewSysVars, ct)
+            var reviewSys = await Core!.PromptService!.RenderAsync("architect/pr-review-system", reviewSysVars, ct)
                 ?? "You are a software architect reviewing a PR for architecture alignment.\n\n" +
                    "SCOPE: This PR is ONE task. Review only the parts it touches against the architecture doc.\n\n" +
                    "CHECK: component boundaries, folder structure, tech stack compliance, architectural patterns.\n" +
@@ -1684,7 +1635,7 @@ public class ArchitectAgent : AgentBase
     {
         try
         {
-            var tree = await _repoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
+            var tree = await _platform.RepoContent.GetRepositoryTreeAsync(EffectiveBranch, ct);
             var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
             var htmlDesignFiles = tree
@@ -1704,7 +1655,7 @@ public class ArchitectAgent : AgentBase
             var sb = new System.Text.StringBuilder();
             foreach (var file in htmlDesignFiles)
             {
-                var content = await _repoContent.GetFileContentAsync(file, EffectiveBranch, ct);
+                var content = await _platform.RepoContent.GetFileContentAsync(file, EffectiveBranch, ct);
                 if (string.IsNullOrWhiteSpace(content)) continue;
 
                 sb.AppendLine($"### Design File: `{file}`");

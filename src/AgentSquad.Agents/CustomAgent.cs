@@ -3,15 +3,11 @@ using System.Text;
 using AgentSquad.Core.Agents;
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
-using AgentSquad.Core.DevPlatform.Capabilities;
 using AgentSquad.Core.DevPlatform.Models;
-using AgentSquad.Core.GitHub;
 using AgentSquad.Core.GitHub.Models;
 using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
-using AgentSquad.Core.Prompts;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 
@@ -25,14 +21,7 @@ namespace AgentSquad.Agents;
 /// </summary>
 public class CustomAgent : AgentBase
 {
-    private readonly IMessageBus _messageBus;
-    private readonly IWorkItemService _workItems;
-    private readonly PullRequestWorkflow _prWorkflow;
-    private readonly ProjectFileManager _projectFiles;
-    private readonly ModelRegistry _modelRegistry;
-    private readonly AgentSquadConfig _config;
-    private readonly IGateCheckService _gateCheck;
-    private readonly IPromptTemplateService? _promptService;
+    private readonly AgentPlatformServices _platform;
 
     private readonly ConcurrentQueue<IssueAssignmentMessage> _issueQueue = new();
     private readonly ConcurrentQueue<TaskAssignmentMessage> _taskQueue = new();
@@ -41,38 +30,23 @@ public class CustomAgent : AgentBase
 
     public CustomAgent(
         AgentIdentity identity,
-        IMessageBus messageBus,
-        PullRequestWorkflow prWorkflow,
-        ProjectFileManager projectFiles,
-        ModelRegistry modelRegistry,
-        AgentMemoryStore memoryStore,
-        IOptions<AgentSquadConfig> config,
-        IGateCheckService gateCheck,
-        ILogger<CustomAgent> logger,
-        RoleContextProvider? roleContextProvider = null,
-        IPromptTemplateService? promptService = null,
-        IWorkItemService? workItemService = null)
-        : base(identity, logger, memoryStore, roleContextProvider)
+        AgentCoreServices core,
+        AgentPlatformServices platform,
+        ILogger<CustomAgent> logger)
+        : base(identity, core, logger)
     {
-        _messageBus = messageBus ?? throw new ArgumentNullException(nameof(messageBus));
-        _workItems = workItemService ?? throw new ArgumentNullException(nameof(workItemService));
-        _prWorkflow = prWorkflow ?? throw new ArgumentNullException(nameof(prWorkflow));
-        _projectFiles = projectFiles ?? throw new ArgumentNullException(nameof(projectFiles));
-        _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
-        _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
-        _gateCheck = gateCheck ?? throw new ArgumentNullException(nameof(gateCheck));
-        _promptService = promptService;
+        _platform = platform ?? throw new ArgumentNullException(nameof(platform));
     }
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(_messageBus.Subscribe<IssueAssignmentMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<IssueAssignmentMessage>(
             Identity.Id, HandleIssueAssignmentAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<TaskAssignmentMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<TaskAssignmentMessage>(
             Identity.Id, HandleTaskAssignmentAsync));
 
-        _subscriptions.Add(_messageBus.Subscribe<StatusUpdateMessage>(
+        _subscriptions.Add(Core.MessageBus.Subscribe<StatusUpdateMessage>(
             Identity.Id, HandleStatusUpdateAsync));
 
         Logger.LogInformation("Custom agent '{DisplayName}' initialized, awaiting assignments",
@@ -84,7 +58,7 @@ public class CustomAgent : AgentBase
     {
         UpdateStatus(AgentStatus.Idle, "Waiting for task assignments");
 
-        var pollInterval = TimeSpan.FromSeconds(_config.Limits.GitHubPollIntervalSeconds);
+        var pollInterval = TimeSpan.FromSeconds(Core.Config.Limits.GitHubPollIntervalSeconds);
 
         while (!ct.IsCancellationRequested)
         {
@@ -167,7 +141,7 @@ public class CustomAgent : AgentBase
 
         try
         {
-            var item = await _workItems.GetAsync(assignment.IssueNumber, ct);
+            var item = await _platform.WorkItemService.GetAsync(assignment.IssueNumber, ct);
             var issue = item?.ToAgentIssue();
             if (issue is null)
             {
@@ -180,10 +154,10 @@ public class CustomAgent : AgentBase
 
             if (!string.IsNullOrWhiteSpace(workProduct))
             {
-                var branchName = await _prWorkflow.CreateTaskBranchAsync(
+                var branchName = await _platform.PrWorkflow.CreateTaskBranchAsync(
                     Identity.DisplayName, $"issue-{assignment.IssueNumber}", ct);
 
-                await _prWorkflow.CreateTaskPullRequestAsync(
+                await _platform.PrWorkflow.CreateTaskPullRequestAsync(
                     agentName: Identity.DisplayName,
                     taskTitle: assignment.IssueTitle,
                     taskDescription: workProduct,
@@ -193,7 +167,7 @@ public class CustomAgent : AgentBase
                     branchName: branchName,
                     ct: ct);
 
-                await _messageBus.PublishAsync(new StatusUpdateMessage
+                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
                 {
                     FromAgentId = Identity.Id,
                     ToAgentId = "*",
@@ -226,16 +200,16 @@ public class CustomAgent : AgentBase
             var projectContext = await GatherProjectContextAsync(ct);
 
             var history = CreateChatHistory();
-            var taskSys = _promptService is not null
-                ? await _promptService.RenderAsync("custom/task-system",
+            var taskSys = Core.PromptService is not null
+                ? await Core.PromptService?.RenderAsync("custom/task-system",
                     new Dictionary<string, string> { ["display_name"] = Identity.DisplayName }, ct)
                 : null;
             history.AddSystemMessage(BuildSystemPrompt(taskSys ??
                 $"You are {Identity.DisplayName}, a custom agent on a software development team. " +
                 $"You have been assigned a task. Produce a detailed, actionable work product."));
 
-            var taskUser = _promptService is not null
-                ? await _promptService.RenderAsync("custom/task-user",
+            var taskUser = Core.PromptService is not null
+                ? await Core.PromptService?.RenderAsync("custom/task-user",
                     new Dictionary<string, string>
                     {
                         ["task_title"] = task.Title,
@@ -248,7 +222,7 @@ public class CustomAgent : AgentBase
                 $"## Project Context\n{projectContext}\n\n" +
                 "Produce your work product. Be thorough and specific.");
 
-            var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+            var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier);
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             SetAgentCallContext();
@@ -276,7 +250,7 @@ public class CustomAgent : AgentBase
     {
         try
         {
-            var items = await _workItems.ListOpenAsync(ct);
+            var items = await _platform.WorkItemService.ListOpenAsync(ct);
             var issues = items.ToAgentIssues();
 
             foreach (var issue in issues)
@@ -312,11 +286,11 @@ public class CustomAgent : AgentBase
 
         try
         {
-            var desc = _config.Project.Description;
+            var desc = Core.Config.Project.Description;
             if (!string.IsNullOrWhiteSpace(desc))
-                sb.AppendLine($"**Project:** {_config.Project.Name}\n{desc}\n");
+                sb.AppendLine($"**Project:** {Core.Config.Project.Name}\n{desc}\n");
 
-            sb.AppendLine($"**Tech Stack:** {_config.Project.TechStack}\n");
+            sb.AppendLine($"**Tech Stack:** {Core.Config.Project.TechStack}\n");
 
             var memory = await GetMemoryContextAsync(ct: ct);
             if (!string.IsNullOrWhiteSpace(memory))
@@ -334,8 +308,8 @@ public class CustomAgent : AgentBase
         AgentIssue issue, string projectContext, CancellationToken ct)
     {
         var history = CreateChatHistory();
-        var issSys = _promptService is not null
-            ? await _promptService.RenderAsync("custom/issue-system",
+        var issSys = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("custom/issue-system",
                 new Dictionary<string, string> { ["display_name"] = Identity.DisplayName }, ct)
             : null;
         history.AddSystemMessage(BuildSystemPrompt(issSys ??
@@ -343,8 +317,8 @@ public class CustomAgent : AgentBase
             $"You produce high-quality work products for assigned issues. " +
             $"Your output should be complete, well-structured, and ready for implementation or review."));
 
-        var issUser = _promptService is not null
-            ? await _promptService.RenderAsync("custom/issue-user",
+        var issUser = Core.PromptService is not null
+            ? await Core.PromptService?.RenderAsync("custom/issue-user",
                 new Dictionary<string, string>
                 {
                     ["issue_number"] = issue.Number.ToString(),
@@ -359,7 +333,7 @@ public class CustomAgent : AgentBase
             $"## Project Context\n{projectContext}\n\n" +
             "Analyze this issue and produce your work product. Include all necessary detail.");
 
-        var kernel = _modelRegistry.GetKernel(Identity.ModelTier);
+        var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier);
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         SetAgentCallContext();
