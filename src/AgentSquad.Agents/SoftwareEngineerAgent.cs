@@ -243,14 +243,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
     /// <summary>PE has a custom set of subscriptions for orchestration.</summary>
     protected override void RegisterAdditionalSubscriptions()
     {
-        Subscriptions.Add(MessageBus.Subscribe<StatusUpdateMessage>(
-            Identity.Id, HandleStatusUpdateAsync));
-
-        Subscriptions.Add(MessageBus.Subscribe<ReviewRequestMessage>(
-            Identity.Id, HandleReviewRequestAsync));
-
-        Subscriptions.Add(MessageBus.Subscribe<PlanningCompleteMessage>(
-            Identity.Id, HandlePlanningCompleteAsync));
+        Subscribe<StatusUpdateMessage>(HandleStatusUpdateAsync);
+        Subscribe<ReviewRequestMessage>(HandleReviewRequestAsync);
+        Subscribe<PlanningCompleteMessage>(HandlePlanningCompleteAsync);
     }
 
     /// <summary>
@@ -661,15 +656,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
                     $"Loaded {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)");
 
                 // Emit the plan-ready signal so workflow can advance
-                await MessageBus.PublishAsync(new StatusUpdateMessage
-                {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = "*",
-                    MessageType = "EngineeringPlanReady",
-                    NewStatus = AgentStatus.Working,
-                    CurrentTask = "Engineering Planning",
-                    Details = $"Restored engineering plan with {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending)."
-                }, ct);
+                await PublishStatusAsync("EngineeringPlanReady", AgentStatus.Working,
+                    details: $"Restored engineering plan with {_taskManager.TotalCount} tasks ({_taskManager.DoneCount} done, {_taskManager.PendingCount} pending).",
+                    currentTask: "Engineering Planning", ct: ct);
 
                 return;
             }
@@ -1422,16 +1411,10 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             $"Created engineering plan with {_taskManager.TotalCount} tasks from {enhancementIssues.Count} issues",
             $"Tasks: {TruncateForMemory(taskSummary)}", ct);
 
-        await MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "EngineeringPlanReady",
-            NewStatus = AgentStatus.Working,
-            CurrentTask = "Engineering Planning",
-            Details = $"Engineering plan created with {_taskManager.TotalCount} tasks. " +
-                      "Ready to assign work to engineers."
-        }, ct);
+        await PublishStatusAsync("EngineeringPlanReady", AgentStatus.Working,
+            details: $"Engineering plan created with {_taskManager.TotalCount} tasks. " +
+                      "Ready to assign work to engineers.",
+            currentTask: "Engineering Planning", ct: ct);
 
         UpdateStatus(AgentStatus.Idle, "Engineering plan complete, entering development loop");
         _planningComplete = true;
@@ -5086,14 +5069,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
             Logger.LogInformation("Self-assigned integration issue #{IssueNumber}", _integrationIssueNumber);
         }
 
-        await MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "AllTasksComplete",
-            NewStatus = AgentStatus.Working,
-            Details = $"All {nonIntegrationTasks.Count} engineering tasks are done — starting final integration"
-        }, ct);
+        await PublishStatusAsync("AllTasksComplete", AgentStatus.Working,
+            details: $"All {nonIntegrationTasks.Count} engineering tasks are done — starting final integration",
+            ct: ct);
     }
 
     private async Task CreateIntegrationPRAsync(CancellationToken ct)
@@ -5567,15 +5545,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         // Notify PM to review enhancement issues — PM owns the lifecycle of user stories
         try
         {
-            await MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "StatusUpdate",
-                NewStatus = AgentStatus.Idle,
-                CurrentTask = "AllTasksComplete",
-                Details = "All engineering tasks are complete and merged. PM should review enhancement issues for final acceptance."
-            }, ct);
+            await PublishStatusAsync("StatusUpdate", AgentStatus.Idle,
+                details: "All engineering tasks are complete and merged. PM should review enhancement issues for final acceptance.",
+                currentTask: "AllTasksComplete", ct: ct);
         }
         catch (Exception ex)
         {
@@ -5586,14 +5558,9 @@ public class SoftwareEngineerAgent : EngineerAgentBase
         _engineeringSignaled = true;
         LogActivity("system", "🏁 Engineering phase complete — all tasks done and integrated");
 
-        await MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "EngineeringComplete",
-            NewStatus = AgentStatus.Idle,
-            Details = $"All {_taskManager.TotalCount} tasks complete. Engineering phase finished."
-        }, ct);
+        await PublishStatusAsync("EngineeringComplete", AgentStatus.Idle,
+            details: $"All {_taskManager.TotalCount} tasks complete. Engineering phase finished.",
+            ct: ct);
 
         await RememberAsync(MemoryType.Action,
             $"Engineering phase complete: {_taskManager.TotalCount} tasks done", ct: ct);

@@ -25,7 +25,6 @@ public class ArchitectAgent : AgentBase
     private readonly HashSet<int> _reviewedPrNumbers = new();
     private readonly ConcurrentQueue<int> _reviewQueue = new();
     private readonly HashSet<int> _forceApprovalPrs = new();
-    private readonly List<IDisposable> _subscriptions = new();
 
     private bool _architectureComplete;
 
@@ -49,11 +48,8 @@ public class ArchitectAgent : AgentBase
         // Only listen for PMSpecReady — NOT generic TaskAssignments.
         // The PM sends a dedicated TaskAssignment after PMSpec is created,
         // but we gate on StatusUpdateMessage to avoid starting before PMSpec exists.
-        _subscriptions.Add(Core!.MessageBus.Subscribe<StatusUpdateMessage>(
-            Identity.Id, HandleStatusUpdateAsync));
-
-        _subscriptions.Add(Core!.MessageBus.Subscribe<ReviewRequestMessage>(
-            Identity.Id, HandleReviewRequestAsync));
+        Subscribe<StatusUpdateMessage>(HandleStatusUpdateAsync);
+        Subscribe<ReviewRequestMessage>(HandleReviewRequestAsync);
 
         // NOTE: Idempotency check for existing Architecture.md is performed inside
         // DesignArchitectureAsync (not here) because EffectiveBranch isn't set yet
@@ -117,14 +113,6 @@ public class ArchitectAgent : AgentBase
         }
 
         UpdateStatus(AgentStatus.Offline, "Architect loop exited");
-    }
-
-    protected override Task OnStopAsync(CancellationToken ct)
-    {
-        foreach (var sub in _subscriptions)
-            sub.Dispose();
-        _subscriptions.Clear();
-        return Task.CompletedTask;
     }
 
     #region Message Handlers
@@ -249,14 +237,8 @@ public class ArchitectAgent : AgentBase
                 Detail = "Idempotency check found existing architecture with System Components section. Skipping design and signaling ArchitectureComplete."
             });
             // Still signal downstream so PE isn't stuck
-            await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "ArchitectureComplete",
-                NewStatus = AgentStatus.Idle,
-                Details = "Architecture design already complete. Architecture.md is ready for review."
-            }, ct);
+            await PublishStatusAsync("ArchitectureComplete", AgentStatus.Idle,
+                details: "Architecture design already complete. Architecture.md is ready for review.", ct: ct);
             return;
         }
 
@@ -324,13 +306,8 @@ public class ArchitectAgent : AgentBase
                 catch { /* best effort */ }
             }
 
-            await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id, ToAgentId = "*",
-                MessageType = "ArchitectureComplete",
-                NewStatus = AgentStatus.Working,
-                Details = "Architecture design complete (quick mode). PE can begin engineering planning."
-            }, ct);
+            await PublishStatusAsync("ArchitectureComplete", AgentStatus.Working,
+                details: "Architecture design complete (quick mode). PE can begin engineering planning.", ct: ct);
             UpdateStatus(AgentStatus.Idle, "Quick architecture complete");
             return;
         }
@@ -794,15 +771,9 @@ public class ArchitectAgent : AgentBase
         // below (ArchitectureComplete) is the correct notification mechanism.
 
         // Notify all agents via message bus that architecture is complete
-        await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "ArchitectureComplete",
-            NewStatus = AgentStatus.Online,
-            CurrentTask = directive.TaskId,
-            Details = "Architecture design complete. Architecture.md is ready for review."
-        }, ct);
+        await PublishStatusAsync("ArchitectureComplete", AgentStatus.Online,
+            details: "Architecture design complete. Architecture.md is ready for review.",
+            currentTask: directive.TaskId, ct: ct);
 
         UpdateStatus(AgentStatus.Idle, "Architecture complete, monitoring PRs for alignment");
     }
@@ -995,15 +966,9 @@ public class ArchitectAgent : AgentBase
                         TruncateForMemory(reasoning), ct);
 
                     // Notify TE via bus that PR is ready for testing
-                    await Core!.MessageBus.PublishAsync(new StatusUpdateMessage
-                    {
-                        FromAgentId = Identity.Id,
-                        ToAgentId = "*",
-                        MessageType = "StatusUpdate",
-                        NewStatus = AgentStatus.Working,
-                        CurrentTask = $"PR #{pr.Number} architect-approved — ready for TE testing",
-                        Details = $"PR #{pr.Number}: {pr.Title} has passed architecture review"
-                    }, ct);
+                    await PublishStatusAsync("StatusUpdate", AgentStatus.Working,
+                        details: $"PR #{pr.Number}: {pr.Title} has passed architecture review",
+                        currentTask: $"PR #{pr.Number} architect-approved — ready for TE testing", ct: ct);
                 }
                 else if (verdict == "REWORK")
                 {

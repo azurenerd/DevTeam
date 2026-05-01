@@ -26,7 +26,6 @@ public class CustomAgent : AgentBase
     private readonly ConcurrentQueue<IssueAssignmentMessage> _issueQueue = new();
     private readonly ConcurrentQueue<TaskAssignmentMessage> _taskQueue = new();
     private readonly HashSet<int> _processedIssues = new();
-    private readonly List<IDisposable> _subscriptions = new();
 
     public CustomAgent(
         AgentIdentity identity,
@@ -40,14 +39,9 @@ public class CustomAgent : AgentBase
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(Core.MessageBus.Subscribe<IssueAssignmentMessage>(
-            Identity.Id, HandleIssueAssignmentAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<TaskAssignmentMessage>(
-            Identity.Id, HandleTaskAssignmentAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<StatusUpdateMessage>(
-            Identity.Id, HandleStatusUpdateAsync));
+        Subscribe<IssueAssignmentMessage>(HandleIssueAssignmentAsync);
+        Subscribe<TaskAssignmentMessage>(HandleTaskAssignmentAsync);
+        Subscribe<StatusUpdateMessage>(HandleStatusUpdateAsync);
 
         Logger.LogInformation("Custom agent '{DisplayName}' initialized, awaiting assignments",
             Identity.DisplayName);
@@ -96,14 +90,6 @@ public class CustomAgent : AgentBase
                 await Task.Delay(TimeSpan.FromSeconds(5), ct);
             }
         }
-    }
-
-    protected override Task OnStopAsync(CancellationToken ct)
-    {
-        foreach (var sub in _subscriptions)
-            sub.Dispose();
-        _subscriptions.Clear();
-        return Task.CompletedTask;
     }
 
     private Task HandleIssueAssignmentAsync(IssueAssignmentMessage msg, CancellationToken ct)
@@ -167,15 +153,10 @@ public class CustomAgent : AgentBase
                     branchName: branchName,
                     ct: ct);
 
-                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = "*",
-                    MessageType = "status.update",
-                    NewStatus = AgentStatus.Idle,
-                    CurrentTask = $"Completed issue #{assignment.IssueNumber}",
-                    Details = $"PR created for: {assignment.IssueTitle}"
-                }, ct);
+                await PublishStatusAsync("status.update", AgentStatus.Idle,
+                    details: $"PR created for: {assignment.IssueTitle}",
+                    currentTask: $"Completed issue #{assignment.IssueNumber}",
+                    ct: ct);
 
                 await RememberAsync(MemoryType.Action,
                     $"Completed issue #{assignment.IssueNumber}: {assignment.IssueTitle}",

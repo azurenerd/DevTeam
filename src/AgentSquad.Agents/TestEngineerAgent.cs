@@ -66,7 +66,6 @@ public class TestEngineerAgent : AgentBase
     // PM/Architect can't approve, and TE loops posting identical comments every poll.
     private readonly Dictionary<int, (string Sha, int Count)> _baseBuildFailureAttempts = new();
     private const int MaxBaseBuildFailurePostsPerSha = 2;
-    private readonly List<IDisposable> _subscriptions = new();
     private readonly ConcurrentQueue<(int PrNumber, string PrTitle, string Feedback, string Reviewer)> _reworkQueue = new();
     private readonly Dictionary<int, int> _reworkAttempts = new();
     private readonly Dictionary<int, string> _prSessionIds = new();
@@ -105,10 +104,8 @@ public class TestEngineerAgent : AgentBase
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(Core.MessageBus.Subscribe<ChangesRequestedMessage>(
-            Identity.Id, HandleChangesRequestedAsync));
-        _subscriptions.Add(Core.MessageBus.Subscribe<WorkspaceCleanupMessage>(
-            Identity.Id, HandleWorkspaceCleanupAsync));
+        Subscribe<ChangesRequestedMessage>(HandleChangesRequestedAsync);
+        Subscribe<WorkspaceCleanupMessage>(HandleWorkspaceCleanupAsync);
 
         // Initialize local workspace if configured
         if (Core.Config.Workspace.IsEnabled)
@@ -175,10 +172,6 @@ public class TestEngineerAgent : AgentBase
 
     protected override async Task OnStopAsync(CancellationToken ct)
     {
-        foreach (var sub in _subscriptions)
-            sub.Dispose();
-        _subscriptions.Clear();
-
         if (_pendingWorkspaceCleanup && _workspace is not null)
         {
             try

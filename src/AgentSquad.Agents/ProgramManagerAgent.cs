@@ -49,8 +49,6 @@ public class ProgramManagerAgent : AgentBase
     private readonly HashSet<int> _reviewedEnhancementIssues = new();
     private string _designHtmlContext = "";
 
-    private readonly List<IDisposable> _subscriptions = new();
-
     public ProgramManagerAgent(
         AgentIdentity identity,
         AgentCoreServices core,
@@ -77,20 +75,11 @@ public class ProgramManagerAgent : AgentBase
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(Core.MessageBus.Subscribe<ResourceRequestMessage>(
-            Identity.Id, HandleResourceRequestAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<StatusUpdateMessage>(
-            Identity.Id, HandleStatusUpdateAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<HelpRequestMessage>(
-            Identity.Id, HandleHelpRequestAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<ReviewRequestMessage>(
-            Identity.Id, HandleReviewRequestAsync));
-
-        _subscriptions.Add(Core.MessageBus.Subscribe<ClarificationRequestMessage>(
-            Identity.Id, HandleClarificationRequestAsync));
+        Subscribe<ResourceRequestMessage>(HandleResourceRequestAsync);
+        Subscribe<StatusUpdateMessage>(HandleStatusUpdateAsync);
+        Subscribe<HelpRequestMessage>(HandleHelpRequestAsync);
+        Subscribe<ReviewRequestMessage>(HandleReviewRequestAsync);
+        Subscribe<ClarificationRequestMessage>(HandleClarificationRequestAsync);
 
         _currentPhase = "Research";
         Logger.LogInformation("PM agent initialized, starting in {Phase} phase", _currentPhase);
@@ -194,14 +183,6 @@ public class ProgramManagerAgent : AgentBase
         UpdateStatus(AgentStatus.Offline, "PM loop exited");
     }
 
-    protected override Task OnStopAsync(CancellationToken ct)
-    {
-        foreach (var sub in _subscriptions)
-            sub.Dispose();
-        _subscriptions.Clear();
-        return Task.CompletedTask;
-    }
-
     #region Main Loop Steps
 
     /// <summary>
@@ -264,14 +245,8 @@ public class ProgramManagerAgent : AgentBase
                 });
 
                 // Still signal downstream agents so they can proceed
-                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = "*",
-                    MessageType = "ResearchComplete",
-                    NewStatus = AgentStatus.Idle,
-                    Details = "Research already exists from prior run"
-                }, ct);
+                await PublishStatusAsync("ResearchComplete", AgentStatus.Idle,
+                    details: "Research already exists from prior run", ct: ct);
 
                 UpdateStatus(AgentStatus.Idle, "Project kickoff complete (research exists), monitoring team");
                 return;
@@ -1362,15 +1337,9 @@ public class ProgramManagerAgent : AgentBase
                         TruncateForMemory(reviewBody), ct);
 
                     // Notify PE to merge
-                    await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                    {
-                        FromAgentId = Identity.Id,
-                        ToAgentId = "*",
-                        MessageType = "StatusUpdate",
-                        NewStatus = AgentStatus.Working,
-                        CurrentTask = $"PR #{pr.Number} pm-approved — ready for merge",
-                        Details = $"PR #{pr.Number}: {pr.Title} has passed final PM review"
-                    }, ct);
+                    await PublishStatusAsync("StatusUpdate", AgentStatus.Working,
+                        details: $"PR #{pr.Number}: {pr.Title} has passed final PM review",
+                        currentTask: $"PR #{pr.Number} pm-approved — ready for merge", ct: ct);
                 }
                 else
                 {
@@ -1907,15 +1876,10 @@ public class ProgramManagerAgent : AgentBase
                     message.RequestedRole, message.FromAgentId);
             }
 
-            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = message.FromAgentId,
-                MessageType = "ResourceApproval",
-                NewStatus = AgentStatus.Online,
-                Details = $"Resource request approved: {message.RequestedRole}" +
-                    (spawnedIdentity is not null ? $" — spawned {spawnedIdentity.DisplayName}" : " — spawn failed")
-            }, ct);
+            await PublishStatusAsync("ResourceApproval", AgentStatus.Online,
+                details: $"Resource request approved: {message.RequestedRole}" +
+                    (spawnedIdentity is not null ? $" — spawned {spawnedIdentity.DisplayName}" : " — spawn failed"),
+                toAgentId: message.FromAgentId, ct: ct);
         }
     }
 
@@ -2096,14 +2060,8 @@ public class ProgramManagerAgent : AgentBase
             {
                 Logger.LogInformation("PMSpec.md already exists with content, skipping creation");
                 // Still signal downstream agents
-                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                {
-                    FromAgentId = Identity.Id,
-                    ToAgentId = "*",
-                    MessageType = "PMSpecReady",
-                    NewStatus = AgentStatus.Idle,
-                    Details = "PM Specification document already exists"
-                }, ct);
+                await PublishStatusAsync("PMSpecReady", AgentStatus.Idle,
+                    details: "PM Specification document already exists", ct: ct);
 
                 // Create User Story Issues if not already done
                 // skipClosedIssueGuard: PMSpec exists in repo, old closed issues are from prior runs
@@ -2208,13 +2166,8 @@ public class ProgramManagerAgent : AgentBase
                 Logger.LogInformation("Quick PMSpec.md created and merged");
                 LogActivity("task", $"📝 Quick PMSpec.md created for {projectName}");
 
-                await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                {
-                    FromAgentId = Identity.Id, ToAgentId = "*",
-                    MessageType = "PMSpecReady",
-                    NewStatus = AgentStatus.Working,
-                    Details = "PM Specification is ready (quick mode). Architect can begin."
-                }, ct);
+                await PublishStatusAsync("PMSpecReady", AgentStatus.Working,
+                    details: "PM Specification is ready (quick mode). Architect can begin.", ct: ct);
 
                 await CreateUserStoryIssuesAsync(ct, skipClosedIssueGuard: true);
                 UpdateStatus(AgentStatus.Idle, "Quick PMSpec complete, Architect triggered");
@@ -2514,14 +2467,8 @@ public class ProgramManagerAgent : AgentBase
             // Notify all agents that PMSpec is ready — Architect will pick this up
             var signalStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-spec", "Signal Architect",
                 "Notifying team that PM Specification is ready", Identity.ModelTier);
-            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "PMSpecReady",
-                NewStatus = AgentStatus.Working,
-                Details = "PM Specification is ready. Architect can begin architecture design."
-            }, ct);
+            await PublishStatusAsync("PMSpecReady", AgentStatus.Working,
+                details: "PM Specification is ready. Architect can begin architecture design.", ct: ct);
 
             Logger.LogInformation("Triggered Architect to begin architecture design");
 
@@ -2720,14 +2667,9 @@ public class ProgramManagerAgent : AgentBase
             // Signal team composition complete
             var teamSignalStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", "Signal team ready",
                 "Broadcasting TeamCompositionComplete to all agents");
-            await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-            {
-                FromAgentId = Identity.Id,
-                ToAgentId = "*",
-                MessageType = "TeamCompositionComplete",
-                NewStatus = AgentStatus.Working,
-                Details = $"Team composition approved: {proposal.BuiltInAgents.Count} built-in + {proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count} SME agents"
-            }, ct);
+            await PublishStatusAsync("TeamCompositionComplete", AgentStatus.Working,
+                details: $"Team composition approved: {proposal.BuiltInAgents.Count} built-in + {proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count} SME agents",
+                ct: ct);
 
             _teamCompositionComplete = true;
             Core.TaskTracker!.CompleteStep(teamSignalStepId);

@@ -19,7 +19,6 @@ public class ResearcherAgent : AgentBase
     private readonly AgentWorkspaceServices _workspace;
 
     private readonly Queue<ResearchDirective> _researchQueue = new();
-    private readonly List<IDisposable> _subscriptions = new();
     private string? _lastDesignSection;
 
     public ResearcherAgent(
@@ -38,8 +37,7 @@ public class ResearcherAgent : AgentBase
 
     protected override Task OnInitializeAsync(CancellationToken ct)
     {
-        _subscriptions.Add(Core.MessageBus.Subscribe<TaskAssignmentMessage>(
-            Identity.Id, HandleTaskAssignmentAsync));
+        Subscribe<TaskAssignmentMessage>(HandleTaskAssignmentAsync);
 
         Logger.LogInformation("Researcher agent initialized, awaiting research directives");
         return Task.CompletedTask;
@@ -103,14 +101,8 @@ public class ResearcherAgent : AgentBase
                         catch (Exception ex) { Logger.LogDebug(ex, "EnsureDesignScreenshotsPresentAsync failed (non-fatal)"); }
 
                         // Still signal completion so downstream agents aren't stuck
-                        await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                        {
-                            FromAgentId = Identity.Id,
-                            ToAgentId = "*",
-                            MessageType = "ResearchComplete",
-                            NewStatus = AgentStatus.Idle,
-                            Details = $"Research already complete for: {directive.Topic}"
-                        }, ct);
+                        await PublishStatusAsync("ResearchComplete", AgentStatus.Idle,
+                            details: $"Research already complete for: {directive.Topic}", ct: ct);
                     }
                     else
                     {
@@ -285,15 +277,9 @@ public class ResearcherAgent : AgentBase
 
                         string? signalStepId = null;
                         try { signalStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Signal PM", "Broadcasting ResearchComplete to all agents"); } catch { }
-                        await Core.MessageBus.PublishAsync(new StatusUpdateMessage
-                        {
-                            FromAgentId = Identity.Id,
-                            ToAgentId = "*",
-                            MessageType = "ResearchComplete",
-                            NewStatus = AgentStatus.Online,
-                            CurrentTask = directive.TaskId,
-                            Details = $"Research complete: {directive.Topic}"
-                        }, ct);
+                        await PublishStatusAsync("ResearchComplete", AgentStatus.Online,
+                            details: $"Research complete: {directive.Topic}",
+                            currentTask: directive.TaskId, ct: ct);
                         try { if (signalStepId is not null) Core.TaskTracker!.CompleteStep(signalStepId); } catch { }
 
                         Logger.LogInformation(
@@ -338,14 +324,6 @@ public class ResearcherAgent : AgentBase
         }
 
         UpdateStatus(AgentStatus.Offline, "Researcher loop exited");
-    }
-
-    protected override Task OnStopAsync(CancellationToken ct)
-    {
-        foreach (var sub in _subscriptions)
-            sub.Dispose();
-        _subscriptions.Clear();
-        return Task.CompletedTask;
     }
 
     #region Message Handlers

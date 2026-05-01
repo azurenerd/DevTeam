@@ -1,5 +1,6 @@
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Diagnostics;
+using AgentSquad.Core.Messaging;
 using AgentSquad.Core.Persistence;
 using Microsoft.Extensions.Logging;
 
@@ -15,6 +16,7 @@ public abstract class AgentBase : IAgent, IDisposable
     private bool _disposed;
     private readonly List<AgentLogEntry> _recentErrors = new();
     private string? _cachedMemorySummary;
+    private readonly List<IDisposable> _messageSubscriptions = new();
 
     /// <summary>
     /// Async gate for per-agent pause/resume. When reset (paused), WaitIfPausedAsync blocks.
@@ -252,7 +254,17 @@ public abstract class AgentBase : IAgent, IDisposable
         Logger.LogInformation("Agent {AgentId} stopping", Identity.Id);
         LogActivity("system", "Agent stopping");
         await LifetimeCts.CancelAsync();
-        await OnStopAsync(ct);
+        try
+        {
+            await OnStopAsync(ct);
+        }
+        finally
+        {
+            // Always dispose message subscriptions regardless of OnStopAsync outcome
+            foreach (var sub in _messageSubscriptions)
+                sub.Dispose();
+            _messageSubscriptions.Clear();
+        }
         UpdateStatus(AgentStatus.Offline, "Agent stopped gracefully");
         LogActivity("system", "Agent stopped gracefully");
     }
@@ -465,6 +477,53 @@ public abstract class AgentBase : IAgent, IDisposable
         // Now refresh with the updated cache
         RefreshDiagnostic();
     }
+
+    #region Subscription & Status Helpers
+
+    /// <summary>
+    /// Subscribe to a message type on the bus, automatically tracked for disposal on stop.
+    /// Call this from <see cref="OnInitializeAsync"/> to register message handlers.
+    /// </summary>
+    protected void Subscribe<T>(Func<T, CancellationToken, Task> handler) where T : AgentMessage
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        _messageSubscriptions.Add(Core!.MessageBus.Subscribe<T>(Identity.Id, handler));
+    }
+
+    /// <summary>
+    /// Track a pre-created subscription for automatic disposal on stop.
+    /// Used by tests and advanced scenarios where Subscribe&lt;T&gt; is not suitable.
+    /// </summary>
+    protected void TrackSubscription(IDisposable subscription)
+    {
+        ArgumentNullException.ThrowIfNull(subscription);
+        _messageSubscriptions.Add(subscription);
+    }
+
+    /// <summary>
+    /// Publish a <see cref="StatusUpdateMessage"/> to the bus.
+    /// Defaults to broadcast (all agents) unless <paramref name="toAgentId"/> is specified.
+    /// </summary>
+    protected Task PublishStatusAsync(
+        string messageType,
+        AgentStatus status,
+        string? details = null,
+        string? currentTask = null,
+        string? toAgentId = "*",
+        CancellationToken ct = default)
+    {
+        return Core!.MessageBus.PublishAsync(new StatusUpdateMessage
+        {
+            FromAgentId = Identity.Id,
+            ToAgentId = toAgentId ?? "*",
+            MessageType = messageType,
+            NewStatus = status,
+            Details = details ?? "",
+            CurrentTask = currentTask ?? ""
+        }, ct);
+    }
+
+    #endregion
 
     protected virtual Task OnInitializeAsync(CancellationToken ct) => Task.CompletedTask;
     protected virtual Task OnStartAsync(CancellationToken ct) => Task.CompletedTask;

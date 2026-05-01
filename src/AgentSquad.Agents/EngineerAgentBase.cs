@@ -62,7 +62,6 @@ public abstract class EngineerAgentBase : AgentBase
     // Track retry attempts for issue assignments that fail during WorkOnIssueAsync
     private readonly Dictionary<int, int> _issueRetryAttempts = new();
     private const int MaxIssueRetries = 3;
-    protected readonly List<IDisposable> Subscriptions = new();
     // Track rework attempts per PR per reviewer to enforce per-reviewer MaxReworkCycles.
     // Key: (prNumber, reviewerName) → attempt count.
     protected readonly Dictionary<(int PrNumber, string Reviewer), int> ReworkAttemptCounts = new();
@@ -105,21 +104,13 @@ public abstract class EngineerAgentBase : AgentBase
 
     protected override async Task OnInitializeAsync(CancellationToken ct)
     {
-        Subscriptions.Add(MessageBus.Subscribe<TaskAssignmentMessage>(
-            Identity.Id, HandleTaskAssignmentAsync));
-
-        Subscriptions.Add(MessageBus.Subscribe<IssueAssignmentMessage>(
-            Identity.Id, HandleIssueAssignmentAsync));
-
-        Subscriptions.Add(MessageBus.Subscribe<ChangesRequestedMessage>(
-            Identity.Id, HandleChangesRequestedAsync));
-
-        Subscriptions.Add(MessageBus.Subscribe<ClarificationResponseMessage>(
-            Identity.Id, HandleClarificationResponseAsync));
+        Subscribe<TaskAssignmentMessage>(HandleTaskAssignmentAsync);
+        Subscribe<IssueAssignmentMessage>(HandleIssueAssignmentAsync);
+        Subscribe<ChangesRequestedMessage>(HandleChangesRequestedAsync);
+        Subscribe<ClarificationResponseMessage>(HandleClarificationResponseAsync);
 
         // Subscribe to workspace cleanup signal from PE leader
-        Subscriptions.Add(MessageBus.Subscribe<WorkspaceCleanupMessage>(
-            Identity.Id, HandleWorkspaceCleanupAsync));
+        Subscribe<WorkspaceCleanupMessage>(HandleWorkspaceCleanupAsync);
 
         RegisterAdditionalSubscriptions();
 
@@ -416,10 +407,6 @@ public abstract class EngineerAgentBase : AgentBase
 
     protected override async Task OnStopAsync(CancellationToken ct)
     {
-        foreach (var sub in Subscriptions)
-            sub.Dispose();
-        Subscriptions.Clear();
-
         // Clean up workspace if cleanup was requested
         if (_pendingWorkspaceCleanup && Workspace is not null)
         {
@@ -1276,15 +1263,9 @@ public abstract class EngineerAgentBase : AgentBase
             ReviewType = "CodeReview"
         }, ct);
 
-        await MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "TaskComplete",
-            NewStatus = AgentStatus.Online,
-            CurrentTask = issue.Title,
-            Details = $"PR #{pr.Number} implementation complete and ready for review."
-        }, ct);
+        await PublishStatusAsync("TaskComplete", AgentStatus.Online,
+            details: $"PR #{pr.Number} implementation complete and ready for review.",
+            currentTask: issue.Title, ct: ct);
 
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
@@ -1493,15 +1474,9 @@ public abstract class EngineerAgentBase : AgentBase
             ReviewType = "CodeReview"
         }, ct);
 
-        await MessageBus.PublishAsync(new StatusUpdateMessage
-        {
-            FromAgentId = Identity.Id,
-            ToAgentId = "*",
-            MessageType = "TaskComplete",
-            NewStatus = AgentStatus.Online,
-            CurrentTask = issue.Title,
-            Details = $"PR #{pr.Number} implementation complete and ready for review."
-        }, ct);
+        await PublishStatusAsync("TaskComplete", AgentStatus.Online,
+            details: $"PR #{pr.Number} implementation complete and ready for review.",
+            currentTask: issue.Title, ct: ct);
 
         Logger.LogInformation("{Role} {Name} completed PR #{Number}, marked ready for review",
             Identity.Role, Identity.DisplayName, pr.Number);
