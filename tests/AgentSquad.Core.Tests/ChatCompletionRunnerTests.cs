@@ -1,8 +1,10 @@
 using AgentSquad.Core.AI;
 using AgentSquad.Core.Configuration;
+using AgentSquad.Core.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Moq;
@@ -24,8 +26,9 @@ public class ChatCompletionRunnerTests
 
         // Create a ModelRegistry that returns our test kernel
         var mockRegistry = CreateModelRegistryReturning(kernel);
+        var mcpRegistry = CreateEmptyMcpRegistry();
 
-        _runner = new ChatCompletionRunner(mockRegistry, NullLogger<ChatCompletionRunner>.Instance);
+        _runner = new ChatCompletionRunner(mockRegistry, mcpRegistry, NullLogger<ChatCompletionRunner>.Instance);
     }
 
     [Fact]
@@ -230,5 +233,13 @@ public class ChatCompletionRunnerTests
         }
 
         public override Kernel GetKernel(string modelTier, string? agentId = null) => _kernel;
+    }
+
+    private static McpServerRegistry CreateEmptyMcpRegistry()
+    {
+        var config = new AgentSquadConfig { McpServers = new() };
+        var monitor = Mock.Of<IOptionsMonitor<AgentSquadConfig>>(
+            m => m.CurrentValue == config);
+        return new McpServerRegistry(monitor, NullLogger<McpServerRegistry>.Instance);
     }
 }

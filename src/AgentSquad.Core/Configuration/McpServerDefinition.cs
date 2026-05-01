@@ -32,6 +32,19 @@ public record McpServerDefinition
 
     /// <summary>Capability keywords this server provides (e.g., ["github-issues", "github-prs"])</summary>
     public List<string> ProvidedCapabilities { get; init; } = [];
+
+    /// <summary>
+    /// Tool names to explicitly grant via <c>--allow-tool=serverName</c>.
+    /// When non-empty, <see cref="ChatCompletionRunner"/> will auto-inject
+    /// the invocation context for this server on every LLM call, granting
+    /// the server name as an allow-tool entry.
+    /// </summary>
+    /// <remarks>
+    /// The Copilot CLI uses server-level grants: <c>--allow-tool=workiq</c> permits
+    /// all tools on that server. Listing tools here acts as documentation of intended
+    /// use and enables future fine-grained filtering.
+    /// </remarks>
+    public List<string> AllowedTools { get; init; } = [];
 }
 
 public enum McpTransportType

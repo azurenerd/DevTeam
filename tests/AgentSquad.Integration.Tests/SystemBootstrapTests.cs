@@ -76,6 +76,7 @@ public class SystemBootstrapTests : IDisposable
         services.AddSingleton<AgentUsageTracker>();
         services.AddSingleton<AgentSquad.Core.AI.ActiveLlmCallTracker>();
         services.AddSemanticKernelModels();
+        services.AddSingleton<AgentSquad.Core.Services.McpServerRegistry>();
         services.AddSingleton<AgentSquad.Core.AI.IChatCompletionRunner, AgentSquad.Core.AI.ChatCompletionRunner>();
 
         // Persistence

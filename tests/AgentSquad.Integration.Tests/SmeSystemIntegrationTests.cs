@@ -120,6 +120,7 @@ public class SmeSystemIntegrationTests : IDisposable
         services.AddSingleton<AgentUsageTracker>();
         services.AddSingleton<AgentSquad.Core.AI.ActiveLlmCallTracker>();
         services.AddSemanticKernelModels();
+        services.AddSingleton<AgentSquad.Core.Services.McpServerRegistry>();
         services.AddSingleton<AgentSquad.Core.AI.IChatCompletionRunner, AgentSquad.Core.AI.ChatCompletionRunner>();
 
         var testDbPath= Path.Combine(Path.GetTempPath(), $"agentsquad-test-{Guid.NewGuid():N}.db");
