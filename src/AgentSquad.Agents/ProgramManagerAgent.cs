@@ -1209,6 +1209,7 @@ public class ProgramManagerAgent : AgentBase
                     else
                     {
                         _forceApprovalPrs.Remove(prNumber);
+                        _reviewedPrHeadShas.Remove(prNumber);
                         approved = true;
                         reviewBody = $"Force-approving after maximum PM rework cycles reached. " +
                             $"The PR has been through multiple review iterations and the engineer " +

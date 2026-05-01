@@ -52,6 +52,20 @@ public abstract class EngineerAgentBase : AgentBase
     protected Core.Metrics.BuildTestMetrics? Metrics => WorkspaceServices.Metrics;
     protected PlaywrightRunner? ScreenshotRunner => WorkspaceServices.PlaywrightRunner;
 
+    /// <summary>
+    /// Guidance injected into implementation prompts to prevent merge conflicts
+    /// by encouraging additive edits rather than full-file rewrites.
+    /// </summary>
+    protected const string AdditiveEditingGuidance = @"
+## MERGE-CONFLICT PREVENTION — ADDITIVE EDITING RULES
+- NEVER rewrite entire files — add or modify only the specific sections you need.
+- Use exports/imports additively: append new exports, don't reorganize existing ones.
+- Keep existing code intact when adding new functions, classes, or components.
+- If a file already exists, EXTEND it (append new code, insert at appropriate location) rather than replacing its contents.
+- When adding items to arrays, objects, or switch statements, append to the end rather than reordering.
+- Preserve all existing comments, formatting, and whitespace outside your changes.
+";
+
     protected readonly HashSet<int> ProcessedIssueIds = new();
     protected readonly ConcurrentQueue<ReworkItem> ReworkQueue = new();
     protected readonly ConcurrentQueue<IssueAssignmentMessage> AssignmentQueue = new();
@@ -933,6 +947,8 @@ public abstract class EngineerAgentBase : AgentBase
                 "If you are adding a new section (e.g., a heatmap component), insert it at the appropriate " +
                 "location within the existing file structure without altering surrounding code.");
 
+            contextBuilder.AppendLine(AdditiveEditingGuidance);
+
             stepHistory.AddUserMessage(contextBuilder.ToString());
 
             var stepResponse = await chat.GetChatMessageContentAsync(stepHistory, cancellationToken: ct);
@@ -1190,6 +1206,8 @@ public abstract class EngineerAgentBase : AgentBase
             "CRITICAL: The app must compile and run after your changes. " +
             "Use graceful fallbacks for missing dependencies from other tasks — " +
             "never throw NotImplementedException or reference types that don't exist yet.");
+
+        promptBuilder.AppendLine(AdditiveEditingGuidance);
 
         history.AddUserMessage(promptBuilder.ToString());
 
@@ -2135,7 +2153,8 @@ public abstract class EngineerAgentBase : AgentBase
                        "Include all source code files, configuration, and tests. " +
                        "Every file MUST use the FILE: marker format. " +
                        "File paths must be valid filesystem paths (e.g., src/Models/User.cs). " +
-                       "Do NOT put code, directives, brackets, or instructions in the file path.");
+                       "Do NOT put code, directives, brackets, or instructions in the file path." +
+                       AdditiveEditingGuidance);
 
                 var implResponse = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 history.AddAssistantMessage(implResponse.Content ?? "");

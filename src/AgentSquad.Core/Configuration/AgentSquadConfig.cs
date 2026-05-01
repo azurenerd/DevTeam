@@ -105,6 +105,19 @@ public class ProjectConfig
     /// directly on the default branch (current behavior).
     /// </summary>
     public string? WorkingBranch { get; set; }
+
+    /// <summary>
+    /// Optional HTTP(S) URLs to external design input documents (specs, mockups, wireframes).
+    /// These are downloaded, text-extracted, and cached in .design-input-cache/.
+    /// Agents reference the extracted content for design context.
+    /// </summary>
+    public List<string> DesignInputUrls { get; set; } = [];
+
+    /// <summary>
+    /// Optional HTTP headers for authenticating design input URL downloads.
+    /// Example: { "Authorization": "Bearer token123" }
+    /// </summary>
+    public Dictionary<string, string> DesignInputAuthHeaders { get; set; } = new();
 }
 
 public class ModelConfig

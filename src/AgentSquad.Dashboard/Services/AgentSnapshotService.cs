@@ -403,7 +403,7 @@ public sealed class AgentSnapshotService
 
                 var currentStep = _taskTracker?.GetCurrentStep(agentId);
                 var aiLabel = activeCall.Context ?? currentStep?.Name ?? "AI call in progress";
-                updatedReason = $"{aiLabel} ({activeCall.ModelName})";
+                updatedReason = StripStepCounterPatterns(aiLabel);
             }
 
             var changed = snapshot.LlmCallElapsedTime != llmElapsed
@@ -492,8 +492,12 @@ public sealed class AgentSnapshotService
             var aiLabel = activeCall.Context
                 ?? currentStep?.Name
                 ?? "AI call in progress";
-            effectiveReason = $"{aiLabel} ({activeCall.ModelName})";
+            // Show actual task as primary; model is available via ActiveModel property
+            effectiveReason = aiLabel;
         }
+
+        // Strip step counter patterns (e.g., "(1/3)", "step 2/4") from status text
+        effectiveReason = StripStepCounterPatterns(effectiveReason);
 
         return new()
         {
@@ -548,5 +552,20 @@ public sealed class AgentSnapshotService
             _ => agentId
         };
         return indexInRole > 0 ? $"{baseName} {indexInRole}" : baseName;
+    }
+
+    /// <summary>
+    /// Strips step counter patterns like "(1/3)", "step 2/4", "(step 1 of 5)" from status text
+    /// to reduce noise in the dashboard display.
+    /// </summary>
+    private static string? StripStepCounterPatterns(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return text;
+        // Remove patterns: (1/3), (2/4), step 1/3, Step 2 of 5, (step 1 of 3)
+        var result = System.Text.RegularExpressions.Regex.Replace(
+            text,
+            @"\(?\s*[Ss]tep\s+\d+\s*(/\s*\d+|of\s+\d+)\s*\)?|\(\d+/\d+\)",
+            "");
+        return result.Trim();
     }
 }

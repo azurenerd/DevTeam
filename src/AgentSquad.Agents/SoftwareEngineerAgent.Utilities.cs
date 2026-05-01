@@ -721,6 +721,93 @@ public partial class SoftwareEngineerAgent
     }
 
     /// <summary>
+    /// Serializes tasks that touch the same files by chaining them with dependency links.
+    /// If tasks T3, T5, T7 all touch the same file, this creates T5→T3, T7→T5 so they
+    /// execute sequentially, preventing merge conflicts from parallel writes.
+    /// Skips T1 (foundation) since all tasks already depend on it.
+    /// </summary>
+    private void SerializeOverlappingTasks(List<EngineeringTask> tasks)
+    {
+        if (tasks.Count <= 2) return;
+
+        // Build a map of file → list of tasks (indices) that touch it
+        var fileToTasks = new Dictionary<string, List<int>>(StringComparer.OrdinalIgnoreCase);
+
+        for (var i = 1; i < tasks.Count; i++) // skip T1 (index 0)
+        {
+            var touchedFiles = ExtractTouchedFilesFromDescription(tasks[i].Description);
+            foreach (var file in touchedFiles)
+            {
+                if (!fileToTasks.TryGetValue(file, out var list))
+                {
+                    list = new List<int>();
+                    fileToTasks[file] = list;
+                }
+                list.Add(i);
+            }
+        }
+
+        var chainsCreated = 0;
+        foreach (var (file, taskIndices) in fileToTasks)
+        {
+            if (taskIndices.Count < 2) continue;
+
+            // Chain tasks: each subsequent task depends on the previous one
+            for (var j = 1; j < taskIndices.Count; j++)
+            {
+                var currentTask = tasks[taskIndices[j]];
+                var previousTaskId = tasks[taskIndices[j - 1]].Id;
+
+                if (!currentTask.Dependencies.Contains(previousTaskId, StringComparer.OrdinalIgnoreCase))
+                {
+                    currentTask.Dependencies.Add(previousTaskId);
+                    chainsCreated++;
+                }
+            }
+        }
+
+        if (chainsCreated > 0)
+        {
+            Logger.LogInformation("SerializeOverlappingTasks: created {Count} dependency links to serialize file-overlapping tasks",
+                chainsCreated);
+        }
+    }
+
+    /// <summary>
+    /// Extracts file paths referenced in a task description (both CREATE and MODIFY patterns).
+    /// Parses markdown-style File Plan entries and raw "CREATE: path" / "MODIFY: path" patterns.
+    /// </summary>
+    private static List<string> ExtractTouchedFilesFromDescription(string description)
+    {
+        var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(description)) return files.ToList();
+
+        foreach (var line in description.Split('\n'))
+        {
+            var trimmed = line.Trim();
+
+            // Match "CREATE: path/to/file" or "MODIFY: path/to/file"
+            if (trimmed.StartsWith("CREATE:", StringComparison.OrdinalIgnoreCase) ||
+                trimmed.StartsWith("MODIFY:", StringComparison.OrdinalIgnoreCase))
+            {
+                var path = trimmed[(trimmed.IndexOf(':') + 1)..].Trim().Trim('`', '"', '\'');
+                if (!string.IsNullOrWhiteSpace(path))
+                    files.Add(path);
+            }
+            // Match markdown "- ➕ **Create:** `path`" or "- ✏️ **Modify:** `path`"
+            else if (trimmed.Contains("**Create:**") || trimmed.Contains("**Modify:**"))
+            {
+                var backtickStart = trimmed.IndexOf('`');
+                var backtickEnd = trimmed.LastIndexOf('`');
+                if (backtickStart >= 0 && backtickEnd > backtickStart)
+                    files.Add(trimmed[(backtickStart + 1)..backtickEnd]);
+            }
+        }
+
+        return files.ToList();
+    }
+
+    /// <summary>
     /// Extracts CREATE file paths from a task description's File Plan section.
     /// </summary>
     private static List<string> ExtractCreateFilesFromDescription(string description)

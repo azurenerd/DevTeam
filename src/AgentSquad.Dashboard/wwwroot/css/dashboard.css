@@ -9664,3 +9664,30 @@ a.ntl-detail-pr-num:hover { text-decoration: underline; color: #79c0ff; }
 }
 .test-artifact-details { font-size: 0.75rem; color: var(--text-secondary); }
 .test-artifact-date { font-size: 0.72rem; color: var(--text-tertiary); }
+
+/* Role description popover */
+.role-popover {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 100;
+    background: var(--bg-secondary, #1e1e2e);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    width: 280px;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    margin-top: 4px;
+}
+.role-popover-close {
+    position: absolute;
+    top: 4px;
+    right: 8px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    color: var(--text-tertiary);
+}
+.role-popover-close:hover { color: var(--text-primary); }

@@ -1178,6 +1178,9 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
         // and all other tasks depend on it
         EnsureFoundationFirstPattern(parsedTasks);
 
+        // Serialize tasks that touch the same files to prevent merge conflicts
+        SerializeOverlappingTasks(parsedTasks);
+
         // PE Parallelism: Validate and repair file overlaps using AI-assisted fixing
         await ValidateAndRepairTaskPlanAsync(parsedTasks, chat, ct);
 

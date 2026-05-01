@@ -229,7 +229,16 @@ else
                     </div>
                     <div class="agent-info">
                         <div class="agent-name" title="@agent.DisplayName">@agent.DisplayName</div>
-                        <div class="agent-role">@FormatRole(agent.Role, agent.Specialty)</div>
+                        <div class="agent-role" style="position:relative; cursor:pointer;" @onclick:stopPropagation="true" @onclick="() => ToggleRolePopover(agent.Id)">
+                            @FormatRole(agent.Role, agent.Specialty)
+                            @if (_rolePopoverId == agent.Id)
+                            {
+                                <div class="role-popover" @onclick:stopPropagation="true">
+                                    <span class="role-popover-close" @onclick="() => _rolePopoverId = null">✕</span>
+                                    @GetRoleDescription(agent.Role)
+                                </div>
+                            }
+                        </div>
                         @if (agent.Capabilities.Count > 0)
                         {
                             <div class="agent-capabilities">
@@ -606,6 +615,9 @@ else
     private bool _refreshing;
     private bool _isProjectComplete;
 
+    // Role popover state
+    private string? _rolePopoverId;
+
     // Role editor modal state
     private bool _showRoleModal;
     private string? _roleAgentId;
@@ -761,6 +773,22 @@ else
         AgentRole.TestEngineer => "Test Engineer",
         AgentRole.Custom when !string.IsNullOrEmpty(specialty) => "SME Specialist",
         _ => role.ToString()
+    };
+
+    private void ToggleRolePopover(string agentId)
+    {
+        _rolePopoverId = _rolePopoverId == agentId ? null : agentId;
+    }
+
+    private static string GetRoleDescription(AgentRole role) => role switch
+    {
+        AgentRole.ProgramManager => "Owns the product vision. Creates PM Spec from research, manages reviews, coordinates team, and escalates blockers to the Executive.",
+        AgentRole.Researcher => "Investigates technologies, APIs, and design patterns. Produces Research.md that informs all downstream decisions.",
+        AgentRole.Architect => "Designs system structure from PM Spec. Produces Architecture.md with component diagrams, data models, and integration patterns.",
+        AgentRole.SoftwareEngineer => "Implements code from the engineering plan. Creates PRs with production-quality code, handles rework feedback, and runs local builds.",
+        AgentRole.TestEngineer => "Validates implementations via automated tests. Writes integration/UI tests, reports source bugs, and verifies fixes.",
+        AgentRole.Custom => "Subject-matter expert dynamically spawned for specialized parallel work (e.g., frontend, backend, game engine).",
+        _ => "Agent role in the Virtual Dev Team."
     };
 
     private static string FormatDuration(TimeSpan ts) => ts.TotalHours >= 1
