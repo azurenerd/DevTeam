@@ -138,6 +138,7 @@ builder.Services.AddSingleton<IConfigurationService>(sp =>
         localAppSettingsPath: File.Exists(localPath) ? localPath : null);
 });
 builder.Services.AddSingleton<DirectorCliService>();
+builder.Services.AddTestArtifactServices();
 builder.Services.AddSingleton(new DashboardMode(IsStandalone: true));
 
 var app = builder.Build();
@@ -156,6 +157,8 @@ app.UseStaticFiles();
 app.UseAntiforgery();
 
 app.MapHub<AgentHub>("/agenthub");
+
+app.MapTestArtifactEndpoints();
 
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
