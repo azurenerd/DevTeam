@@ -489,6 +489,8 @@ public class ProgramManagerAgent : AgentBase
             if (referencedFiles.Count == 0)
                 return;
 
+            UpdateStatus(AgentStatus.Working, "📁 Validating design input files");
+
             // Check which files already exist in the repo
             IReadOnlyList<string> repoTree;
             try
@@ -1038,6 +1040,7 @@ public class ProgramManagerAgent : AgentBase
                     $"Blocker: {blocker.Title}", Identity.ModelTier);
 
                 // Try to triage the blocker using AI
+                UpdateStatus(AgentStatus.Working, $"🤖 Triaging blocker #{blocker.Number} with AI");
                 var resolution = await TriageBlockerAsync(blocker.ToAgentIssue(), ct);
                 Core.TaskTracker!.RecordLlmCall(blockerStepId);
 
@@ -1293,6 +1296,8 @@ public class ProgramManagerAgent : AgentBase
                     Core.TaskTracker!.CompleteStep(reviewStepId);
                     continue;
                 }
+
+                UpdateStatus(AgentStatus.Working, $"✅ Reviewing PR #{pr.Number}: Posting review");
 
                 if (approved)
                 {
@@ -1660,6 +1665,7 @@ public class ProgramManagerAgent : AgentBase
                     $"  - #{s.Number}: {s.Title} (closed)"));
 
                 // Gather actual evidence: repo file tree + merged PRs (prevents hallucination)
+                UpdateStatus(AgentStatus.Working, $"🔍 Reviewing enhancement #{issue.Number}: Gathering evidence");
                 var repoTree = new List<string>();
                 var mergedPrSummary = "";
                 try
@@ -1730,6 +1736,7 @@ public class ProgramManagerAgent : AgentBase
                        "Do NOT invent PR numbers or guess at repository contents — use only the evidence provided. " +
                        "Start your response with either APPROVED or NEEDS_MORE_WORK.");
 
+                UpdateStatus(AgentStatus.Working, $"🤖 Reviewing enhancement #{issue.Number}: Running acceptance check");
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var responseText = response.Content ?? "";
                 Core.TaskTracker!.RecordLlmCall(completionStepId);
@@ -2504,6 +2511,7 @@ public class ProgramManagerAgent : AgentBase
                 "Gathering project docs and calling AI to propose team composition", Identity.ModelTier);
 
             // Gather project docs
+            UpdateStatus(AgentStatus.Working, "📋 Composing team: Gathering project documents");
             var projectDesc = Core.Config.Project.Description ?? "No project description";
             var research = await Core.ProjectFiles.GetResearchDocAsync(ct);
             var pmSpec = await Core.ProjectFiles.GetPMSpecAsync(ct);
@@ -2513,6 +2521,7 @@ public class ProgramManagerAgent : AgentBase
                 projectDesc, research, pmSpec, ct);
 
             // Call AI to analyze and propose team
+            UpdateStatus(AgentStatus.Working, "🤖 Composing team: Analyzing project needs");
             var kernel = Core.ModelRegistry.GetKernel(Identity.ModelTier);
             var chatService = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -2576,6 +2585,7 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // === Gate: AgentTeamComposition — human approves team composition ===
+            UpdateStatus(AgentStatus.Working, "⏳ Awaiting human approval on team composition");
             var gateResult = await Core.GateCheck.WaitForGateAsync(
                 GateIds.AgentTeamComposition,
                 $"PM proposes team composition:\n" +
@@ -2609,6 +2619,8 @@ public class ProgramManagerAgent : AgentBase
 
             // Spawn any new SME agents from the approved proposal
             var smeCount = proposal.NewSmeAgents.Count + proposal.ExistingTemplateIds.Count;
+            if (smeCount > 0)
+                UpdateStatus(AgentStatus.Working, $"🚀 Spawning {smeCount} specialist engineers");
             string? spawnStepId = smeCount > 0
                 ? Core.TaskTracker!.BeginStep(Identity.Id, "pm-team", $"Spawn {smeCount} SME agents",
                     "Spawning SME agents from approved proposal")
@@ -3001,6 +3013,8 @@ public class ProgramManagerAgent : AgentBase
         {
             try
             {
+                UpdateStatus(AgentStatus.Working, $"💬 Processing clarification on issue #{request.IssueNumber}");
+
                 var clarifyStepId = Core.TaskTracker!.BeginStep(Identity.Id, "pm-support",
                     $"Answer question on #{request.IssueNumber}",
                     $"Clarification from {request.FromAgentId}", Identity.ModelTier);
@@ -3050,6 +3064,7 @@ public class ProgramManagerAgent : AgentBase
                        commentsContext +
                        $"\n\n## Engineer's Question\n{request.Question}");
 
+                UpdateStatus(AgentStatus.Working, $"🤖 Generating response for clarification #{request.IssueNumber}");
                 var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
                 var answer = response.Content?.Trim() ?? "";
                 Core.TaskTracker!.RecordLlmCall(clarifyStepId);
@@ -3205,9 +3220,11 @@ public class ProgramManagerAgent : AgentBase
             }
 
             // Read actual code files from the PR branch
+            UpdateStatus(AgentStatus.Working, $"🔍 Reviewing PR #{pr.Number}: Fetching code changes");
             var codeContext = await _platform.PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Gather ALL screenshot evidence from PR comments (PE screenshots, TE screenshots, standalone)
+            UpdateStatus(AgentStatus.Working, $"📸 Reviewing PR #{pr.Number}: Loading screenshots");
             var screenshotImages = new List<PullRequestWorkflow.ScreenshotImage>();
             var screenshotContext = "";
             try
@@ -3230,6 +3247,7 @@ public class ProgramManagerAgent : AgentBase
             // Log AI description of each screenshot for dashboard visibility
             if (screenshotImages.Count > 0)
             {
+                UpdateStatus(AgentStatus.Working, $"📸 Reviewing PR #{pr.Number}: Describing {screenshotImages.Count} screenshots");
                 try
                 {
                     var descKernel = Core.ModelRegistry.GetKernel(Identity.ModelTier, Identity.Id);
@@ -3357,6 +3375,7 @@ public class ProgramManagerAgent : AgentBase
                 history.AddUserMessage(userMessageText);
             }
 
+            UpdateStatus(AgentStatus.Working, $"🤖 Reviewing PR #{pr.Number}: Evaluating against acceptance criteria");
             var response = await chat.GetChatMessageContentAsync(history, cancellationToken: ct);
 
             var result = response.Content?.Trim() ?? "";
