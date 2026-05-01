@@ -178,6 +178,39 @@ public class BuildRunner
         var slnFiles = Directory.GetFiles(workspacePath, "*.sln");
         var csprojFiles = Directory.GetFiles(workspacePath, "*.csproj");
 
+        // No .NET project files at all — check for Node.js project
+        if (slnFiles.Length == 0 && csprojFiles.Length == 0)
+        {
+            // Search subdirectories too
+            var anySlns = Directory.GetFiles(workspacePath, "*.sln", SearchOption.AllDirectories);
+            var anyCsprojs = Directory.GetFiles(workspacePath, "*.csproj", SearchOption.AllDirectories);
+
+            if (anySlns.Length > 0)
+            {
+                var target = Path.GetRelativePath(workspacePath, anySlns[0]);
+                _logger.LogInformation("Auto-resolved build target to {Target} (found in subdirectory)", target);
+                return $"dotnet build {target}";
+            }
+
+            if (anyCsprojs.Length > 0)
+            {
+                var target = Path.GetRelativePath(workspacePath, anyCsprojs[0]);
+                _logger.LogInformation("Auto-resolved build target to {Target} (found in subdirectory)", target);
+                return $"dotnet build {target}";
+            }
+
+            // No .NET files anywhere — check if this is a Node.js project
+            var packageJson = Path.Combine(workspacePath, "package.json");
+            if (File.Exists(packageJson))
+            {
+                _logger.LogInformation("No .NET project found; detected package.json — switching to 'npm run build'");
+                return "npm run build";
+            }
+
+            _logger.LogWarning("No .NET project or package.json found in {Path}; returning original command", workspacePath);
+            return buildCommand;
+        }
+
         // If exactly one target exists, dotnet build works fine as-is
         if (slnFiles.Length + csprojFiles.Length <= 1)
             return buildCommand;
