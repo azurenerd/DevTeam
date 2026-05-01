@@ -754,10 +754,7 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
         var args = new List<string>();
 
         // Core flags for non-interactive autonomous operation.
-        // NOTE: --allow-all is intentionally omitted. For strategies that need to invoke
-        // read-only MCP tools, explicit --allow-tool flags are emitted below via the
-        // per-invocation context — this is tighter than --allow-all, which would also
-        // permit filesystem writes and shell execution.
+        args.Add("--allow-all");
         args.Add("--no-ask-user");
         args.Add("--no-auto-update");
         args.Add("--no-custom-instructions");
@@ -829,18 +826,51 @@ public sealed class CopilotCliProcessManager : IHostedService, IDisposable
                 args.Add(a);
         }
 
-        // MCP servers referenced by name from the agent-role config (legacy path).
+        // MCP servers referenced by name from the agent-role config.
+        // The CLI's mcp.json file is NOT loaded in piped-stdin mode, so we must pass
+        // server definitions inline via --additional-mcp-config for each agent call.
         var mcpServers = AgentCallContext.McpServers;
-        if (mcpServers is { Count: > 0 })
+        if (mcpServers is { Count: > 0 } && _configMonitor is not null)
         {
-            foreach (var server in mcpServers)
+            var globalMcpServers = _configMonitor.CurrentValue.McpServers;
+            _logger.LogDebug("Agent {AgentId} has {McpCount} MCP servers in context: [{Servers}]. Global registry has: [{GlobalServers}]",
+                AgentCallContext.CurrentAgentId, mcpServers.Count, string.Join(", ", mcpServers),
+                string.Join(", ", globalMcpServers.Keys));
+
+            var mcpEntries = new Dictionary<string, object>();
+            foreach (var serverName in mcpServers)
             {
-                if (!string.IsNullOrWhiteSpace(server))
+                if (string.IsNullOrWhiteSpace(serverName)) continue;
+                if (globalMcpServers.TryGetValue(serverName, out var def) && !string.IsNullOrEmpty(def.Command))
                 {
-                    args.Add("--mcp-server");
-                    args.Add(server);
+                    mcpEntries[serverName] = new
+                    {
+                        type = def.Transport.ToString().ToLowerInvariant(),
+                        command = def.Command,
+                        args = def.Args,
+                        env = def.Env.Count > 0 ? def.Env : null
+                    };
+                }
+                else
+                {
+                    _logger.LogWarning("MCP server '{ServerName}' not found in global config or has no Command", serverName);
                 }
             }
+
+            if (mcpEntries.Count > 0)
+            {
+                var mcpConfigJson = JsonSerializer.Serialize(
+                    new { mcpServers = mcpEntries },
+                    new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase, DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull });
+                args.Add("--additional-mcp-config");
+                args.Add(mcpConfigJson);
+                _logger.LogInformation("Injecting --additional-mcp-config for agent {AgentId} with servers: [{Servers}]",
+                    AgentCallContext.CurrentAgentId, string.Join(", ", mcpEntries.Keys));
+            }
+        }
+        else if (mcpServers is { Count: > 0 } && _configMonitor is null)
+        {
+            _logger.LogWarning("Agent has {McpCount} MCP servers but _configMonitor is null — cannot inject inline MCP config", mcpServers.Count);
         }
 
         // Per-invocation MCP additions (inline config + tool permissions). These come

@@ -174,7 +174,8 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         var sb = new StringBuilder();
 
         var invocation = AgentCallContext.CurrentInvocationContext;
-        var allowTools = invocation?.AllowToolUsage == true;
+        var hasMcpServers = AgentCallContext.McpServers is { Count: > 0 };
+        var allowTools = invocation?.AllowToolUsage == true || hasMcpServers;
 
         // Critical directive: prevent CLI from acting as an interactive assistant
         sb.AppendLine("[OUTPUT FORMAT INSTRUCTIONS]");
@@ -183,7 +184,7 @@ public sealed class CopilotCliChatCompletionService : IChatCompletionService
         sb.AppendLine("1. Output the requested content DIRECTLY. Start immediately with the content itself.");
         if (allowTools)
         {
-            sb.AppendLine("2. You MAY silently call the configured read-only MCP tools (e.g. read_file, list_directory, search_code) to inspect workspace context BEFORE producing output. Do NOT narrate tool calls, inspection steps, or intermediate actions in your response. Do NOT create, edit, or write files. Do NOT run shell commands.");
+            sb.AppendLine("2. You MAY silently call the configured MCP tools BEFORE producing output. Available tools include: ask_work_iq (query Microsoft 365 Copilot to read SharePoint/OneDrive documents, emails, and files — use this when the prompt references SharePoint or OneDrive URLs), read_file, list_directory, search_code. IMPORTANT: If the project description or context contains a SharePoint/OneDrive URL, you MUST call ask_work_iq to retrieve the document content before researching. Do NOT narrate tool calls, inspection steps, or intermediate actions in your response. Do NOT create, edit, or write files. Do NOT run shell commands.");
         }
         else
         {
