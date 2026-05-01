@@ -127,7 +127,7 @@ public class ResearcherAgent : AgentBase
                         }
 
                         // Create the PR upfront so it's visible immediately
-                        UpdateStatus(AgentStatus.Working, "Creating PR for Research.md");
+                        UpdateStatus(AgentStatus.Working, "📝 Creating research PR");
                         string? createPrStepId = null;
                         try { createPrStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Create research PR", "Opening PR for Research.md", Identity.ModelTier); } catch { }
                         var researchPath = Core.ProjectFiles.ResolvePath("Research.md");
@@ -264,6 +264,7 @@ public class ResearcherAgent : AgentBase
                         // Explicitly close the related issue (don't rely on "Closes #X" in PR body)
                         if (relatedIssue.HasValue)
                         {
+                            UpdateStatus(AgentStatus.Working, "✅ Closing research issue");
                             try
                             {
                                 await _platform.WorkItemService.CloseAsync(relatedIssue.Value, ct);
@@ -392,10 +393,12 @@ public class ResearcherAgent : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // Scan for design reference files FIRST so we can include them in research context
+        UpdateStatus(AgentStatus.Working, "📁 Scanning repository for design references");
         LogActivity("research", "🔍 Scanning for design reference files");
         var designContext = await ScanForDesignReferencesAsync(ct);
         _lastDesignSection = designContext; // Cache for appending to Research.md later
 
+        UpdateStatus(AgentStatus.Working, "📋 Gathering repository context for research");
         var history = CreateChatHistory();
         var memoryContext = await GetMemoryContextAsync(ct: ct);
 
@@ -555,6 +558,7 @@ public class ResearcherAgent : AgentBase
         } // end else (multi-turn)
 
         // Self-assessment: assess and refine the research document
+        UpdateStatus(AgentStatus.Working, "🤖 Self-assessing research quality");
         string? assessStepId = null;
         try { assessStepId = Core.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & refinement", "Assessing and refining research output", Identity.ModelTier); } catch { }
         Core.ReasoningLog!.Log(new AgentReasoningEvent
@@ -584,6 +588,7 @@ public class ResearcherAgent : AgentBase
         try { if (assessStepId is not null) Core.TaskTracker!.CompleteStep(assessStepId); } catch { }
 
         Logger.LogDebug("Research synthesis complete for {Topic}", directive.Topic);
+        UpdateStatus(AgentStatus.Working, "💾 Saving research findings");
         await RememberAsync(MemoryType.Decision,
             $"Technology evaluation decisions for '{directive.Topic}'",
             TruncateForMemory(synthesisContent), ct);

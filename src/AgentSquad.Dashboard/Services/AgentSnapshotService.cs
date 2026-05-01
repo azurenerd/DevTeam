@@ -383,6 +383,46 @@ public sealed class AgentSnapshotService
     public decimal GetTotalEstimatedCost() => _modelRegistry.UsageTracker.GetTotalCost();
     public int GetTotalAiCalls() => _modelRegistry.UsageTracker.GetAllStats().Values.Sum(s => s.TotalCalls);
 
+    /// <summary>Refresh LLM call overlay for a specific agent when a call starts/completes.</summary>
+    public bool RefreshLlmCallState(string agentId)
+    {
+        lock (_lock)
+        {
+            if (!_agentCache.TryGetValue(agentId, out var snapshot)) return false;
+
+            var activeCall = _llmCallTracker?.GetActiveCall(agentId);
+            TimeSpan? llmElapsed = activeCall is not null ? DateTime.UtcNow - activeCall.StartedAt : null;
+
+            string? updatedReason = snapshot.StatusReason;
+            var updatedStatus = snapshot.Status;
+
+            if (activeCall is not null)
+            {
+                if (updatedStatus is not AgentStatus.Working)
+                    updatedStatus = AgentStatus.Working;
+
+                var currentStep = _taskTracker?.GetCurrentStep(agentId);
+                var aiLabel = activeCall.Context ?? currentStep?.Name ?? "AI call in progress";
+                updatedReason = $"{aiLabel} ({activeCall.ModelName})";
+            }
+
+            var changed = snapshot.LlmCallElapsedTime != llmElapsed
+                || snapshot.Status != updatedStatus
+                || snapshot.StatusReason != updatedReason;
+
+            if (changed)
+            {
+                _agentCache[agentId] = snapshot with
+                {
+                    Status = updatedStatus,
+                    StatusReason = updatedReason,
+                    LlmCallElapsedTime = llmElapsed
+                };
+            }
+            return changed;
+        }
+    }
+
     public async Task<AgentChatMessage> SendAgentChatAsync(
         string agentId, string message, CancellationToken ct = default)
     {
@@ -441,10 +481,18 @@ public sealed class AgentSnapshotService
         var effectiveStatus = agent.Status;
         var effectiveReason = agent.StatusReason;
         var activeCall = _llmCallTracker?.GetActiveCall(agent.Identity.Id);
-        if (activeCall is not null && effectiveStatus is not AgentStatus.Working)
+        TimeSpan? llmElapsed = null;
+        if (activeCall is not null)
         {
-            effectiveStatus = AgentStatus.Working;
-            effectiveReason = $"AI call in progress ({activeCall.ModelName})";
+            llmElapsed = DateTime.UtcNow - activeCall.StartedAt;
+            if (effectiveStatus is not AgentStatus.Working)
+                effectiveStatus = AgentStatus.Working;
+
+            // Use call context if available, fall back to current step name, then generic
+            var aiLabel = activeCall.Context
+                ?? currentStep?.Name
+                ?? "AI call in progress";
+            effectiveReason = $"{aiLabel} ({activeCall.ModelName})";
         }
 
         return new()
@@ -465,6 +513,7 @@ public sealed class AgentSnapshotService
             CurrentTaskName = taskName,
             CurrentStepName = currentStep?.Name,
             CurrentStepDescription = currentStep?.Description,
+            LlmCallElapsedTime = llmElapsed,
             DiagnosticSummary = diag?.Summary,
             DiagnosticJustification = diag?.Justification,
             DiagnosticCompliant = diag?.IsCompliant ?? true,

@@ -739,6 +739,24 @@ main {
     font-style: italic;
 }
 
+/* LLM call indicator */
+.llm-call-detail .llm-call-active {
+    color: var(--status-working, #00d4ff);
+    font-size: 0.8rem;
+    font-weight: 600;
+    animation: llm-pulse 1.5s ease-in-out infinite;
+}
+.llm-call-detail .llm-call-slow {
+    color: var(--status-blocked, #f85149);
+    font-size: 0.8rem;
+    font-weight: 600;
+    animation: llm-pulse 0.8s ease-in-out infinite;
+}
+@keyframes llm-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
 /* ===== Metrics Page ===== */
 .metrics-section {
     margin-bottom: 2.5rem;

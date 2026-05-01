@@ -304,6 +304,22 @@ else
                         }
                     }
 
+                    @* LLM call elapsed time *@
+                    @if (agent.LlmCallElapsedTime.HasValue)
+                    {
+                        var llmElapsed = agent.LlmCallElapsedTime.Value;
+                        var llmTimeStr = llmElapsed.TotalSeconds < 60
+                            ? $"{(int)llmElapsed.TotalSeconds}s"
+                            : $"{(int)llmElapsed.TotalMinutes}m {llmElapsed.Seconds}s";
+                        var isSlowCall = llmElapsed.TotalSeconds > 30;
+                        <div class="agent-detail llm-call-detail">
+                            <span class="detail-label">🤖 AI</span>
+                            <span class="detail-value @(isSlowCall ? "llm-call-slow" : "llm-call-active")">
+                                @llmTimeStr @if (isSlowCall) { <span title="LLM call exceeding 30s">⚠</span> }
+                            </span>
+                        </div>
+                    }
+
                     @* Work item link (PR or Issue) *@
                     @{ var prNum = ExtractPrNumber(agent.StatusReason) ?? agent.AssignedPullRequest; }
                     @if (prNum is not null)

@@ -117,6 +117,7 @@ public abstract class EngineerAgentBase : AgentBase
         // Initialize local workspace if configured
         if (Config.Workspace.IsEnabled)
         {
+            UpdateStatus(AgentStatus.Working, "📁 Setting up workspace");
             try
             {
                 var repoUrl = Config.GetGitCloneUrl();
@@ -717,6 +718,7 @@ public abstract class EngineerAgentBase : AgentBase
             TaskTracker.CompleteStep(claimStepId);
 
             // Create PR linking to the Issue — include Implementation Steps
+            UpdateStatus(AgentStatus.Working, "📝 Creating pull request");
             var createPrStepId = TaskTracker.BeginStep(Identity.Id, taskId, "Create PR",
                 $"Creating PR for issue #{issue.Number}", Identity.ModelTier);
             var prDescription = $"Closes #{issue.Number}\n\n" +
@@ -849,7 +851,7 @@ public abstract class EngineerAgentBase : AgentBase
                 $"Step {stepNumber}/{steps.Count} for PR #{pr.Number}", Identity.ModelTier);
 
             UpdateStatus(AgentStatus.Working,
-                $"PR #{pr.Number} step {stepNumber}/{steps.Count}: {Truncate(step, 60)}");
+                $"🔨 Implementing step {stepNumber}/{steps.Count}: {Truncate(step, 40)}");
             Logger.LogInformation("{Role} {Name} implementing step {Step}/{Total} for PR #{PrNumber}: {StepDesc}",
                 Identity.Role, Identity.DisplayName, stepNumber, steps.Count, pr.Number,
                 Truncate(step, 100));
@@ -2949,6 +2951,7 @@ public abstract class EngineerAgentBase : AgentBase
 
         for (int attempt = 0; attempt <= wsConfig.MaxBuildRetries; attempt++)
         {
+            UpdateStatus(AgentStatus.Working, $"🔨 Building (attempt {attempt + 1}/{wsConfig.MaxBuildRetries + 1})");
             _ = Metrics?.RecordBuildAttemptAsync(Identity.Id, ct);
             var buildResult = await BuildRunnerSvc!.BuildAsync(
                 Workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
@@ -2956,6 +2959,7 @@ public abstract class EngineerAgentBase : AgentBase
             if (buildResult.Success)
             {
                 _ = Metrics?.RecordBuildSuccessAsync(Identity.Id, ct);
+                UpdateStatus(AgentStatus.Working, "✅ Build succeeded");
                 if (attempt > 0)
                     Logger.LogInformation("{Role} {Name} build succeeded after {Attempt} fix attempt(s)",
                         Identity.Role, Identity.DisplayName, attempt);
@@ -2977,6 +2981,7 @@ public abstract class EngineerAgentBase : AgentBase
 
             Logger.LogWarning("{Role} {Name} build failed (attempt {Attempt}/{Max}): {ErrorCount} errors",
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxBuildRetries + 1, buildResult.ParsedErrors.Count);
+            UpdateStatus(AgentStatus.Working, $"⚠️ Build failed, retrying ({attempt + 1}/{wsConfig.MaxBuildRetries + 1})");
 
             // Escalate model tier after 2 failed fix attempts to break out of repetitive failures
             var effectiveChat = chat;
@@ -3211,12 +3216,14 @@ public abstract class EngineerAgentBase : AgentBase
         // Phase 1: Try to fix failing tests (up to MaxTestRetries attempts)
         for (int attempt = 0; attempt <= wsConfig.MaxTestRetries; attempt++)
         {
+            UpdateStatus(AgentStatus.Working, $"🧪 Running tests (attempt {attempt + 1}/{wsConfig.MaxTestRetries + 1})");
             _ = Metrics?.RecordTestRunAsync(Identity.Id, ct);
             var testResult = await TestRunnerSvc!.RunTestsAsync(
                 Workspace!.RepoPath, wsConfig.TestCommand, wsConfig.TestTimeoutSeconds, ct);
 
             if (testResult.Success)
             {
+                UpdateStatus(AgentStatus.Working, "✅ Tests passed");
                 if (attempt > 0)
                     Logger.LogInformation("{Role} {Name} tests passed after {Attempt} fix attempt(s): {Passed} passed",
                         Identity.Role, Identity.DisplayName, attempt, testResult.Passed);
@@ -3242,6 +3249,7 @@ public abstract class EngineerAgentBase : AgentBase
             Logger.LogWarning("{Role} {Name} tests failed (attempt {Attempt}/{Max}): {Failed} failed, {Passed} passed",
                 Identity.Role, Identity.DisplayName, attempt + 1, wsConfig.MaxTestRetries,
                 testResult.Failed, testResult.Passed);
+            UpdateStatus(AgentStatus.Working, "⚠️ Tests failed, analyzing errors");
             LogActivity("test", $"🧪 Tests failed (attempt {attempt + 1}/{wsConfig.MaxTestRetries}): {testResult.Failed} failed, asking AI to fix");
 
             // Escalate model tier after 2 failed test-fix attempts

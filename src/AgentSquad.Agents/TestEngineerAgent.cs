@@ -295,6 +295,7 @@ public class TestEngineerAgent : AgentBase
             // AI-based testability assessment for legacy mode
             var changedFiles = await _platform.PrService.GetChangedFilesAsync(pr.Number, ct);
             
+            UpdateStatus(AgentStatus.Working, "🔍 Assessing project testability");
             var assessStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
                 $"Assessing testability of merged PR #{pr.Number}", Identity.ModelTier);
             Logger.LogInformation("Assessing testability of merged PR #{Number} ({FileCount} files): {Title}",
@@ -465,6 +466,7 @@ public class TestEngineerAgent : AgentBase
                 continue;
             }
 
+            UpdateStatus(AgentStatus.Working, "🔍 Assessing project testability");
             var inlineAssessStepId = Core.TaskTracker!.BeginStep(Identity.Id, $"te-pr-{pr.Number}", "Generate test plan",
                 $"Assessing testability of PR #{pr.Number}", Identity.ModelTier);
             Logger.LogInformation("Assessing testability of PR #{Number} ({FileCount} changed files): {Title}",
@@ -634,6 +636,7 @@ public class TestEngineerAgent : AgentBase
 
         try
         {
+            UpdateStatus(AgentStatus.Working, "🤖 Analyzing testability with AI");
             var history = CreateChatHistory();
             history.AddUserMessage(prompt);
             var response = await chat.GetChatMessageContentsAsync(history, cancellationToken: ct);
@@ -951,6 +954,7 @@ public class TestEngineerAgent : AgentBase
 
         // --- Phase 7: Run tests by tier ---
         LogActivity("testing", "🧪 Running test suites");
+        UpdateStatus(AgentStatus.Working, "🧪 Running test suite");
         UpdateStatus(AgentStatus.Working, $"Running tests for PR #{pr.Number}");
         var tierResults = new List<TestResult>();
 
@@ -1112,6 +1116,7 @@ public class TestEngineerAgent : AgentBase
 
             try
             {
+                UpdateStatus(AgentStatus.Working, "📁 Updating workspace from latest branch");
                 var rebased = await _workspace.PullRebaseAsync(pr.HeadBranch, ct);
                 if (rebased)
                 {
@@ -1253,8 +1258,10 @@ public class TestEngineerAgent : AgentBase
         var chat = kernel.GetRequiredService<IChatCompletionService>();
 
         // First try auto-restoring missing packages (cheap — no AI call needed)
+        UpdateStatus(AgentStatus.Working, "📦 Restoring packages");
         if (await TryAutoRestoreMissingPackagesAsync(buildResult, ct))
         {
+            UpdateStatus(AgentStatus.Working, "✅ Package restore complete");
             buildResult = await _workspaceServices.BuildRunner!.BuildAsync(
                 _workspace!.RepoPath, wsConfig.BuildCommand, wsConfig.BuildTimeoutSeconds, ct);
             if (buildResult.Success) return buildResult;
@@ -1447,6 +1454,7 @@ public class TestEngineerAgent : AgentBase
     private async Task ApplyTestsAddedLabelAsync(AgentPullRequest pr, CancellationToken ct)
     {
         // === Gate: TestResults — human reviews test results before proceeding ===
+        UpdateStatus(AgentStatus.Working, "⏳ Awaiting human approval on test results");
         await Core.GateCheck.WaitForGateAsync(
             GateIds.TestResults,
             $"Tests completed on PR #{pr.Number}, results ready for human review",
@@ -1606,6 +1614,7 @@ public class TestEngineerAgent : AgentBase
         bool hasUploadedScreenshots = false;
         if (tierResults is { Count: > 0 })
         {
+            UpdateStatus(AgentStatus.Working, "📤 Uploading test artifacts");
             hasUploadedScreenshots = await UploadTestArtifactsToPrAsync(pr, tierResults, sb, ct);
         }
 
@@ -1865,6 +1874,8 @@ public class TestEngineerAgent : AgentBase
         // Don't signal if we have an active test PR in progress or pending rework
         if (_currentTestPrNumber is not null || !_reworkQueue.IsEmpty)
             return;
+
+        UpdateStatus(AgentStatus.Working, "📊 Analyzing test coverage");
 
         var isInline = Core.Config.Workspace.IsInlineTestWorkflow;
         var untestedCodePRs = 0;
@@ -2317,6 +2328,7 @@ public class TestEngineerAgent : AgentBase
             // Multi-pass: separate AI call per tier
             if (strategy.NeedsUnitTests)
             {
+                UpdateStatus(AgentStatus.Working, "🧪 Generating unit tests");
                 UpdateStatus(AgentStatus.Working, $"Generating unit tests for PR #{pr.Number}");
                 var unitOutput = await GenerateTestsForTierAsync(
                     chat, TestTier.Unit, pr, techStack, businessContext,
@@ -2327,6 +2339,7 @@ public class TestEngineerAgent : AgentBase
             // Generate integration tests (when service/API layers changed)
             if (strategy.NeedsIntegrationTests)
             {
+                UpdateStatus(AgentStatus.Working, "🧪 Generating integration tests");
                 UpdateStatus(AgentStatus.Working, $"Generating integration tests for PR #{pr.Number}");
                 var integrationOutput = await GenerateTestsForTierAsync(
                     chat, TestTier.Integration, pr, techStack, businessContext,
@@ -2337,6 +2350,7 @@ public class TestEngineerAgent : AgentBase
             // Generate UI tests with Playwright (when UI components changed)
             if (strategy.NeedsUITests && Core.Config.Workspace.EnableUITests)
             {
+                UpdateStatus(AgentStatus.Working, "🧪 Generating UI/E2E tests");
                 UpdateStatus(AgentStatus.Working, $"Generating UI/Playwright tests for PR #{pr.Number}");
                 var uiOutput = await GenerateTestsForTierAsync(
                     chat, TestTier.UI, pr, techStack, businessContext,

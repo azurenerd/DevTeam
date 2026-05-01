@@ -36,6 +36,9 @@ public sealed record AgentSnapshot
     /// <summary>Current task tracker step description for tooltip.</summary>
     public string? CurrentStepDescription { get; init; }
 
+    /// <summary>Elapsed time of the active LLM call, or null if no call in progress.</summary>
+    public TimeSpan? LlmCallElapsedTime { get; init; }
+
     /// <summary>For SME/custom agents, the specialty name (e.g., "Blazor UI Developer").</summary>
     public string? Specialty { get; init; }
 
@@ -131,6 +134,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
     private readonly IRepositoryContentService? _repositoryContentService;
     private readonly IRunBranchProvider? _branchProvider;
     private readonly AgentSquad.Core.AI.RoleContextProvider? _roleContextProvider;
+    private readonly AgentSquad.Core.AI.ActiveLlmCallTracker? _llmCallTracker;
     private readonly ILogger<DashboardDataService> _logger;
 
     private IReadOnlyList<PlatformPullRequest> _cachedPullRequests = Array.Empty<PlatformPullRequest>();
@@ -155,7 +159,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         ILogger<DashboardDataService> logger,
         IRepositoryContentService? repositoryContentService = null,
         IRunBranchProvider? branchProvider = null,
-        AgentSquad.Core.AI.RoleContextProvider? roleContextProvider = null)
+        AgentSquad.Core.AI.RoleContextProvider? roleContextProvider = null,
+        AgentSquad.Core.AI.ActiveLlmCallTracker? llmCallTracker = null)
     {
         _snapshots = snapshots;
         _diagnostics = diagnostics;
@@ -173,6 +178,7 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _repositoryContentService = repositoryContentService;
         _branchProvider = branchProvider;
         _roleContextProvider = roleContextProvider;
+        _llmCallTracker = llmCallTracker;
     }
 
     // ── BackgroundService lifecycle ──
@@ -183,6 +189,8 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
         _registry.AgentUnregistered += OnAgentUnregistered;
         _registry.AgentStatusChanged += OnAgentStatusChanged;
         _workflow.PhaseChanged += OnPhaseChanged;
+        if (_llmCallTracker is not null)
+            _llmCallTracker.LlmCallChanged += OnLlmCallChanged;
 
         _timeline.RecordMilestone("🚀", "Session Started", "AgentSquad pipeline initialized", "phase");
         SeedCache();
@@ -446,6 +454,21 @@ public sealed class DashboardDataService : BackgroundService, IDashboardDataServ
             ErrorCount = agent.RecentErrors.Count
         });
         NotifyStateChanged();
+    }
+
+    private void OnLlmCallChanged(object? sender, AgentSquad.Core.AI.ActiveLlmCallTracker.LlmCallChangedEventArgs e)
+    {
+        if (_snapshots.RefreshLlmCallState(e.AgentId))
+        {
+            _ = _hubContext.Clients.All.SendAsync("AgentStatusChanged", new
+            {
+                AgentId = e.AgentId,
+                OldStatus = "Working",
+                NewStatus = "Working",
+                Reason = e.IsStarted ? "AI call started" : "AI call completed"
+            });
+            NotifyStateChanged();
+        }
     }
 
     private void OnAgentDiagnosticChanged(object? sender, DiagnosticChangedEventArgs e)

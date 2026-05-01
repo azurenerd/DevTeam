@@ -668,6 +668,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
         Logger.LogInformation("Starting engineering plan creation from Enhancement issues");
 
         LogActivity("planning", "📋 Reading architecture doc and PM spec for engineering planning");
+        UpdateStatus(AgentStatus.Working, "📋 Gathering context for engineering plan");
         var architectureDoc = await ProjectFiles.GetArchitectureDocAsync(ct);
         var pmSpec = await ProjectFiles.GetPMSpecAsync(ct);
         var teamComposition = await ProjectFiles.GetTeamCompositionAsync(ct);
@@ -1025,6 +1026,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
         AddUserMessageWithDesignImages(history, userPromptBuilder.ToString());
 
         LogActivity("planning", "🤖 Calling AI to generate engineering plan from user stories");
+        UpdateStatus(AgentStatus.Working, "🤖 Generating engineering plan with AI");
         var response = await chat.GetChatMessageContentAsync(
             history, cancellationToken: ct);
         var structuredText = response.Content ?? "";
@@ -1318,6 +1320,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
         RecomputeWavesFromDependencies(parsedTasks);
 
         // Create GitHub issues for each task (the single source of truth)
+        UpdateStatus(AgentStatus.Working, $"📋 Creating {parsedTasks.Count} task issues from plan");
         LogActivity("planning", $"📌 Creating {parsedTasks.Count} task issues on GitHub");
         var createIssuesStepId = TaskTracker.BeginStep(Identity.Id, "pe-planning", "Create GitHub issues",
             $"Creating {parsedTasks.Count} engineering task issues on GitHub", Identity.ModelTier);
@@ -1416,7 +1419,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                       "Ready to assign work to engineers.",
             currentTask: "Engineering Planning", ct: ct);
 
-        UpdateStatus(AgentStatus.Idle, "Engineering plan complete, entering development loop");
+        UpdateStatus(AgentStatus.Working, "✅ Engineering plan created and tasks assigned");
         _planningComplete = true;
     }
 
@@ -1943,7 +1946,10 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                 .Where(t => t.Status == "Pending" && _taskManager.IsWaveEligible(t) && _taskManager.AreDependenciesMet(t) && t.Id != IntegrationTaskId && t.IssueNumber.HasValue && !IsFoundationTask(t))
                 .ToList();
 
+            UpdateStatus(AgentStatus.Working, $"📊 Scanning {assignableTasks.Count} tasks for assignment eligibility");
+
             // LLM-based semantic skill matching: single call matches all tasks to all engineers
+            UpdateStatus(AgentStatus.Working, $"🤖 Matching {assignableTasks.Count} tasks to {freeEngineers.Count} engineers");
             var llmAssignments = await MatchTasksToEngineersWithLlmAsync(assignableTasks, freeEngineers, ct);
             if (llmAssignments is not null)
             {
@@ -2050,6 +2056,9 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                 }, ct);
                 TaskTracker.CompleteStep(assignStepId);
             }
+
+            var assignedCount = _agentAssignments.Count;
+            UpdateStatus(AgentStatus.Working, $"✅ Assigned {assignedCount} tasks to engineers");
         }
         catch (Exception ex)
         {
@@ -2070,6 +2079,8 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
             if (!IsLeader())
             {
                 // ── WORKER PE: only work on tasks explicitly assigned by the leader ──
+                UpdateStatus(AgentStatus.Working, "📋 Scanning for available tasks");
+
                 // Check for pending assignments delivered via IssueAssignmentMessage
                 if (AssignmentQueue.TryDequeue(out var assignment))
                 {
@@ -2086,6 +2097,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                     Logger.LogInformation(
                         "Worker PE picking up assigned task #{IssueNumber}: {Name}",
                         assignment.IssueNumber, task.Name);
+                    UpdateStatus(AgentStatus.Working, $"📋 Selected task: {Truncate(task.Name, 40)}");
                 }
                 else
                 {
@@ -2119,6 +2131,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                                 Logger.LogInformation(
                                     "Worker PE self-claimed unassigned task #{IssueNumber}: {Name} (idle for {Loops} loops)",
                                     task.IssueNumber, task.Name, _idleLoopCount);
+                                UpdateStatus(AgentStatus.Working, $"📋 Selected task: {Truncate(task.Name, 40)}");
                                 _idleLoopCount = 0;
                             }
                             else
@@ -2129,6 +2142,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                         }
                         else
                         {
+                            UpdateStatus(AgentStatus.Working, "⏳ Waiting for task assignment");
                             Logger.LogDebug("Worker PE: no task assigned to {Name}, waiting for leader (idle {Count}/{Max})",
                                 Identity.DisplayName, _idleLoopCount, SelfClaimAfterIdleLoops);
                             return;
@@ -3550,6 +3564,8 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
             if (prNumbersToReview.Count == 0)
                 return;
 
+            UpdateStatus(AgentStatus.Working, $"🔍 Processing review queue ({prNumbersToReview.Count} PRs pending)");
+
             foreach (var prNumber in prNumbersToReview)
             {
                 if (_reviewedPrNumbers.Contains(prNumber))
@@ -3608,7 +3624,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                 }
 
                 Logger.LogInformation("SE reviewing PR #{Number}: {Title}", pr.Number, pr.Title);
-                UpdateStatus(AgentStatus.Working, $"Reviewing PR #{pr.Number}: {pr.Title}");
+                UpdateStatus(AgentStatus.Working, $"🔍 Reviewing PR #{pr.Number}: {pr.Title}");
 
                 // BUG FIX: Force-approve after max rework cycles to prevent infinite loops.
                 // Only actually force-approve if we're a required reviewer for this PR —
@@ -3820,7 +3836,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
 
             // Reset status after review loop completes
             if (prNumbersToReview.Count > 0)
-                UpdateStatus(AgentStatus.Idle, "Review cycle complete, checking tasks");
+                UpdateStatus(AgentStatus.Working, $"✅ Review round complete: {prNumbersToReview.Count} PRs processed");
         }
         catch (Exception ex)
         {
@@ -3839,6 +3855,8 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
         try
         {
             var openPRs = (await PrService.ListOpenAsync(ct)).ToAgentPRs();
+
+            UpdateStatus(AgentStatus.Working, "📊 Collecting approved PRs for integration");
 
             foreach (var pr in openPRs)
             {
@@ -3919,11 +3937,13 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                     continue;
                 }
 
+                UpdateStatus(AgentStatus.Working, $"🔄 Merging PR #{pr.Number} into main branch");
                 var result = await PrWorkflow.MergeApprovedTestedPRAsync(
                     pr.Number, "SoftwareEngineer", ct);
 
                 if (result == MergeAttemptResult.Merged)
                 {
+                    UpdateStatus(AgentStatus.Working, $"✅ Merged PR #{pr.Number} successfully");
                     Logger.LogInformation("SE merged tested PR #{Number}", pr.Number);
                     LogActivity("task", $"✅ Merged PR #{pr.Number}: {pr.Title} (code approved + tests added)");
 
@@ -3946,6 +3966,7 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
                 }
                 else if (result == MergeAttemptResult.ConflictBlocked)
                 {
+                    UpdateStatus(AgentStatus.Working, $"⚠️ Resolving merge conflict for PR #{pr.Number}");
                     Logger.LogWarning("Tested PR #{Number} has merge conflicts", pr.Number);
                     LogActivity("task", $"⚠️ Tested PR #{pr.Number} blocked by merge conflicts");
                     await TryCloseAndRecreatePRAsync(pr, ct);
@@ -5022,6 +5043,8 @@ public partial class SoftwareEngineerAgent : EngineerAgentBase
     {
         if (_taskManager.TotalCount == 0)
             return;
+
+        UpdateStatus(AgentStatus.Working, $"📊 Checking completion: {_taskManager.DoneCount}/{_taskManager.TotalCount} tasks done");
 
         // Refresh from GitHub to get latest state
         await _taskManager.LoadTasksAsync(ct);

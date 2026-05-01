@@ -11,14 +11,19 @@ public sealed class ActiveLlmCallTracker
 {
     private readonly ConcurrentDictionary<string, LlmCallInfo> _activeCalls = new();
 
-    public void NotifyCallStarted(string agentId, string modelName)
+    /// <summary>Raised when any LLM call starts or completes, enabling real-time dashboard refresh.</summary>
+    public event EventHandler<LlmCallChangedEventArgs>? LlmCallChanged;
+
+    public void NotifyCallStarted(string agentId, string modelName, string? context = null)
     {
-        _activeCalls[agentId] = new LlmCallInfo(modelName, DateTime.UtcNow);
+        _activeCalls[agentId] = new LlmCallInfo(modelName, DateTime.UtcNow, context);
+        LlmCallChanged?.Invoke(this, new LlmCallChangedEventArgs(agentId, IsStarted: true));
     }
 
     public void NotifyCallCompleted(string agentId)
     {
         _activeCalls.TryRemove(agentId, out _);
+        LlmCallChanged?.Invoke(this, new LlmCallChangedEventArgs(agentId, IsStarted: false));
     }
 
     /// <summary>
@@ -32,5 +37,9 @@ public sealed class ActiveLlmCallTracker
     /// <summary>Returns all agents with active LLM calls.</summary>
     public IReadOnlyDictionary<string, LlmCallInfo> GetAllActiveCalls() => _activeCalls;
 
-    public sealed record LlmCallInfo(string ModelName, DateTime StartedAt);
+    /// <summary>LLM call info including optional context describing what the AI is generating.</summary>
+    public sealed record LlmCallInfo(string ModelName, DateTime StartedAt, string? Context = null);
+
+    /// <summary>Event args for LLM call start/complete notifications.</summary>
+    public sealed record LlmCallChangedEventArgs(string AgentId, bool IsStarted);
 }

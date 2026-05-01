@@ -591,9 +591,10 @@ public class ArchitectAgent : AgentBase
         } // end else (multi-turn)
 
         // Self-assessment: assess and refine the architecture document
+        UpdateStatus(AgentStatus.Working, "🤖 Running architecture self-assessment");
         try { if (designStepId is not null) Core!.TaskTracker!.CompleteStep(designStepId); } catch { }
         string? assessStepId = null;
-        try { assessStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & impact classification", "Assessing and refining architecture output", Identity.ModelTier); } catch { }
+        try { assessStepId = Core!.TaskTracker!.BeginStep(Identity.Id, directive.TaskId, "Self-assessment & impact classification", "Assessing and refining architecture output", Identity.ModelTier); }catch { }
         Core!.ReasoningLog!.Log(new AgentReasoningEvent
         {
             AgentId = Identity.Id,
@@ -896,6 +897,7 @@ public class ArchitectAgent : AgentBase
                     }
                 }
 
+                UpdateStatus(AgentStatus.Working, $"✅ Posting architecture review for PR #{pr.Number}");
                 var verdict = reviewResult.Verdict;
                 var reasoning = reviewResult.Summary;
                 var riskSuffix = Core!.Config.Review.EnableRiskAssessment
@@ -1167,6 +1169,7 @@ public class ArchitectAgent : AgentBase
             var chat = kernel.GetRequiredService<IChatCompletionService>();
 
             LogActivity("review", "📋 Reading architecture doc and PR context");
+            UpdateStatus(AgentStatus.Working, $"📋 Loading architecture reference for PR #{pr.Number} review");
             var architectureDoc = await Core!.ProjectFiles.GetArchitectureDocAsync(ct);
             var pmSpec = await Core!.ProjectFiles.GetPMSpecAsync(ct);
 
@@ -1189,6 +1192,7 @@ public class ArchitectAgent : AgentBase
 
             // Read actual code files from the PR branch
             LogActivity("review", "🔍 Reading PR code for architecture review");
+            UpdateStatus(AgentStatus.Working, $"📋 Reading PR #{pr.Number} code for review");
             var codeContext = await _platform.PrWorkflow.GetPRCodeContextAsync(pr.Number, pr.HeadBranch, ct: ct);
 
             // Get actual changed file list so LLM only references real paths in inline comments
@@ -1341,6 +1345,7 @@ public class ArchitectAgent : AgentBase
             }
 
             LogActivity("review", "🤖 Calling AI for architecture alignment review");
+            UpdateStatus(AgentStatus.Working, $"🤖 Evaluating PR #{pr.Number} architecture alignment");
             var response = await chat.GetChatMessageContentAsync(
                 history, cancellationToken: ct);
 
