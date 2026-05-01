@@ -92,3 +92,8 @@ tests/Captures/
 
 # Runtime artifacts
 fake-cli-marker.txt
+
+## Node.js
+node_modules/
+dist/
+*.tsbuildinfo

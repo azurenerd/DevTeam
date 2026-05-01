@@ -1,0 +1,13 @@
+.progress-ring-container {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.progress-ring-label {
+  position: absolute;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: var(--color-text);
+}
