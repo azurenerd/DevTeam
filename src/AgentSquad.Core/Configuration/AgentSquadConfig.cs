@@ -49,6 +49,20 @@ public class ProjectConfig
     /// Use this to steer research toward specific areas, technologies, or concerns.
     /// </summary>
     public string ResearchPrompt { get; set; } = "";
+
+    /// <summary>
+    /// HTTP(S) URLs to external design input documents (SharePoint, Google Docs, etc.).
+    /// Supported formats: .docx (OpenXML), .pdf (text extraction), .html, .md, .txt.
+    /// These are downloaded and their text content is made available as design context.
+    /// </summary>
+    public List<string> DesignInputUrls { get; set; } = new();
+
+    /// <summary>
+    /// Authentication headers for downloading protected design input URLs.
+    /// Key = URL prefix (matched case-insensitively), Value = header value (e.g., "Bearer token123").
+    /// The header is sent as "Authorization: {value}" for any URL starting with the key.
+    /// </summary>
+    public Dictionary<string, string> DesignInputAuthHeaders { get; set; } = new();
 }
 
 public class ModelConfig

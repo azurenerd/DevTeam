@@ -31,6 +31,7 @@ if (!builder.Environment.IsDevelopment())
 // Core services
 builder.Services.AddInProcessMessageBus();
 builder.Services.AddSingleton<AgentSquad.Core.AI.AgentUsageTracker>();
+builder.Services.AddSingleton<AgentSquad.Core.AI.ActiveLlmCallTracker>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.RequirementsCache>();
 builder.Services.AddSingleton<AgentSquad.Core.Diagnostics.AgentChatService>();
 builder.Services.AddSemanticKernelModels();
@@ -52,6 +53,7 @@ builder.Services.AddSingleton<ProjectFileManager>(sp =>
 
 // GitHub workflows
 builder.Services.AddSingleton<ConflictDetector>();
+builder.Services.AddHttpClient<DesignInputDownloader>();
 builder.Services.AddSingleton<PullRequestWorkflow>(sp =>
 {
     var config = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AgentSquadConfig>>().Value;

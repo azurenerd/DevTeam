@@ -23,6 +23,7 @@ public class ProgramManagerAgent : AgentBase
     private readonly ModelRegistry _modelRegistry;
     private readonly AgentSpawnManager _spawnManager;
     private readonly AgentRegistry _registry;
+    private readonly DesignInputDownloader _designInputDownloader;
     private readonly AgentSquadConfig _config;
 
     private readonly Dictionary<string, AgentTracking> _trackedAgents = new();
@@ -49,6 +50,7 @@ public class ProgramManagerAgent : AgentBase
         ModelRegistry modelRegistry,
         AgentSpawnManager spawnManager,
         AgentRegistry registry,
+        DesignInputDownloader designInputDownloader,
         AgentMemoryStore memoryStore,
         IOptions<AgentSquadConfig> config,
         ILogger<ProgramManagerAgent> logger)
@@ -62,6 +64,7 @@ public class ProgramManagerAgent : AgentBase
         _modelRegistry = modelRegistry ?? throw new ArgumentNullException(nameof(modelRegistry));
         _spawnManager = spawnManager ?? throw new ArgumentNullException(nameof(spawnManager));
         _registry = registry ?? throw new ArgumentNullException(nameof(registry));
+        _designInputDownloader = designInputDownloader ?? throw new ArgumentNullException(nameof(designInputDownloader));
         _config = config?.Value ?? throw new ArgumentNullException(nameof(config));
     }
 
@@ -1976,11 +1979,23 @@ public class ProgramManagerAgent : AgentBase
     /// <summary>
     /// Read visual design reference files from the repository for inclusion in PMSpec.
     /// Returns the raw HTML content that the AI can analyze to create the Visual Design Specification.
+    /// Also fetches any external design inputs from configured URLs.
     /// </summary>
     private async Task<string?> ReadDesignReferencesForSpecAsync(CancellationToken ct)
     {
         try
         {
+            var sb = new System.Text.StringBuilder();
+
+            // 1. Fetch external design inputs (SharePoint, Google Docs, etc.)
+            var externalContext = await EnsureDesignInputsAsync(ct);
+            if (!string.IsNullOrWhiteSpace(externalContext))
+            {
+                sb.AppendLine(externalContext);
+                sb.AppendLine();
+            }
+
+            // 2. Check repo for HTML design files (existing behavior)
             var tree = await _github.GetRepositoryTreeAsync("main", ct);
             var designKeywords = new[] { "design", "mockup", "mock", "wireframe", "prototype", "concept", "reference" };
 
@@ -1995,9 +2010,6 @@ public class ProgramManagerAgent : AgentBase
                 })
                 .ToList();
 
-            if (htmlDesignFiles.Count == 0) return null;
-
-            var sb = new System.Text.StringBuilder();
             foreach (var file in htmlDesignFiles)
             {
                 var content = await _github.GetFileContentAsync(file, ct: ct);
@@ -2013,7 +2025,8 @@ public class ProgramManagerAgent : AgentBase
 
             if (sb.Length > 0)
             {
-                Logger.LogInformation("Read {Count} visual design reference files for PMSpec", htmlDesignFiles.Count);
+                var totalSources = htmlDesignFiles.Count + (string.IsNullOrWhiteSpace(externalContext) ? 0 : 1);
+                Logger.LogInformation("Read {Count} design reference source(s) for PMSpec", totalSources);
                 return sb.ToString().TrimEnd();
             }
 
@@ -2022,6 +2035,29 @@ public class ProgramManagerAgent : AgentBase
         catch (Exception ex)
         {
             Logger.LogWarning(ex, "Failed to read design reference files for PMSpec");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Downloads and extracts text from external design input URLs (SharePoint, Google Docs, etc.).
+    /// URLs are detected from the project description and from explicit DesignInputUrls config.
+    /// Downloaded content is cached in the agent workspace for subsequent runs.
+    /// </summary>
+    private async Task<string?> EnsureDesignInputsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var content = await _designInputDownloader.DownloadDesignInputsAsync(ct);
+            if (!string.IsNullOrWhiteSpace(content))
+            {
+                Logger.LogInformation("External design inputs resolved successfully");
+            }
+            return content;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogWarning(ex, "Failed to download external design inputs — continuing without them");
             return null;
         }
     }
